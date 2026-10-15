@@ -1,0 +1,148 @@
+#pragma once
+
+#include <memory>
+#include <string>
+#include <functional>
+
+#ifdef __EMSCRIPTEN__
+  #include <emscripten/emscripten.h>
+  #include <emscripten/html5.h>
+  #include <GLES3/gl3.h>
+#else
+  #include <GL/glew.h>
+  #include <GLFW/glfw3.h>
+#endif
+
+#include "GLDebug.h"
+#include "PerformanceTimer.h"
+
+struct Dimensions {
+  uint32_t width;
+  uint32_t height;
+
+  float aspect() const {return float(width)/float(height);}
+};
+
+enum class GLDataType {
+  BYTE,
+#ifndef __EMSCRIPTEN__
+  SHORT,
+#endif
+  HALF,
+  FLOAT
+};
+enum class GLDepthDataType {DEPTH16, DEPTH24, DEPTH32};
+enum class CursorMode {NORMAL, HIDDEN, FIXED};
+
+struct GLTexInfo {
+  GLint internalformat{0};
+  GLenum type{0};
+  GLenum format{0};
+};
+
+GLTexInfo dataTypeToGL(GLDataType dataType, uint8_t componentCount);
+
+class GLEnv {
+public:
+#ifdef __EMSCRIPTEN__
+  GLEnv(uint32_t w, uint32_t h, uint32_t s, const std::string& title,
+        bool fpsCounter=false, bool sync=true, bool exactPixels=false,
+        int major=3, int minor=0, bool core=false);
+#else
+  GLEnv(uint32_t w, uint32_t h, uint32_t s, const std::string& title,
+        bool fpsCounter=false, bool sync=true, bool exactPixels=false,
+        int major=4, int minor=1, bool core=false);
+#endif
+
+  ~GLEnv();
+
+#ifdef __EMSCRIPTEN__
+  void setKeyCallback(em_key_callback_func f, void *userData);
+  void setMouseCallbacks(em_mouse_callback_func p,
+                         em_mouse_callback_func bu,
+                         em_mouse_callback_func bd,
+                         em_wheel_callback_func s,
+                         em_touch_callback_func ts,
+                         em_touch_callback_func te,
+                         em_touch_callback_func tm,
+                         void *userData);
+  void setResizeCallback(em_ui_callback_func f, void *userData);
+#else
+  void setKeyCallback(GLFWkeyfun f);
+  void setKeyCallbacks(GLFWkeyfun f, GLFWcharfun c);
+  void setMouseCallbacks(GLFWcursorposfun p, GLFWmousebuttonfun b, GLFWscrollfun s);
+  void setResizeCallback(GLFWframebuffersizefun f);
+#endif
+
+  void setFpsCallback(std::function<void(double)> fpsCallback) {
+    this->fpsCallback = std::move(fpsCallback);
+  }
+
+  Dimensions getFramebufferSize() const;
+  Dimensions getWindowSize() const;
+  bool shouldClose() const;
+  void setClose();
+  void beginOfFrame();
+  void endOfFrame();
+  void setSize(int width, int height);
+
+  void setCursorMode(CursorMode mode);
+
+  std::string getGPUString();
+  std::string getOpenGlInfoString(bool includeExtensions = false);
+
+  double getFPSAccumulationInterval() const;
+  void setFPSAccumulationInterval(double newAccumulationInterval);
+  bool getFPSCounterStatus() const {return fpsCounter;}
+  void setFPSCounterStatus(bool fpsCounter);
+  double getFps() const {return currentFps;}
+  void setSync(bool sync);
+  bool getSync() const {return sync;}
+
+  static void checkGLError(const std::string& id);
+
+  void setTitle(const std::string& title);
+
+private:
+#ifndef __EMSCRIPTEN__
+  GLFWwindow* window;
+#endif
+  bool sync;
+  std::string title;
+  double currentFps{0.0};
+  bool fpsCounter;
+  std::shared_ptr<PerformanceTimer> timer = nullptr;
+
+  uint64_t accumulatedNanoseconds{0};
+  uint32_t accumulatedFrames{0};
+  double integratedFPS{0.0};
+  double accumulationInterval{1.0};
+
+  static void errorCallback(int error, const char* description);
+  double updateIntegratedFPS(std::uint64_t nanoseconds);
+
+  std::function<void(double)> fpsCallback;
+
+};
+
+/*
+ Copyright (c) 2026 Computer Graphics and Visualization Group, University of
+ Duisburg-Essen
+
+ Permission is hereby granted, free of charge, to any person obtaining a copy of
+ this software and associated documentation files (the "Software"), to deal in the
+ Software without restriction, including without limitation the rights to use, copy,
+ modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and
+ to permit persons to whom the Software is furnished to do so, subject to the following
+ conditions:
+
+ The above copyright notice and this permission notice shall be included in all copies
+ or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+ CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+ THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */

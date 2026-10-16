@@ -18,3 +18,7 @@ On this audited host the launcher selects the existing bundled interpreter; over
 ## Git workflow
 
 Use main for the stable baseline and dev for ongoing development. Current development branch: dev. Feature branches use the codex/ prefix. Do not push private volumes, screenshots, model responses or local audit artifacts. Committing and pushing require the current user authorization.
+
+## External local VLM experiments
+
+See [local VLM operations and H200 preparation](docs/LOCAL_VLM.md) and [measured development evidence](docs/LOCAL_VLM_EVIDENCE.md). This optional Codex/MCP path reuses the same native renderer and Session service; Phase 1 and the GUI remain available.

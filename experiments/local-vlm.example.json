@@ -1,0 +1,17 @@
+{
+  "harness": "codex",
+  "model": "qwen3.6:35b",
+  "endpoint": "http://127.0.0.1:11434",
+  "rendererService": "http://127.0.0.1:8765",
+  "contextSize": 16384,
+  "projectDocumentBytes": 0,
+  "timeoutSeconds": 300,
+  "taskTimeoutSeconds": 900,
+  "temperature": 0,
+  "think": false,
+  "maxOutputTokens": 1200,
+  "volumePath": "C:/replace-with-local-volume/scalar.dat",
+  "renderBudget": 4,
+  "task": "Inspect the real initial image and acquire two complementary views. Choose the next operation after inspecting each actual result. Preserve TF and crop unless the image warrants a change. Save the most informative actual frame and state uncertainties.",
+  "resultDirectory": "runtime/local-vlm/my-unique-run"
+}

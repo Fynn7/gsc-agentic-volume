@@ -32,7 +32,14 @@ def validate_scene(scene,volume):
   if scene[k]!=expected[k]: raise ValueError('Unsupported setting '+k)
  if type(scene['revision'])!=int or scene['revision']<0: raise ValueError('Bad revision')
 
+NATIVE_LOCK=threading.Lock()
+
 def render(scene,volume,directory,stop=None):
+ if not NATIVE_LOCK.acquire(blocking=False): raise ValueError('Native renderer is busy')
+ try: return _render_unlocked(scene,volume,directory,stop)
+ finally: NATIVE_LOCK.release()
+
+def _render_unlocked(scene,volume,directory,stop=None):
  validate_scene(scene,volume)
  directory=Path(directory).resolve(); directory.mkdir(parents=True,exist_ok=False)
  if sha256_file(Path(volume['rendererPath']).with_name('render.raw'))!=volume['rendererPayloadHash']: raise ValueError('Renderer payload changed')

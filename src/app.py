@@ -6,6 +6,7 @@ from urllib.parse import urlsplit,unquote
 from volume import prepare
 from renderer import render,initial_scene,validate_scene,ROOT
 from model import OllamaDriver,image_message
+from external_tools import ExternalTools,TOOLS
 RUNTIME=ROOT/'runtime'; RUNTIME.mkdir(exist_ok=True)
 FRONTEND=ROOT/'frontend'/'dist'
 
@@ -78,12 +79,15 @@ class Session:
    (self.directory/'messages.json').write_text(json.dumps(self.messages,indent=2)); self.save(); self.lock.release()
 
 sessions={}
+external_tools=ExternalTools(Session,sessions)
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,data,typ='application/json'):
   raw=data if isinstance(data,bytes) else json.dumps(data).encode()
   self.send_response(status); self.send_header('Content-Type',typ); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
  def do_GET(self):
   route=urlsplit(self.path).path
+  if route=='/api/tools': return self.send(200,TOOLS)
+  if route=='/api/service': return self.send(200,{'service':'gav-native-renderer','toolContractVersion':1})
   if route=='/api/sessions': return self.send(200,[{'id':s.id,'state':s.state} for s in sessions.values()])
   if route.startswith('/api/session/'):
    s=sessions.get(route.split('/')[-1]); return self.send(200,json.loads((s.directory/'session.json').read_text())) if s else self.send(404,{'error':'Unknown session'})
@@ -108,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
    length=int(self.headers.get('Content-Length','0'))
    if not 0<length<32768: raise ValueError('Request size invalid')
    body=json.loads(self.rfile.read(length)); route=urlsplit(self.path).path
+   if route=='/api/tools/open': return self.send(200,external_tools.open(body))
+   if route=='/api/tools/call': return self.send(200,external_tools.call(body))
    if route=='/api/start':
     if any(s.lock.locked() for s in sessions.values()): raise ValueError('Another task owns the renderer')
     if not isinstance(body.get('source'),str) or not isinstance(body.get('goal'),str) or not body['goal'].strip(): raise ValueError('Source and task required')
@@ -119,6 +125,7 @@ class Handler(BaseHTTPRequestHandler):
    s=sessions[body['id']]
    if route=='/api/stop': s.stop.set(); return self.send(202,{'state':'stop_requested'})
    if route=='/api/continue':
+    if getattr(s,'external',False): raise ValueError('Session belongs to an external agent; continue with its tools')
     if s.state not in ['paused'] or s.used>=s.budget: raise ValueError('Session cannot continue in current state')
     if any(v.lock.locked() for v in sessions.values()): raise ValueError('Renderer is busy')
     threading.Thread(target=s.run,daemon=True).start(); return self.send(202,{'state':'continuing'})

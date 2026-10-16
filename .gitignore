@@ -27,3 +27,5 @@ VirtualSampling/Raycaster/VS/*.lz4
 # Local GUI review evidence (Playwright MCP snapshots and screenshots).
 /.playwright-mcp/
 /gav-*.png
+
+repomix-output.xml

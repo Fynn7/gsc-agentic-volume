@@ -109,6 +109,12 @@ export function stopSession(id: string) {
   return postJson<{ state: string }>('/api/stop', { id })
 }
 
+export type BrowseFileResult = { cancelled: true; path?: undefined } | { cancelled: false; path: string }
+
+export function pickVolumeFile() {
+  return postJson<BrowseFileResult>('/api/browse-file', {})
+}
+
 export function continueSession(id: string) {
   return postJson<{ state: string }>('/api/continue', { id })
 }

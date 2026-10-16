@@ -9,6 +9,23 @@ from model import OllamaDriver,image_message
 RUNTIME=ROOT/'runtime'; RUNTIME.mkdir(exist_ok=True)
 FRONTEND=ROOT/'frontend'/'dist'
 
+def pick_volume_file():
+ """Open the OS-native file chooser on the harness machine and return the picked header path."""
+ try:
+  import tkinter
+  from tkinter import filedialog
+ except Exception as error:
+  raise ValueError(f'Native file browser unavailable: {error}')
+ root=None
+ try:
+  root=tkinter.Tk(); root.withdraw(); root.attributes('-topmost',True); root.update()
+  path=filedialog.askopenfilename(title='Choose local volume header',filetypes=[('Volume headers','*.dat *.nhdr *.nrrd'),('All files','*.*')])
+ finally:
+  if root is not None:
+   try: root.destroy()
+   except Exception: pass
+ return path.strip() or None
+
 class Session:
  def __init__(self,source,goal,model='qwen3.5:9b',budget=4):
   self.id=str(uuid.uuid4()); self.directory=RUNTIME/self.id; self.directory.mkdir()
@@ -96,6 +113,9 @@ class Handler(BaseHTTPRequestHandler):
     if not isinstance(body.get('source'),str) or not isinstance(body.get('goal'),str) or not body['goal'].strip(): raise ValueError('Source and task required')
     s=Session(body['source'],body['goal'],body.get('model','qwen3.5:9b')); sessions[s.id]=s
     threading.Thread(target=s.run,daemon=True).start(); return self.send(202,{'id':s.id})
+   if route=='/api/browse-file':
+    picked=pick_volume_file()
+    return self.send(200,{'cancelled':picked is None} if picked is None else {'cancelled':False,'path':picked})
    s=sessions[body['id']]
    if route=='/api/stop': s.stop.set(); return self.send(202,{'state':'stop_requested'})
    if route=='/api/continue':

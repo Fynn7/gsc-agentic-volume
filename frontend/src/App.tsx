@@ -43,6 +43,7 @@ import {
   continueSession,
   errorText,
   fetchSession,
+  pickVolumeFile,
   startSession,
   stopSession,
   type SessionData,
@@ -110,9 +111,8 @@ function App() {
   const [source, setSource] = useState('')
   const [model, setModel] = useState(DEFAULT_MODEL)
   const [draft, setDraft] = useState('')
+  const [picking, setPicking] = useState(false)
 
-  const [sourceOpen, setSourceOpen] = useState(false)
-  const [sourceDraft, setSourceDraft] = useState('')
   const [modelOpen, setModelOpen] = useState(false)
   const [modelDraft, setModelDraft] = useState('')
 
@@ -171,6 +171,22 @@ function App() {
     setZoomOpen(true)
   }, [])
 
+  const chooseSource = useCallback(async () => {
+    setPicking(true)
+    try {
+      const picked = await pickVolumeFile()
+      if (!picked.cancelled && picked.path) setSource(picked.path)
+    } catch (error: unknown) {
+      snackbar(`Could not open the file browser: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    } finally {
+      setPicking(false)
+    }
+  }, [])
+
   const handleSend = useCallback(
     (value: string) => {
       const goal = value.trim()
@@ -178,13 +194,12 @@ function App() {
       const cleanSource = source.trim()
       const cleanModel = model.trim()
       if (!cleanSource) {
-        setSourceDraft(source)
-        setSourceOpen(true)
-        snackbar('Set the local volume header path before starting.', {
+        snackbar('Choose the local volume file first.', {
           severity: 'error',
           duration: 'long',
           dismissible: true,
         })
+        void chooseSource()
         return
       }
       if (!cleanModel) {
@@ -214,7 +229,7 @@ function App() {
           })
         })
     },
-    [source, model],
+    [source, model, chooseSource],
   )
 
   const handleStop = useCallback(() => {
@@ -374,7 +389,7 @@ function App() {
                 <EmptyState
                   size="sm"
                   title="No task yet"
-                  description="Set the volume and send the first task from the composer."
+                  description="Choose the volume file and send the first task from the composer."
                 />
               )}
             </NavigationDrawer>
@@ -391,7 +406,7 @@ function App() {
                     <EmptyState
                       icon={<BrainIcon size={28} aria-hidden />}
                       title="Start an exploration task"
-                      description="Set the local volume header path and the installed vision model with the buttons under the composer, describe what to look for, then send. Every screenshot in this conversation is a real capture from the native renderer; model claims stay unverified."
+                      description="Choose the local volume file and the installed vision model with the buttons under the composer, describe what to look for, then send. Every screenshot in this conversation is a real capture from the native renderer; model claims stay unverified."
                     />
                   }
                 >
@@ -412,15 +427,14 @@ function App() {
                   onStop={stopAvailable ? handleStop : undefined}
                   leading={
                     editable ? (
-                      <Tooltip content="Set the local volume header path">
+                      <Tooltip content="Choose the local volume file">
                         <IconButton
                           variant="ghost"
                           size="sm"
-                          aria-label="Set the local volume header path"
-                          onClick={() => {
-                            setSourceDraft(source)
-                            setSourceOpen(true)
-                          }}
+                          aria-label="Choose the local volume file"
+                          disabled={picking}
+                          aria-busy={picking || undefined}
+                          onClick={() => void chooseSource()}
                         >
                           <PlusIcon aria-hidden />
                         </IconButton>
@@ -510,50 +524,6 @@ function App() {
           </EndAside>
         </div>
       </ClippedNavShell>
-
-      <Dialog
-        open={sourceOpen}
-        onOpenChange={setSourceOpen}
-        title="Volume source"
-        description="Absolute path to the local volume header on this machine. The file is read locally by the import step and never uploaded."
-        size="md"
-        feet={
-          <div className="fynns-control-cluster fynns-control-cluster--end-align">
-            <Button variant="ghost" onClick={() => setSourceOpen(false)}>
-              <CloseIcon aria-hidden />
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              disabled={!sourceDraft.trim()}
-              onClick={() => {
-                setSource(sourceDraft.trim())
-                setSourceOpen(false)
-              }}
-            >
-              <CheckIcon aria-hidden />
-              Apply
-            </Button>
-          </div>
-        }
-      >
-        <FieldStack>
-          <FieldBlock
-            label="Local volume header path"
-            htmlFor="gav-volume-source"
-            description="For example D:\data\volume.mhd or D:\data\volume.dat."
-          >
-            <Input
-              id="gav-volume-source"
-              value={sourceDraft}
-              onChange={(event) => setSourceDraft(event.target.value)}
-              placeholder="D:\data\volume.mhd"
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </FieldBlock>
-        </FieldStack>
-      </Dialog>
 
       <Dialog
         open={modelOpen}

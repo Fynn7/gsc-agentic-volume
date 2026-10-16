@@ -13,7 +13,7 @@ Open http://127.0.0.1:8765. Set the local volume header path (QVis .dat, TU Wien
 
 Ported renderer license: VirtualSampling/LICENSE. See docs/PORTING_MAP.md for attribution and distribution limitations. Runtime data and private audit evidence stay local and gitignored.
 
-On this audited host the launcher selects the existing bundled interpreter; override with `-Python <absolute python.exe>`. Default PATH Python lacks NumPy. No installation is performed. The current GUI imports via a local header path; a native file picker is pending.
+On this audited host the launcher selects the existing bundled interpreter; override with `-Python <absolute python.exe>`. Default PATH Python lacks NumPy. No installation is performed. The current GUI picks the volume through the OS-native file browser (composer `+` entry), which requires the harness itself to be running since the dialog opens on its machine.
 
 ## Git workflow
 

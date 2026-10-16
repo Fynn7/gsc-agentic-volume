@@ -177,11 +177,14 @@ function App() {
       const picked = await pickVolumeFile()
       if (!picked.cancelled && picked.path) setSource(picked.path)
     } catch (error: unknown) {
-      snackbar(`Could not open the file browser: ${errorText(error)}`, {
-        severity: 'error',
-        duration: 'long',
-        dismissible: true,
-      })
+      snackbar(
+        `Could not open the file browser: ${errorText(error)}. The picker runs in the local harness — start it with scripts/dev.ps1 and retry.`,
+        {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        },
+      )
     } finally {
       setPicking(false)
     }

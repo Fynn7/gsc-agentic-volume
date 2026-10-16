@@ -10,7 +10,7 @@ Source root: `D:\fynns_local_ws\gsc-live-preview`, frozen HEAD in BASELINE_FREEZ
 | Binary DAT protocol tests | Adapted test_tuwien_reader.py against new numeric importer | Header exclusion, x-fastest layout, invalid dimensions, truncation, budget |
 | Raycaster / Utils / VS sources, shaders, library headers | VirtualSampling/; unchanged math except new dumpstate GSC diagnostic | VS 2026/v145, Windows SDK, bundled static GL/GLFW/GLEW; actual build logs |
 | Native runner/verification concepts | src/renderer.py, fresh implementation | Native command markers, process exit/timeout, actual decoded PNG, SHA-256 and actual TF/crop/camera readback |
-| No old agent loop to port | src/model.py, src/app.py, src/index.html | Python stdlib native Ollama HTTP; no AI framework, provider adapter or Node runtime dependency |
+| No old agent loop to port | src/model.py, src/app.py; GUI replaced by frontend/ (React 19 + Vite + @fynns/ui) | Python stdlib native Ollama HTTP; no AI framework or provider adapter in the harness; the frontend is a build-time bundle served read-only by app.py |
 
 ## Numeric and scene contracts
 
@@ -26,4 +26,4 @@ Renderer MIT license is retained verbatim at VirtualSampling/LICENSE (University
 
 No root license was found for the original project's own Python/application code. Local copying/adaptation is explicitly authorized by this user's request; no public redistribution license is inferred. Public distribution clearance of project-owned files, bundled binary dependencies and datasets remains UNKNOWN and must precede Phase 4 distribution. Existing bundled dataset files are retained for native startup compatibility, excluded from new Git tracking, and never uploaded. Their redistribution rights are UNKNOWN; replacing eager built-in loading with a tested asset migration is backlog work. This is not a barrier to the authorized private Phase 1 local execution.
 
-No npm installation or provider SDK is used. Development Python is explicitly configured; final interpreter/native dependency packaging is Phase 4, not achieved here.
+No provider SDK is used. The React frontend build uses npm (Vite, React, `@fynns/ui` from the sibling core checkout); the Python harness has no npm runtime dependency. Development Python is explicitly configured; final interpreter/native dependency packaging is Phase 4, not achieved here.

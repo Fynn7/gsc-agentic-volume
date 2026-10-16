@@ -1,0 +1,37 @@
+/*
+ * Chat protected-width floor for the shell's crowd detection: the composer's
+ * 20rem form minimum plus the FillColumn dialog-inset on both sides. With this
+ * set on the app host, ClippedNavShell closes the navigation track before the
+ * chat column (composer action row) can be compressed or covered.
+ */
+.gav-shell {
+  --fynns-layout-main-min-width: 23rem;
+}
+
+/*
+ * Consumer-owned reset for the zoomable evidence figure. Layout/affordance
+ * only — colors, rings and typography stay core-owned through tokens.
+ */
+.gav-media-zoom {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: zoom-in;
+}
+
+.gav-media-zoom:focus-visible {
+  outline: var(--fynns-focus-ring-width) solid var(--fynns-color-focus);
+  outline-offset: var(--fynns-focus-ring-offset-control);
+}
+
+.gav-media-zoom > img,
+.gav-zoom-image {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}

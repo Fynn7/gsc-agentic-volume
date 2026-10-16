@@ -20,3 +20,10 @@ VirtualSampling/Raycaster/VS/*.lz4
 /audit/
 .env.*
 !.env.example
+
+# @fynn7/ui-design-core update-check cache (install-as-npm)
+.fynns-ui-update-check.json
+
+# Local GUI review evidence (Playwright MCP snapshots and screenshots).
+/.playwright-mcp/
+/gav-*.png

@@ -7,6 +7,7 @@ from volume import prepare
 from renderer import render,initial_scene,validate_scene,ROOT
 from model import OllamaDriver,image_message
 RUNTIME=ROOT/'runtime'; RUNTIME.mkdir(exist_ok=True)
+FRONTEND=ROOT/'frontend'/'dist'
 
 class Session:
  def __init__(self,source,goal,model='qwen3.5:9b',budget=4):
@@ -66,15 +67,22 @@ class Handler(BaseHTTPRequestHandler):
   self.send_response(status); self.send_header('Content-Type',typ); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
  def do_GET(self):
   route=urlsplit(self.path).path
-  if route=='/': return self.send(200,(ROOT/'src/index.html').read_bytes(),'text/html; charset=utf-8')
   if route=='/api/sessions': return self.send(200,[{'id':s.id,'state':s.state} for s in sessions.values()])
   if route.startswith('/api/session/'):
    s=sessions.get(route.split('/')[-1]); return self.send(200,json.loads((s.directory/'session.json').read_text())) if s else self.send(404,{'error':'Unknown session'})
+  if route.startswith('/api/'): return self.send(404,{'error':'Unknown route'})
   if route.startswith('/artifact/'):
    p=(RUNTIME/unquote(route.removeprefix('/artifact/'))).resolve()
    if RUNTIME.resolve() not in p.parents or not p.is_file(): return self.send(404,{'error':'Unknown artifact'})
    return self.send(200,p.read_bytes(),mimetypes.guess_type(p)[0] or 'application/octet-stream')
-  self.send(404,{'error':'Unknown route'})
+  if route=='/':
+   p=FRONTEND/'index.html'
+   if not p.is_file(): return self.send(503,{'error':'Frontend build missing; run npm run build in frontend/'})
+   return self.send(200,p.read_bytes(),'text/html; charset=utf-8')
+  # Static assets stay inside the built frontend directory; unknown routes never fall back to HTML.
+  p=(FRONTEND/unquote(route.lstrip('/'))).resolve()
+  if FRONTEND.resolve() not in p.parents or not p.is_file(): return self.send(404,{'error':'Unknown route'})
+  self.send(200,p.read_bytes(),mimetypes.guess_type(p)[0] or 'application/octet-stream')
  def do_POST(self):
   # Loopback only; reject browser cross-origin mutations and DNS rebinding.
   if self.headers.get('Host') not in [f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}']: return self.send(403,{'error':'Invalid host'})

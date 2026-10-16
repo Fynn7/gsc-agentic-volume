@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev-with-backend.mjs",
+    "dev:vite": "vite",
+    "dev:backend": "node scripts/dev-with-backend.mjs --backend-only",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",

@@ -1,3 +1,5 @@
+> **2026-10-17 incident update: Desktop experiment launch is suspended.** Global configuration installation is retired. The former launch instructions below are historical and must not be used as an active workflow. See [configuration/protocol root cause and repair](CODEX_DESKTOP_INCIDENT.md). No new Desktop acceptance is claimed.
+
 # Codex Desktop local VLM workflow
 
 Formal harness: **Codex Desktop**. No automatic fallback. The Worker prepares and

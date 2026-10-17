@@ -1,3 +1,5 @@
+> Desktop experiment launch is currently suspended: global configuration installation has been retired. See [the incident analysis and repair](docs/CODEX_DESKTOP_INCIDENT.md) before using earlier Desktop instructions. Historical CLI evidence remains valid with its original scope.
+
 # Agentic Volume Visualization
 
 Independent local Windows rebuild. Phase 0 evidence lives in docs/; Phase 1 feedback evidence is recorded in docs/PHASE1_EVIDENCE.md; full product delivery is incomplete. No semantic success or product completion is claimed.

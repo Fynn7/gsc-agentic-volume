@@ -1,3 +1,5 @@
+> **2026-10-17 incident update: Desktop experiment launch is suspended.** Global configuration installation is retired. The former launch instructions below are historical and must not be used as an active workflow. See [configuration/protocol root cause and repair](CODEX_DESKTOP_INCIDENT.md). No new Desktop acceptance is claimed.
+
 > Current formal harness: Codex Desktop. Use [CODEX_DESKTOP.md](CODEX_DESKTOP.md) for the human-run entry. The CLI commands below document the earlier development route; a Worker must not invoke a nested Codex harness. Desktop acceptance remains pending human execution.
 
 # Local VLM experiments with the native renderer

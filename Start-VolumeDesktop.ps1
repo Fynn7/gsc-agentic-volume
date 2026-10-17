@@ -24,6 +24,9 @@ if ($Collect) {
   return
 }
 if ($Restore) { & $Python -B $support restore; if ($LASTEXITCODE) { throw 'Restore failed' }; return }
+if (-not ($Stop -or $PrepareOnly -or $ServicesOnly)) {
+  throw 'Desktop experiment launch is suspended: global config installation is retired and isolated Desktop startup is not yet verified. Daily Codex configuration was not changed. See docs/CODEX_DESKTOP_INCIDENT.md.'
+}
 $activeFile=Join-Path $repoDir 'runtime\desktop\active.json'
 if ($Stop) {
   if (Test-Path -LiteralPath $activeFile) {
@@ -76,12 +79,4 @@ for ($attempt=0;$attempt -lt 80;$attempt++) {
 }
 if (-not $ready) { throw ('Support service failed. Read '+(Join-Path $runDir 'support-stderr.log')) }
 if ($status.resultDirectory -ne $activeConfig.resultDirectory) { throw 'Recording port belongs to a different run; user config was not installed' }
-if ($ServicesOnly) { Write-Host 'Passive services ready. User config unchanged; no Codex or model task started.'; return }
-# USER RUNS THIS AFTER ENDING THE WORKER AND FULLY QUITTING DESKTOP.
-& $Python -B $support install
-if ($LASTEXITCODE) { throw 'User configuration installation failed; backup/candidate remain in run directory' }
-Write-Host ('Configured model: '+$activeConfig.model+'; route: '+$activeConfig.recordingProxy+' -> '+$activeConfig.endpoint)
-Write-Host 'Open a NEW Codex Desktop chat in runtime\desktop\workspace. Choose Local VLM: qwen3.6:35b.'
-Write-Host 'First prompt: experiments\desktop-prompts\00-check.txt; then 01-parameters.txt and 02-feedback.txt.'
-Write-Host 'Desktop model selection, MCP image display and task execution require your manual acceptance.'
-if (-not $NoOpen) { Start-Process explorer.exe -ArgumentList 'shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App' }
+Write-Host 'Passive services ready. User config unchanged; no Codex or model task started. Automatic Desktop launch remains suspended.'

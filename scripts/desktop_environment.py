@@ -18,6 +18,7 @@ from run_local_agent import InferenceRecorder, http, monitor
 ROOT = Path(__file__).resolve().parents[1]
 HOME_CONFIG = Path.home()/'.codex'/'config.toml'
 ACTIVE = ROOT/'runtime/desktop/active.json'
+VOLATILE_CONFIG_KEYS = frozenset({'mcp_servers.node_repl.env.SKY_CUA_NATIVE_PIPE_DIRECTORY'})
 
 
 def write_json(path, value):
@@ -26,6 +27,49 @@ def write_json(path, value):
 
 
 def digest(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def flatten(value, prefix=''):
+    result={}
+    for key, item in value.items():
+        name=prefix+'.'+key if prefix else key
+        if isinstance(item,dict): result.update(flatten(item,name))
+        else: result[name]=item
+    return result
+
+
+def changed_config_keys(first, second):
+    a=flatten(tomllib.loads(first.decode('utf-8-sig')))
+    b=flatten(tomllib.loads(second.decode('utf-8-sig')))
+    return sorted(key for key in set(a)|set(b) if (key in a)!=(key in b) or a.get(key)!=b.get(key))
+
+
+def close_installation(pointer, directory, meta, status, differences=()):
+    record={'time':time.time(),'status':status,'currentConfigSha256':digest(HOME_CONFIG) if HOME_CONFIG.exists() else None,'changedKeysFromOriginal':list(differences),'pointer':pointer}
+    write_json(directory/'installation-closed.json',record)
+    meta.update(installed=False,restoration=record)
+    write_json(directory/'preparation.json',meta)
+    (ACTIVE.parent/'installed.json').unlink()
+
+
+def reconcile_manual_restore():
+    """Clear stale bookkeeping only; never writes a user configuration."""
+    path=ACTIVE.parent/'installed.json'
+    if not path.exists(): return True
+    pointer=json.loads(path.read_text());directory=Path(pointer['directory'])
+    meta=json.loads((directory/'preparation.json').read_text())
+    backup=directory/'user-config.original.toml'
+    expected=meta['originalConfigSha256']
+    if (expected is not None and digest(backup)!=expected) or (expected is None and backup.read_bytes()!=b''):
+        raise ValueError('Original backup hash mismatch; no changes made')
+    if not HOME_CONFIG.exists():
+        if expected is not None:return False
+        close_installation(pointer,directory,meta,'manual-restoration-reconciled-without-config-write');return True
+    differences=changed_config_keys(backup.read_bytes(),HOME_CONFIG.read_bytes())
+    # Only allow the known per-launch pipe value to differ, never another MCP key.
+    if not set(differences)<=VOLATILE_CONFIG_KEYS: return False
+    close_installation(pointer,directory,meta,'manual-restoration-reconciled-without-config-write',differences)
+    return True
 
 
 def patch_toml(text, edits):
@@ -62,7 +106,8 @@ def catalog(config, directory):
                  input_modalities=['text','image'],supports_search_tool=False,supports_image_detail_original=False,
                  visibility='list',supported_in_api=True,priority=0,upgrade=None,
                  experimental_supported_tools=[],additional_speed_tiers=[],service_tiers=[],
-                 node_repl_disabled=True,supports_reasoning_effort_updates=False)
+                 node_repl_disabled=True,supports_reasoning_effort_updates=False,
+                 use_responses_lite=False)
     for key in ['tool_mode','multi_agent_version','multi_agent_reasoning_effort','comp_hash','availability_nux','available_access_programs']:
         model.pop(key,None)
     # Keep nullable/structured policy fields shaped like this installed catalog.
@@ -76,6 +121,7 @@ def catalog(config, directory):
 
 
 def prepare(template, volume=None):
+    if not reconcile_manual_restore(): raise ValueError('Unresolved legacy global installation. Inspect configuration differences before preparing another run.')
     config=json.loads(Path(template).read_text(encoding='utf-8-sig'))
     if config.get('formalHarness')!='Codex Desktop': raise ValueError('Only Codex Desktop is allowed')
     if ':cloud' in config['model']: raise ValueError('Cloud model prohibited')
@@ -90,9 +136,11 @@ def prepare(template, volume=None):
     config['resultDirectory']=str(directory); config['python']=sys.executable
     (ACTIVE.parent/'workspace').mkdir(parents=True,exist_ok=True)
     (directory/'gui').mkdir()
+    desktop_home=directory/'desktop-home';desktop_home.mkdir()
+    config['desktopHome']=str(desktop_home)
+    config['desktopIsolation']='candidate only; not verified in Desktop; automatic GUI launch disabled'
     write_json(directory/'config.json',config)
-    original=HOME_CONFIG.read_text(encoding='utf-8-sig') if HOME_CONFIG.exists() else ''
-    parsed=tomllib.loads(original)
+    # Start from an EMPTY config. Do not copy daily auth, notifications, apps or MCPs.
     edits={'':{'model':config['model'],'model_provider':'volume_local','model_catalog_json':str(catalog(config,directory)),
                'model_context_window':config['contextSize'],'model_reasoning_effort':'none',
                'project_doc_max_bytes':0,'web_search':'disabled','service_tier':'default','approvals_reviewer':'user'},
@@ -101,10 +149,9 @@ def prepare(template, volume=None):
                'wire_api':'responses','requires_openai_auth':False,'stream_idle_timeout_ms':config['timeoutSeconds']*1000,'request_max_retries':0,'stream_max_retries':0},
            'mcp_servers.volume_renderer':{'enabled':True,'command':sys.executable,'args':['-B',str(ROOT/'scripts/renderer_mcp.py'),'--desktop-config',str(directory/'config.json')],
                'tool_timeout_sec':config['toolTimeoutSeconds'],'startup_timeout_sec':30,'default_tools_approval_mode':'approve'}}
-    for name in parsed.get('mcp_servers',{}):
-        if name!='volume_renderer': edits['mcp_servers.'+name]={'enabled':False}
-    candidate=patch_toml(original,edits)
+    candidate=patch_toml('',edits)
     (directory/'codex-desktop.config.toml').write_text(candidate,encoding='utf-8')
+    (desktop_home/'config.toml').write_text(candidate,encoding='utf-8')
     write_json(directory/'preparation.json',{'originalConfigSha256':digest(HOME_CONFIG) if HOME_CONFIG.exists() else None,'prepared':time.time(),'installed':False,'desktopAcceptance':'pending human verification'})
     write_json(ACTIVE,config)
     (ACTIVE.parent/'LATEST.txt').write_text(str(directory),encoding='utf-8')
@@ -113,25 +160,20 @@ def prepare(template, volume=None):
 
 
 def install(config):
-    directory=Path(config['resultDirectory']); meta=json.loads((directory/'preparation.json').read_text())
-    current=digest(HOME_CONFIG) if HOME_CONFIG.exists() else None
-    if current!=meta['originalConfigSha256']: raise ValueError('User config changed after preparation; prepare again before installing')
-    backup=directory/'user-config.original.toml'
-    backup.write_bytes(HOME_CONFIG.read_bytes() if HOME_CONFIG.exists() else b'')
-    candidate=directory/'codex-desktop.config.toml'; tomllib.loads(candidate.read_text(encoding='utf-8'))
-    HOME_CONFIG.write_bytes(candidate.read_bytes())
-    meta.update(installed=True,installedSha256=digest(HOME_CONFIG),originalExisted=current is not None)
-    write_json(directory/'preparation.json',meta)
-    write_json(ACTIVE.parent/'installed.json',{'directory':str(directory)})
+    raise ValueError('Global Codex config installation is retired. Desktop isolation must be verified before any GUI experiment. Use prepare/services-only for support work.')
 
 
 def restore():
+    if not (ACTIVE.parent/'installed.json').exists():
+        print('No legacy installation is pending. User configuration unchanged.');return
+    if reconcile_manual_restore():
+        print('Manual restoration recognized; stale installation state cleared. User configuration unchanged.');return
     pointer=json.loads((ACTIVE.parent/'installed.json').read_text()); directory=Path(pointer['directory'])
     meta=json.loads((directory/'preparation.json').read_text())
     if digest(HOME_CONFIG)!=meta['installedSha256']: raise ValueError('Config changed after installation; compare backup manually: '+str(directory/'user-config.original.toml'))
     if meta['originalExisted']: HOME_CONFIG.write_bytes((directory/'user-config.original.toml').read_bytes())
     else: HOME_CONFIG.unlink()
-    (ACTIVE.parent/'installed.json').unlink()
+    close_installation(pointer,directory,meta,'restored-exact-legacy-installation')
     print('Original user config restored. Restart Codex Desktop.')
 
 

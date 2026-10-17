@@ -21,6 +21,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from agent_console import ConsoleTrace
 
 
 def http(base, path, body=None, timeout=120):
@@ -116,6 +118,8 @@ def monitor(stop, directory, endpoint):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--show-images', action='store_true', help='print a terminal thumbnail for every real PNG')
+    parser.add_argument('--open-images', action='store_true', help='open every real PNG in the system image viewer')
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding='utf-8-sig'))
     run_started=time.time()
@@ -132,6 +136,7 @@ def main():
     session = http(service, '/api/tools/open', {'source': config['volumePath'], 'goal': config['task'], 'model': config['model'], 'budget': config['renderBudget']})
     (directory / 'initial.json').write_text(json.dumps(session, indent=2))
     print(json.dumps({'event': 'session_opened', 'id': session['id'], 'directory': str(directory)}), flush=True)
+    trace = ConsoleTrace(directory, ROOT / 'runtime' / session['id'], show_images=args.show_images, open_images=args.open_images)
     recorder = InferenceRecorder(endpoint, directory / 'http', config)
     server = ThreadingHTTPServer(('127.0.0.1', 0), recorder.handler())
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -174,6 +179,7 @@ def main():
     manifest['harnessVersion']=subprocess.check_output([executable,'--version'],env=env,text=True,creationflags=subprocess.CREATE_NO_WINDOW).strip()
     manifest['sourceHashes']={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [ROOT/'src/app.py',ROOT/'src/renderer.py',ROOT/'src/volume.py',ROOT/'src/external_tools.py',ROOT/'scripts/renderer_mcp.py',ROOT/'scripts/run_local_agent.py']}
     (directory/'manifest.json').write_text(json.dumps(manifest,indent=2))
+    trace.start()
     try:
         with (directory/'harness.jsonl').open('wb') as stdout, (directory/'harness-stderr.log').open('wb') as stderr:
             process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -192,7 +198,9 @@ def main():
         (directory/'session.json').write_text(json.dumps(state,indent=2))
         manifest['state']=state['state']
         (directory/'manifest.json').write_text(json.dumps(manifest,indent=2))
-        print(json.dumps(manifest),flush=True)
+        trace.stop()
+        trace.poll_once()
+        trace.summary(manifest)
 
 
 if __name__ == '__main__':

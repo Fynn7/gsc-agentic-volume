@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory=$true)][string]$Config,
     [string]$Python=$env:GAV_PYTHON,
-    [switch]$StartOllama
+    [switch]$StartOllama,
+    [switch]$ShowImages,
+    [switch]$OpenImages
 )
 $ErrorActionPreference='Stop'
 $repoRoot=Split-Path $PSScriptRoot -Parent
@@ -54,6 +56,9 @@ catch {
 }
 if ($identity.service -ne 'gav-native-renderer') {throw 'The renderer URL does not identify this application. Check port conflicts.'}
 Push-Location $repoRoot
-try {& $Python -B scripts/run_local_agent.py --config $configPath; $taskExit=$LASTEXITCODE}
+$traceArgs=@()
+if ($ShowImages) {$traceArgs+='--show-images'}
+if ($OpenImages) {$traceArgs+='--open-images'}
+try {& $Python -B scripts/run_local_agent.py --config $configPath @traceArgs; $taskExit=$LASTEXITCODE}
 finally {Pop-Location}
 exit $taskExit

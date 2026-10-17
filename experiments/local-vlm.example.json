@@ -13,5 +13,5 @@
   "volumePath": "C:/replace-with-local-volume/scalar.dat",
   "renderBudget": 4,
   "task": "Inspect the real initial image and acquire two complementary views. Choose the next operation after inspecting each actual result. Preserve TF and crop unless the image warrants a change. Save the most informative actual frame and state uncertainties.",
-  "resultDirectory": "runtime/local-vlm/my-unique-run"
+  "resultDirectory": "runtime/local-vlm/experiment"
 }

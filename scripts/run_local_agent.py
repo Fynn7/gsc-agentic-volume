@@ -14,15 +14,27 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from agent_console import ConsoleTrace
+from run_lifecycle import (ConfigError, ReservationError, RunConflictError, RunLock, TASK_FIELDS,
+                           reserve_directory, resolve_run_base, task_key, validate_config)
+
+# One lock per logical task, shared by independent launcher processes.
+LOCK_DIRECTORY = ROOT / 'runtime' / 'locks'
+PROVENANCE_SOURCES = [ROOT / 'src/app.py', ROOT / 'src/renderer.py', ROOT / 'src/volume.py',
+                      ROOT / 'src/external_tools.py', ROOT / 'scripts/renderer_mcp.py',
+                      ROOT / 'scripts/run_local_agent.py', ROOT / 'scripts/run_lifecycle.py']
+
+
+def write_json(path, data):
+    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 
 def http(base, path, body=None, timeout=120):
@@ -115,28 +127,86 @@ def monitor(stop, directory, endpoint):
             output.write(json.dumps(item) + '\n'); output.flush(); stop.wait(3)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--show-images', action='store_true', help='print a terminal thumbnail for every real PNG')
-    parser.add_argument('--open-images', action='store_true', help='open every real PNG in the system image viewer')
-    args = parser.parse_args()
-    config = json.loads(Path(args.config).read_text(encoding='utf-8-sig'))
-    run_started=time.time()
-    if ':cloud' in config['model']: raise ValueError('Cloud model prohibited')
+def load_config(path):
+    """Read the original config file bytes and parse them; never writes to it."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as error:
+        raise ConfigError('Cannot read configuration file %s: %s' % (path, error)) from error
+    try:
+        config = json.loads(raw.decode('utf-8-sig'))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ConfigError('Configuration %s is not valid JSON: %s' % (path, error)) from error
+    return raw, config
+
+
+class RunContext:
+    """A reserved, provenance-complete run produced by prepare_run and used by execute."""
+    __slots__ = ('config', 'directory', 'run_id', 'source', 'record', 'lock')
+
+    def __init__(self, config, directory, run_id, source, record, lock):
+        self.config = config; self.directory = directory; self.run_id = run_id
+        self.source = source; self.record = record; self.lock = lock
+
+
+def prepare_run(config, config_path, raw):
+    """Validate, take the task lock and atomically reserve a fresh run directory.
+
+    Makes no model request. ConfigError / RunConflictError / ReservationError are
+    raised before any directory exists, so a rejected launch leaves no evidence
+    behind and never touches a previous experiment.
+    """
+    validate_config(config)
+    source = Path(config_path).resolve()
+    key = task_key(config)
+    lock = RunLock(key, LOCK_DIRECTORY)
+    lock.acquire({'pid': os.getpid(), 'taskKey': key, 'configSource': str(source),
+                  'logicalTask': {field: config.get(field) for field in TASK_FIELDS},
+                  'phase': 'preflight', 'mode': 'new-experiment', 'startedAt': time.time()})
+    try:
+        configured = Path(config['resultDirectory']).resolve()
+        base, adjusted = resolve_run_base(configured)
+        if adjusted:
+            print(json.dumps({'event': 'run_base_adjusted', 'configuredResultDirectory': str(configured),
+                              'resultBase': str(base),
+                              'reason': 'configured path already holds experiment evidence; never written into'}),
+                  flush=True)
+        directory, run_id = reserve_directory(base)
+        effective = dict(config)
+        effective['resultDirectory'] = str(directory)
+        record = {'runId': run_id, 'mode': 'new-experiment', 'status': 'running',
+                  'pid': os.getpid(), 'taskKey': key, 'directory': str(directory),
+                  'resultBase': str(base), 'resultBaseAdjusted': adjusted,
+                  'configuredResultDirectory': str(configured),
+                  'configSource': str(source),
+                  'configSha256': hashlib.sha256(raw).hexdigest(),
+                  'originalResultDirectory': config.get('resultDirectory'), 'startedAt': time.time(),
+                  'resume': 'not implemented: every invocation is a new experiment, never a resumed one'}
+        write_json(directory / 'run.json', record)
+        (directory / 'config.source.json').write_bytes(raw)   # exact original config bytes, preserved
+        write_json(directory / 'config.json', effective)      # effective config actually used this run
+        (base / 'LATEST.txt').write_text(str(directory), encoding='utf-8')
+        lock.update(directory=str(directory), runId=run_id, phase='reserved')
+        return RunContext(effective, directory, run_id, source, record, lock)
+    except Exception:
+        lock.release()
+        raise
+
+
+def execute(context, show_images=False, open_images=False):
+    config = context.config; directory = context.directory
     endpoint = config['endpoint'].rstrip('/'); service = config['rendererService'].rstrip('/')
-    if urlsplit(service).hostname not in ('127.0.0.1', 'localhost'): raise ValueError('Renderer service must be local')
-    directory = Path(config['resultDirectory']).resolve(); directory.mkdir(parents=True, exist_ok=False)
-    (directory / 'config.json').write_text(json.dumps(config, indent=2))
+    run_started = time.time()
     inventory = {'version': http(endpoint, '/api/version'), 'tags': http(endpoint, '/api/tags'), 'show': http(endpoint, '/api/show', {'model': config['model']})}
     if 'vision' not in inventory['show'].get('capabilities', []) or inventory['show'].get('remote_host'): raise ValueError('Requested model must be an installed local VLM')
-    (directory / 'model.json').write_text(json.dumps(inventory, indent=2))
+    write_json(directory / 'model.json', inventory)
     identity = http(service, '/api/service')
     if identity.get('service') != 'gav-native-renderer': raise ValueError('Wrong renderer service')
     session = http(service, '/api/tools/open', {'source': config['volumePath'], 'goal': config['task'], 'model': config['model'], 'budget': config['renderBudget']})
-    (directory / 'initial.json').write_text(json.dumps(session, indent=2))
-    print(json.dumps({'event': 'session_opened', 'id': session['id'], 'directory': str(directory)}), flush=True)
-    trace = ConsoleTrace(directory, ROOT / 'runtime' / session['id'], show_images=args.show_images, open_images=args.open_images)
+    write_json(directory / 'initial.json', session)
+    context.lock.update(phase='inference', sessionId=session['id'])
+    print(json.dumps({'event': 'session_opened', 'runId': context.run_id, 'id': session['id'], 'directory': str(directory)}), flush=True)
+    trace = ConsoleTrace(directory, ROOT / 'runtime' / session['id'], show_images=show_images, open_images=open_images)
     recorder = InferenceRecorder(endpoint, directory / 'http', config)
     server = ThreadingHTTPServer(('127.0.0.1', 0), recorder.handler())
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -175,15 +245,16 @@ def main():
                      'model_providers.local_qwen.stream_idle_timeout_ms': int(config['timeoutSeconds'] * 1000), 'model_providers.local_qwen.request_max_retries': 0, 'model_providers.local_qwen.stream_max_retries': 0}
         for key, value in overrides.items(): command += ['-c', key + '=' + json.dumps(value)]
     else: raise ValueError('Only the validated Codex route is implemented; alternate harnesses require a real compatibility diagnosis')
-    manifest = {'harness':harness,'command':command,'runStarted':run_started,'started':time.time(),'sessionId':session['id'],'rendererService':identity,'taskSuccess':'unverified','protocolTranslation':False,'inferenceOverrides':{k:config.get(k) for k in ['temperature','think','maxOutputTokens']}}
+    manifest = {'harness':harness,'command':command,'runStarted':run_started,'started':time.time(),'sessionId':session['id'],'rendererService':identity,'taskSuccess':'unverified','protocolTranslation':False,'runId':context.run_id,'resultDirectory':str(directory),'resultBase':context.record['resultBase'],'configSource':str(context.source),'configSha256':context.record['configSha256'],'mode':'new-experiment','inferenceOverrides':{k:config.get(k) for k in ['temperature','think','maxOutputTokens']}}
     manifest['harnessVersion']=subprocess.check_output([executable,'--version'],env=env,text=True,creationflags=subprocess.CREATE_NO_WINDOW).strip()
-    manifest['sourceHashes']={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [ROOT/'src/app.py',ROOT/'src/renderer.py',ROOT/'src/volume.py',ROOT/'src/external_tools.py',ROOT/'scripts/renderer_mcp.py',ROOT/'scripts/run_local_agent.py']}
-    (directory/'manifest.json').write_text(json.dumps(manifest,indent=2))
+    manifest['sourceHashes']={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in PROVENANCE_SOURCES}
+    write_json(directory/'manifest.json', manifest)
     trace.start()
     try:
         with (directory/'harness.jsonl').open('wb') as stdout, (directory/'harness-stderr.log').open('wb') as stderr:
             process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW)
             manifest['pid']=process.pid
+            context.lock.update(harnessPid=process.pid, phase='harness-running')
             try: manifest['exitCode']=process.wait(timeout=config['taskTimeoutSeconds'])
             except subprocess.TimeoutExpired:
                 manifest['timedOut']=True
@@ -194,24 +265,87 @@ def main():
         manifest.update(ended=time.time(),httpRequests=recorder.count)
         manifest['seconds']=manifest['ended']-manifest['started']
         manifest['totalSeconds']=manifest['ended']-manifest['runStarted']
-        state=http(service,'/api/session/'+session['id'])
-        (directory/'session.json').write_text(json.dumps(state,indent=2))
+        try: state=http(service,'/api/session/'+session['id'])
+        except Exception as error: state={'id':session['id'],'state':'unavailable','error':str(error)}
+        write_json(directory/'session.json', state)
         manifest['state']=state['state']
-        (directory/'manifest.json').write_text(json.dumps(manifest,indent=2))
+        write_json(directory/'manifest.json', manifest)
         trace.stop()
         trace.poll_once()
         trace.summary(manifest)
+        context.record.update(status='finished', ended=manifest['ended'], exitCode=manifest.get('exitCode'),
+                              timedOut=bool(manifest.get('timedOut')), sessionId=session['id'])
+        write_json(directory/'run.json', context.record)
+    return exit_code_from_manifest(manifest)
+
+
+def exit_code_from_manifest(manifest):
+    """Propagate the harness result: 124 on timeout, otherwise its non-zero code."""
+    if manifest.get('timedOut'): return 124
+    code = manifest.get('exitCode')
+    return int(code) if isinstance(code, int) and code != 0 else 0
+
+
+def report_failure(stage, error, debug=False, response=None, directory=None):
+    """Concise, traceback-free startup diagnostic; the full detail stays on disk."""
+    if response is None and isinstance(error, urllib.error.HTTPError):
+        response = error.read().decode(errors='replace')
+    summary = {'status': 'failed', 'stage': stage, 'error': str(error), 'time': time.time(), 'taskSuccess': 'unverified'}
+    if response: summary['response'] = response
+    detail = str(error).strip()
+    if response: detail += '\n  response: ' + ' '.join(response.split())[:400]
+    sys.stderr.write('STARTUP FAILED (%s): %s\n' % (stage, detail))
+    if directory is None:
+        sys.stderr.write('  existing experiment directories were not modified; no earlier evidence was touched\n')
+    else:
+        sys.stderr.write('  this run\'s own evidence is kept in %s; existing experiment directories were not modified\n' % directory)
+    if debug:
+        summary['traceback'] = traceback.format_exc()
+        sys.stderr.write(traceback.format_exc())
+    else:
+        summary['hint'] = 'run scripts/run_local_agent.py --config <file> --debug for the full Python traceback (run-stage detail is also in failure.json)'
+    sys.stderr.write(json.dumps(summary, ensure_ascii=False) + '\n'); sys.stderr.flush()
+
+
+def mark_failed(context, error):
+    failure = {'status': 'failed', 'stage': 'run', 'error': str(error), 'time': time.time(),
+               'traceback': traceback.format_exc(), 'taskSuccess': 'unverified'}
+    if isinstance(error, urllib.error.HTTPError): failure['response'] = error.read().decode(errors='replace')
+    write_json(context.directory / 'failure.json', failure)
+    context.record.update(status='failed', ended=time.time(), error=str(error))
+    write_json(context.directory / 'run.json', context.record)
+    return failure
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Run one CLI experiment in a fresh, unique result directory.')
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--show-images', action='store_true', help='print a terminal thumbnail for every real PNG')
+    parser.add_argument('--open-images', action='store_true', help='open every real PNG in the system image viewer')
+    parser.add_argument('--debug', action='store_true', help='include the full Python traceback on a startup failure')
+    args = parser.parse_args(argv)
+    try:
+        raw, config = load_config(args.config)
+        context = prepare_run(config, args.config, raw)
+    except ConfigError as error:
+        report_failure('configuration', error, args.debug); return 2
+    except RunConflictError as error:
+        report_failure('duplicate-run', error, args.debug); return 3
+    except ReservationError as error:
+        report_failure('reservation', error, args.debug); return 2
+    except Exception as error:
+        report_failure('startup', error, args.debug); return 1
+    print(json.dumps({'event': 'run_started', 'runId': context.run_id, 'mode': 'new-experiment',
+                      'directory': str(context.directory), 'configSource': str(context.source)}), flush=True)
+    try:
+        return execute(context, show_images=args.show_images, open_images=args.open_images)
+    except Exception as error:
+        failure = mark_failed(context, error)
+        report_failure('run', error, args.debug, response=failure.get('response'), directory=context.directory)
+        return 1
+    finally:
+        context.lock.release()
 
 
 if __name__ == '__main__':
-    try: main()
-    except Exception as error:
-        import traceback
-        failure={'status':'failed','error':str(error),'traceback':traceback.format_exc(),'time':time.time(),'taskSuccess':'unverified'}
-        if isinstance(error,urllib.error.HTTPError): failure['response']=error.read().decode(errors='replace')
-        try:
-            cfg=json.loads(Path(sys.argv[sys.argv.index('--config')+1]).read_text(encoding='utf-8-sig'))
-            target=Path(cfg['resultDirectory'])
-            if target.is_dir(): (target/'failure.json').write_text(json.dumps(failure,indent=2))
-        except Exception: pass
-        print(json.dumps(failure),file=sys.stderr); sys.exit(1)
+    sys.exit(main())

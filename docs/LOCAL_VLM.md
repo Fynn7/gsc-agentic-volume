@@ -18,8 +18,13 @@ or GUI is required. Relative paths below assume the repository root.
 
 1. Copy `experiments/local-vlm.example.json` to a gitignored local file, for example
    `runtime/my-experiment.json`. Set `volumePath`, the complete natural-language
-   `task`, a fresh `resultDirectory`, and the desired model/service settings.
-   The result directory must not already exist: failed runs are never overwritten.
+   `task`, a `resultDirectory` **base**, and the desired model/service settings.
+   The base may be reused: every launch atomically reserves a new
+   `run-<timestamp>-<token>` directory inside it. Existing run directories are
+   never reused, renamed, cleared or overwritten, so the same configuration can be
+   run repeatedly without editing the path. An older config whose `resultDirectory`
+   still points at a run directory is handled safely too: the new run is placed as
+   its sibling, never inside the old evidence.
 2. Run:
 
    ```powershell
@@ -30,10 +35,17 @@ or GUI is required. Relative paths below assume the repository root.
    Use `-Python <absolute-python.exe>` or `GAV_PYTHON` if necessary. The launcher
    never kills an existing inference server. On this audited host the existing
    bundled Python works; PATH Python lacks NumPy. No frontend build is required.
-3. Verify the exact run, optionally replaying native scenes without model calls:
+   Repeated launches are duplicate-checked: while the same logical task already has
+   a live launcher, a new launch is refused (exit code 3) instead of issuing a second
+   model request. A repeated launch after completion is always a **new experiment**;
+   no resume is implemented.
+3. Verify the exact run, optionally replaying native scenes without model calls.
+   The real run directory is printed as `run_started.directory` and recorded in the
+   base's `LATEST.txt`:
 
    ```powershell
-   python -B scripts/verify_local_agent.py runtime/local-vlm/my-unique-run --replay
+   $run = (Get-Content runtime/local-vlm/experiment/LATEST.txt).Trim()
+   python -B scripts/verify_local_agent.py $run --replay
    ```
 
    Here `python` means the selected interpreter. Replay writes a new `replay/`
@@ -107,7 +119,11 @@ the allocated runtime context. See [Ollama compatibility](https://docs.ollama.co
 Each run saves configuration, model inventory/digest/projector metadata, the exact
 CLI arguments, full harness events, original and forwarded HTTP request bytes,
 raw streamed responses, request timing, periodic GPU/system RAM/CPU counters,
-and a final session snapshot. The recorder changes only declared inference options
+and a final session snapshot. `run.json` records the run id, `mode`
+(`new-experiment`), the original configuration source and SHA-256, and the actual
+run directory; `config.source.json` is the exact original configuration bytes,
+while `config.json` is the effective configuration with `resultDirectory` pointing
+at that run. The recorder changes only declared inference options
 and strips authorization; it does not translate image/tool protocols. Failed
 startup/import/preflight runs retain `failure.json`. The service session directory
 contains every original volume hash/conversion, actual GSC, scene, native readback,
@@ -148,8 +164,8 @@ here. Inference alone moves. No server access has been confirmed.
    Keep renderer port 8765 on Windows loopback. Do not expose private volumes or
    unauthenticated services to a public interface.
 4. Copy the same local experiment config, change `endpoint` to
-   `http://127.0.0.1:11435`, set the actual model/context/timeout and a fresh output
-   directory, then run the same startup script **without** `-StartOllama`.
+   `http://127.0.0.1:11435`, set the actual model/context/timeout and the desired
+   `resultDirectory` base, then run the same startup script **without** `-StartOllama`.
 5. Repeat the image-delivery check and Task A before exploratory tasks. Compare
    only after freezing model, quantization, inference options, tools, dataset,
    prompts and budgets. A different H200 model is a new condition, not an

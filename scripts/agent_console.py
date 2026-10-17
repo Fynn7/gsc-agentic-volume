@@ -396,6 +396,7 @@ class ConsoleTrace:
 
         self._emit()
         self._emit('SUMMARY', 'summary')
+        self._emit('        run            %s' % value('runId'), 'summary')
         self._emit('        session        %s' % value('sessionId'), 'summary')
         self._emit('        state          %s' % value('state'), 'summary')
         self._emit('        harness        %s (version %s)' % (value('harness'), value('harnessVersion')), 'summary')

@@ -1,4 +1,4 @@
-> **2026-10-17 incident update: Desktop experiment launch is suspended.** Global configuration installation is retired. The former launch instructions below are historical and must not be used as an active workflow. See [configuration/protocol root cause and repair](CODEX_DESKTOP_INCIDENT.md). No new Desktop acceptance is claimed.
+> **Current Desktop entry:** [isolated human-operated startup and verification](CODEX_DESKTOP_ISOLATED.md). Global installation/Explorer activation instructions below are historical and retired. Actual Desktop gates remain manual; see also [the preserved incident report](CODEX_DESKTOP_INCIDENT.md).
 
 # Codex Desktop local VLM workflow
 

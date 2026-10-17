@@ -178,6 +178,15 @@ def restore():
 
 
 def serve(config):
+    ownership={}
+    try:return _serve_runtime(config,ownership)
+    finally:
+        renderer=ownership.get('renderer')
+        if renderer and renderer.poll() is None:
+            renderer.terminate();renderer.wait(timeout=10)
+
+
+def _serve_runtime(config, ownership):
     directory=Path(config['resultDirectory']); stop=threading.Event(); owned=None
     if urlsplit(config['endpoint']).hostname not in ('localhost','127.0.0.1'): raise ValueError('Use an SSH tunnel')
     inventory={'version':http(config['endpoint'],'/api/version'), 'show':http(config['endpoint'],'/api/show',{'model':config['model']}),'tags':http(config['endpoint'],'/api/tags')}
@@ -191,6 +200,8 @@ def serve(config):
     try: identity=http(config['rendererService'],'/api/service',timeout=2)
     except Exception:
         owned=subprocess.Popen([sys.executable,'-B',str(ROOT/'src/app.py'),'--port',str(port)],cwd=ROOT,stdout=(directory/'renderer-stdout.log').open('wb'),stderr=(directory/'renderer-stderr.log').open('wb'),creationflags=subprocess.CREATE_NO_WINDOW)
+        ownership['renderer']=owned
+        write_json(directory/'renderer-process.json',{'pid':owned.pid,'started':time.time(),'executable':sys.executable,'script':str(ROOT/'src/app.py'),'port':port})
         for _ in range(60):
             try: identity=http(config['rendererService'],'/api/service',timeout=1); break
             except Exception:
@@ -201,6 +212,19 @@ def serve(config):
     recorder=InferenceRecorder(config['endpoint'],directory/'http',config)
     parent=recorder.handler()
     class Handler(parent):
+        def forward(self):
+            if self.command=='POST' and self.path in ('/v1/responses','/v1/chat/completions','/api/chat'):
+                try:
+                    from isolation_guard import require_unchanged
+                    require_unchanged(directory)
+                except Exception as error:
+                    prefix=directory/'http'/('http-guard-'+uuid.uuid4().hex)
+                    prefix.with_suffix('.request.bin').write_bytes(self.rfile.read(int(self.headers.get('Content-Length','0'))))
+                    raw=json.dumps({'error':str(error)}).encode()
+                    prefix.with_suffix('.response.bin').write_bytes(raw)
+                    write_json(prefix.with_suffix('.metadata.json'),{'method':'POST','path':self.path,'started':time.time(),'ended':time.time(),'status':503,'error':str(error),'forwarded':False})
+                    self.send_response(503);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
+            return super().forward()
         def do_GET(self):
             if self.path=='/desktop/status':
                 records=[]
@@ -218,6 +242,7 @@ def serve(config):
     server=ThreadingHTTPServer(('127.0.0.1',urlsplit(config['recordingProxy']).port),Handler)
     threading.Thread(target=monitor,args=(stop,directory,config['endpoint']),daemon=True).start()
     write_json(directory/'ready.json',{'pid':os.getpid(),'started':time.time(),'renderer':identity,'rendererPid':owned.pid if owned else None,'desktopAcceptance':'pending human verification','sourceHashes':{str(p.relative_to(ROOT)):digest(p) for p in [ROOT/'scripts/desktop_mcp.py',ROOT/'scripts/renderer_mcp.py',ROOT/'scripts/desktop_environment.py',ROOT/'src/renderer.py',ROOT/'src/external_tools.py',ROOT/'VirtualSampling/Raycaster/VS/x64/Release/Raycaster.exe']}})
+    write_json(directory/'isolation-source-hashes.json',{str(p.relative_to(ROOT)):digest(p) for p in [ROOT/'scripts/desktop_isolation.py',ROOT/'scripts/windows_profile_probe.py',ROOT/'scripts/isolation_guard.py']})
     try: server.serve_forever()
     finally:
         stop.set();server.server_close()

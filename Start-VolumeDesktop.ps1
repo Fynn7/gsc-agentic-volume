@@ -72,10 +72,15 @@ try { Invoke-RestMethod ($activeConfig.endpoint+'/api/version') -TimeoutSec 2 | 
 }
 # This launches only the passive recorder/service process, never Codex CLI.
 $supportArgs='-B "'+$support+'" serve --config "'+(Join-Path $runDir 'config.json')+'"'
-Start-Process -FilePath $Python -ArgumentList $supportArgs -WorkingDirectory $repoDir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $runDir 'support-stdout.log') -RedirectStandardError (Join-Path $runDir 'support-stderr.log') | Out-Null
+$supportProcess=Start-Process -FilePath $Python -ArgumentList $supportArgs -WorkingDirectory $repoDir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $runDir 'support-stdout.log') -RedirectStandardError (Join-Path $runDir 'support-stderr.log') -PassThru
+$supportOwnership=@{pid=$supportProcess.Id;executable=$Python;configPath=(Join-Path $runDir 'config.json')} | ConvertTo-Json
+[System.IO.File]::WriteAllText((Join-Path $runDir 'support-process.json'),$supportOwnership,[System.Text.UTF8Encoding]::new($false))
 $ready=$false
 for ($attempt=0;$attempt -lt 80;$attempt++) {
-  try { $status=Invoke-RestMethod ($activeConfig.recordingProxy+'/desktop/status') -TimeoutSec 1; $ready=$true; break } catch { Start-Sleep -Milliseconds 500 }
+  try { $status=Invoke-RestMethod ($activeConfig.recordingProxy+'/desktop/status') -TimeoutSec 1; $ready=$true; break } catch {
+    if ($supportProcess.HasExited) { throw ('Support process exited. Read '+(Join-Path $runDir 'support-stderr.log')) }
+    Start-Sleep -Milliseconds 500
+  }
 }
 if (-not $ready) { throw ('Support service failed. Read '+(Join-Path $runDir 'support-stderr.log')) }
 if ($status.resultDirectory -ne $activeConfig.resultDirectory) { throw 'Recording port belongs to a different run; user config was not installed' }

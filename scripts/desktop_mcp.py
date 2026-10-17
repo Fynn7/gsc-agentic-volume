@@ -63,10 +63,13 @@ class DesktopMcp:
         prefix.with_suffix('.request.json').write_text(json.dumps(request,indent=2),encoding='utf-8')
         self.record('tool_start',call=index,**request)
         try:
+            from isolation_guard import require_unchanged
+            require_unchanged(self.run)
             if not isinstance(arguments,dict): raise ValueError('Arguments must be an object')
             if name=='desktop_status':
                 if arguments: raise ValueError('desktop_status accepts no arguments')
                 status={'formalHarness':'Codex Desktop','configuredModel':self.config['model'],'inferenceEndpoint':self.config['endpoint'],'recordingProxy':self.config['recordingProxy'],'resultDirectory':str(self.run),'sessionId':self.session,'desktopAcceptance':'pending human verification'}
+                status.update(mcpConfigPath=str(self.config_path),configuredDesktopHome=self.config.get('desktopHome'),configuredGuiStateDirectory=str(self.run/'electron-user-data'),profileId=self.run.name)
                 try:
                     with urllib.request.urlopen(self.config['recordingProxy']+'/desktop/status',timeout=5) as response: status['observedTransport']=json.load(response)
                 except Exception as error: status['transportStatusError']=str(error)

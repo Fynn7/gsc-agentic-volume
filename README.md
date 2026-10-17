@@ -1,4 +1,4 @@
-> Desktop experiment launch is currently suspended: global configuration installation has been retired. See [the incident analysis and repair](docs/CODEX_DESKTOP_INCIDENT.md) before using earlier Desktop instructions. Historical CLI evidence remains valid with its original scope.
+> Human-operated isolated Desktop entry: `Start-IsolatedVolumeDesktop.ps1`. See [private-profile startup, actual-directory checks and separate-account fallback](docs/CODEX_DESKTOP_ISOLATED.md). Preparation is tested; actual Desktop isolation/protocol/image acceptance remains manual. The old global installer is retired.
 
 # Agentic Volume Visualization
 

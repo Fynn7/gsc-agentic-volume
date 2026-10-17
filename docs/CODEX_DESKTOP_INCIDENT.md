@@ -1,3 +1,5 @@
+> Follow-up: [isolated human-operated launch and validation](CODEX_DESKTOP_ISOLATED.md) is now prepared. The incident and its original fix below remain historical evidence; no global installer was re-enabled.
+
 # Desktop incident: global configuration and Responses Lite — 2026-10-17
 
 **Desktop experiment launch is suspended.** The default entry no longer installs

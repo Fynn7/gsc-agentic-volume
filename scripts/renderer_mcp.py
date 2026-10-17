@@ -18,10 +18,15 @@ def main():
     sys.stdin.reconfigure(encoding='utf-8')
     sys.stdout.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--service', required=True)
-    parser.add_argument('--session', required=True)
+    parser.add_argument('--service')
+    parser.add_argument('--session')
+    parser.add_argument('--desktop-config')
     parser.add_argument('--timeout', type=float, default=120)
     args = parser.parse_args()
+    if args.desktop_config:
+        from desktop_mcp import serve
+        return serve(args.desktop_config)
+    if not args.service or not args.session: parser.error('--service and --session are required in legacy mode')
     base = args.service.rstrip('/')
     if urlsplit(base).hostname not in ('127.0.0.1', 'localhost'): raise ValueError('Renderer service must be loopback')
 

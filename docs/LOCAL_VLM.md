@@ -1,3 +1,5 @@
+> Current formal harness: Codex Desktop. Use [CODEX_DESKTOP.md](CODEX_DESKTOP.md) for the human-run entry. The CLI commands below document the earlier development route; a Worker must not invoke a nested Codex harness. Desktop acceptance remains pending human execution.
+
 # Local VLM experiments with the native renderer
 
 This optional path uses an installed external agent harness. It preserves the

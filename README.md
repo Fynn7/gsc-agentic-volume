@@ -22,3 +22,7 @@ Use main for the stable baseline and dev for ongoing development. Current develo
 ## External local VLM experiments
 
 See [local VLM operations and H200 preparation](docs/LOCAL_VLM.md) and [measured development evidence](docs/LOCAL_VLM_EVIDENCE.md). This optional Codex/MCP path reuses the same native renderer and Session service; Phase 1 and the GUI remain available.
+
+## Codex Desktop experiment entry
+
+The current formal harness is Codex Desktop. After ending the Worker and fully quitting Desktop, run `./Start-VolumeDesktop.ps1` in external PowerShell. See [Desktop startup, fixed prompts, recording and H200 steps](docs/CODEX_DESKTOP.md) and [tested support interfaces versus pending human acceptance](docs/CODEX_DESKTOP_PREPARATION_EVIDENCE.md). No Desktop acceptance is claimed from CLI or scripted interface tests.

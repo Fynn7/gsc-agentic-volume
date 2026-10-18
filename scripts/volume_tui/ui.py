@@ -294,7 +294,12 @@ def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
 
 
 def _live_view(run_dir: Path):
-    """Real-time trace: poll EventTail, show Tool Name -> Args -> Result -> Duration -> Image."""
+    """Real-time trace: poll EventTail, show Tool Name -> Args -> Result -> Duration -> Image.
+
+    Once the run reaches finished/failed the view FREEZES: no more polling,
+    no growing wait timer, no spinner animation. Only user actions (scroll,
+    details, image, verify, back) repaint once.
+    """
     session_dir = trace_mod.resolve_session_dir(run_dir)
     tail = trace_mod.EventTail(run_dir, session_dir)
     shown: list[dict] = []
@@ -303,18 +308,22 @@ def _live_view(run_dir: Path):
     start_ts = time.time()
     last_event_ts = start_ts
     frame = 0
+    done_at: float | None = None  # latched the moment finished/failed is seen
 
     def _frame_lines(run_record: dict, finished: bool) -> list[str]:
         status = run_record.get("status", "?")
         if finished:
-            state_mark = "■ done"
+            total = (done_at if done_at is not None else time.time()) - start_ts
+            head = ("Live trace: %s  [%s] ■ done in %.0fs  events=%d (frozen — v=verify, Esc=back)%s" % (
+                run_dir.name, status, total, len(shown),
+                ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
         else:
             state_mark = "%s working %s" % (
                 screen_mod.spinner(frame), screen_mod.dots(frame))
-        head = ("Live trace: %s  [%s] %s  events=%d  wait=%.0fs%s" % (
-            run_dir.name, status, state_mark, len(shown),
-            time.time() - last_event_ts,
-            ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
+            head = ("Live trace: %s  [%s] %s  events=%d  wait=%.0fs%s" % (
+                run_dir.name, status, state_mark, len(shown),
+                time.time() - last_event_ts,
+                ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
         body = [head, "=" * 70]
         end = max(0, len(shown) - offset)
         window = shown[max(0, end - 18):end]
@@ -330,7 +339,7 @@ def _live_view(run_dir: Path):
             if event.get("image"):
                 body.append("      [Open image: i] rev=%s" % event.get("revision"))
         body.append("-" * 70)
-        body.append("i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("close (agent keeps running)" if not finished else "back"))
+        body.append("i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("back" if finished else "close (agent keeps running)"))
         if finished:
             body.append("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
             if run_record.get("status") == "failed":
@@ -341,6 +350,82 @@ def _live_view(run_dir: Path):
             body.append("%s Waiting for model/tool/renderer — elapsed above is live, no fake %%."
                         % screen_mod.spinner(frame))
         return body
+
+    def _read_status() -> dict:
+        try:
+            return json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _latch_done() -> dict:
+        """Final drain of trailing events, then freeze the clock."""
+        nonlocal done_at, last_event_ts
+        run_record = _read_status()
+        # Catch the FINISH/IMAGE lines that land just after run.json flips.
+        for _ in range(3):
+            time.sleep(0.15)
+            extra = tail.poll()
+            if extra:
+                shown.extend(extra)
+                last_event_ts = time.time()
+        done_at = time.time()
+        return _read_status()
+
+    def _frozen_loop(scr, run_record: dict):
+        """Static view: block on keys, repaint only on user action. No polling."""
+        nonlocal offset, detail_on
+        scr.draw(_frame_lines(run_record, True))
+        while True:
+            if os.name != "nt":
+                raw = input("[i/d/o/v/u(p)/n(ewer)/Esc]> ").strip().lower()
+                if raw == "i":
+                    _open_selected_image(shown)
+                elif raw == "d":
+                    detail_on = not detail_on
+                elif raw == "u":
+                    offset = offset + 5
+                elif raw == "n":
+                    offset = max(0, offset - 5)
+                elif raw == "o":
+                    _open_path(str(run_dir))
+                elif raw == "v":
+                    _verify_view(str(run_dir))
+                    scr.draw(_frame_lines(run_record, True))
+                    continue
+                elif raw in ("", "b", "q"):
+                    break
+                else:
+                    continue
+                scr.draw(_frame_lines(run_record, True))
+                continue
+            import msvcrt
+            ch = msvcrt.getch()
+            if ch in (b"\x00", b"\xe0"):
+                ch2 = msvcrt.getch()
+                if ch2 == b"H":
+                    offset = offset + 5
+                elif ch2 == b"P":
+                    offset = max(0, offset - 5)
+                else:
+                    continue
+            elif ch == b"\x1b":
+                break
+            else:
+                try:
+                    pressed = ch.decode("utf-8", "ignore").lower()
+                except Exception:
+                    continue
+                if pressed == "d":
+                    detail_on = not detail_on
+                elif pressed == "i":
+                    _open_selected_image(shown)
+                elif pressed == "o":
+                    _open_path(str(run_dir))
+                elif pressed == "v":
+                    _verify_view(str(run_dir))
+                else:
+                    continue
+            scr.draw(_frame_lines(run_record, True))
 
     with screen_mod.Screen() as scr:
         while True:
@@ -353,13 +438,12 @@ def _live_view(run_dir: Path):
             if fresh:
                 shown.extend(fresh)
                 last_event_ts = time.time()
-            run_record = {}
-            try:
-                run_record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
-            finished = run_record.get("status") in ("finished", "failed")
-            scr.draw(_frame_lines(run_record, finished))
+            run_record = _read_status()
+            if run_record.get("status") in ("finished", "failed"):
+                run_record = _latch_done()
+                _frozen_loop(scr, run_record)
+                break
+            scr.draw(_frame_lines(run_record, False))
             frame += 1
             if os.name != "nt":
                 raw = input("[i/d/o/v/u(p)/n(ewer)/Esc]> ").strip().lower()
@@ -373,9 +457,6 @@ def _live_view(run_dir: Path):
                     offset = max(0, offset - 5)
                 elif raw == "o":
                     _open_path(str(run_dir))
-                elif raw == "v" and finished:
-                    _verify_view(str(run_dir))
-                    break
                 elif raw in ("", "b", "q"):
                     break
                 continue
@@ -409,12 +490,12 @@ def _live_view(run_dir: Path):
                 if fresh:
                     shown.extend(fresh)
                     last_event_ts = time.time()
-                try:
-                    run_record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    pass
-                finished = run_record.get("status") in ("finished", "failed")
-                scr.draw(_frame_lines(run_record, finished))
+                live_record = _read_status()
+                if live_record.get("status") in ("finished", "failed"):
+                    run_record = _latch_done()
+                    _frozen_loop(scr, run_record)
+                    return
+                scr.draw(_frame_lines(live_record, False))
                 frame += 1
             if pressed == "esc":
                 break
@@ -428,9 +509,6 @@ def _live_view(run_dir: Path):
                 _open_selected_image(shown)
             elif pressed == "o":
                 _open_path(str(run_dir))
-            elif pressed == "v" and finished:
-                _verify_view(str(run_dir))
-                break
 
 
 def _open_selected_image(shown: list[dict]):

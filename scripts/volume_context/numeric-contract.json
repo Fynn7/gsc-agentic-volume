@@ -1,0 +1,121 @@
+{
+  "Limits": {
+    "description": "Single definition of every v2 bound. The model packet and the mount budget check read these values; nothing re-declares them.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "maxObjectCandidates",
+      "maxCandidateDescriptionCodePoints",
+      "maxVisibleStructures",
+      "maxVisualDescriptionCodePoints",
+      "maxSemanticHypothesisCodePoints",
+      "maxUnknowns",
+      "maxUnknownReasonCodePoints",
+      "maxUnknownTopicCodePoints",
+      "maxEvidenceIdsPerClaim",
+      "maxIdsPerCard",
+      "maxMountCodePoints",
+      "modelHistogramBins",
+      "modelQuantiles"
+    ],
+    "properties": {
+      "maxObjectCandidates": {
+        "type": "integer",
+        "const": 3
+      },
+      "maxCandidateDescriptionCodePoints": {
+        "type": "integer",
+        "const": 120
+      },
+      "maxVisibleStructures": {
+        "type": "integer",
+        "const": 8
+      },
+      "maxVisualDescriptionCodePoints": {
+        "type": "integer",
+        "const": 160
+      },
+      "maxSemanticHypothesisCodePoints": {
+        "type": "integer",
+        "const": 120
+      },
+      "maxUnknowns": {
+        "type": "integer",
+        "const": 8
+      },
+      "maxUnknownReasonCodePoints": {
+        "type": "integer",
+        "const": 160
+      },
+      "maxUnknownTopicCodePoints": {
+        "type": "integer",
+        "const": 80
+      },
+      "maxEvidenceIdsPerClaim": {
+        "type": "integer",
+        "const": 12
+      },
+      "maxIdsPerCard": {
+        "type": "integer",
+        "const": 128
+      },
+      "maxMountCodePoints": {
+        "type": "integer",
+        "const": 6000
+      },
+      "modelHistogramBins": {
+        "type": "integer",
+        "const": 32
+      },
+      "modelQuantiles": {
+        "$comment": "A const array, so the runtime limits and the schema cannot disagree.",
+        "const": [
+          0.01,
+          0.05,
+          0.5,
+          0.95,
+          0.99
+        ]
+      }
+    }
+  },
+  "Budgets": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "chunkBytes",
+      "decodedInputLimitBytes",
+      "quantileSampleLimit"
+    ],
+    "properties": {
+      "chunkBytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "default": 16777216
+      },
+      "decodedInputLimitBytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "default": 2147483648
+      },
+      "quantileSampleLimit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000,
+        "default": 1000000
+      }
+    }
+  },
+  "Dimension3": {
+    "type": "array",
+    "minItems": 3,
+    "maxItems": 3,
+    "items": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    }
+  }
+}

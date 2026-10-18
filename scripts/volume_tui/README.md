@@ -74,6 +74,13 @@
 - Never auto-started: H200 tunnel/endpoint, non-loopback URLs. Never
   downloaded: models (`ollama pull` stays manual). Never touched: foreign
   processes, harness children, another live TUI session (heartbeat-guarded).
+- Temporary context instance: when the only Local blocker is a context
+  mismatch on an otherwise reachable Ollama, the TUI offers to spawn a second
+  TUI-owned `ollama serve` on a free 127.0.0.1 port with the required
+  `OLLAMA_CONTEXT_LENGTH`. Only that run's in-memory config points at it
+  (saved settings + your own Ollama untouched); it is recorded as
+  `ollama-tmp-<port>` and reaped on TUI exit. Needs free VRAM for one more
+  model load — otherwise fix your Ollama manually.
 
 ## Self-acceptance fixes (2026-10-18, no model run, evidence untouched)
 

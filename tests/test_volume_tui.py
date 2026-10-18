@@ -418,5 +418,60 @@ class SelfAcceptanceFixes(unittest.TestCase):
             tui_ui._main = real_main
 
 
+class TemporaryContextInstance(unittest.TestCase):
+    def test_offer_predicate_only_for_lone_local_context_mismatch(self):
+        import ui as tui_ui
+        local = {"mode": "Local"}
+        mismatch = [{"name": "Model context", "ok": False, "detail": "loaded x context 262144 != required 16384"}]
+        self.assertIsNotNone(tui_ui._temporary_context_offer(local, mismatch))
+        self.assertIsNone(tui_ui._temporary_context_offer({"mode": "H200"}, mismatch))
+        self.assertIsNone(tui_ui._temporary_context_offer(local, mismatch + [
+            {"name": "Renderer y", "ok": False}]))
+        self.assertIsNone(tui_ui._temporary_context_offer(
+            local, [{"name": "Inference x", "ok": False}]))
+
+    def test_temporary_ollama_uses_free_port_and_required_context_then_reaped(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = {"mode": "Local", "model": "qwen3.6:35b",
+                        "endpoint": "http://127.0.0.1:11434",
+                        "h200Endpoint": "http://127.0.0.1:11435",
+                        "rendererService": "http://127.0.0.1:8765"}
+            seen_env = {}
+
+            def fake_spawn(cmd, env, cwd, stem):
+                seen_env.update(env)
+                self.assertTrue(stem.startswith("ollama-tmp-"))
+                self.assertIn("serve", cmd)
+                return 5555
+
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "_http_get", return_value={"version": "test"}), \
+                 patch.object(tui_services, "_wait_true", return_value=True), \
+                 patch.object(tui_services, "_spawn", side_effect=fake_spawn), \
+                 patch.object(tui_services.shutil, "which", return_value="C:/fake/ollama.exe"):
+                started = tui_services.start_temporary_ollama(settings, 16384)
+            self.assertTrue(started["ok"])
+            self.assertTrue(started["endpoint"].startswith("http://127.0.0.1:"))
+            self.assertEqual(seen_env.get("OLLAMA_CONTEXT_LENGTH"), "16384")
+            record = json.loads((root / "services.json").read_text(encoding="utf-8"))
+            self.assertIn(started["key"], record["services"])
+            self.assertEqual(record["services"][started["key"]]["pid"], 5555)
+            # Saved global settings are never touched by a temporary instance.
+            self.assertEqual(settings["endpoint"], "http://127.0.0.1:11434")
+            # Exit path reaps exactly the temporary pid (image re-verified).
+            killed = []
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "_image_of_pid", return_value="ollama.exe"), \
+                 patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True), \
+                 patch.object(tui_services, "process_alive", return_value=True), \
+                 patch.object(tui_services.runs_mod, "discover_runs", return_value=[]), \
+                 patch.object(tui_services, "_live_launchers", return_value=[]):
+                rel = tui_services.release_owned_services()
+            self.assertEqual(killed, [5555])
+            self.assertIsNone(rel["kept"])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -244,6 +244,56 @@ def model_problems(settings: dict) -> list[dict]:
     return problems
 
 
+def start_temporary_ollama(settings: dict, context_size: int) -> dict:
+    """Start a TUI-owned Ollama with a *temporary* OLLAMA_CONTEXT_LENGTH.
+
+    Used when the user's live Ollama is reachable but loaded a different
+    context: instead of asking the user to restart their service by hand, the
+    TUI spawns a second loopback instance on a free port with the required
+    context, registers it in the services record (reaped on TUI exit like any
+    owned service), and the caller points only this run's in-memory config at
+    it. Global settings file and the user's own Ollama are never touched.
+    Returns {"ok": True, "endpoint", "pid", "key"} or {"ok": False, "error"}.
+    """
+    from socket import socket as _socket
+
+    host = "127.0.0.1"
+    try:
+        probe = _socket()
+        probe.bind((host, 0))
+        port = probe.getsockname()[1]
+        probe.close()
+    except OSError as error:
+        return {"ok": False, "error": "no free loopback port: %s" % error}
+    endpoint = "http://%s:%d" % (host, port)
+    exe = shutil.which("ollama.exe") or shutil.which("ollama")
+    if not exe:
+        return {"ok": False, "error": "no ollama binary on PATH; the TUI cannot invent it"}
+    env = dict(os.environ)
+    env.update(OLLAMA_HOST="%s:%d" % (host, port), OLLAMA_CONTEXT_LENGTH=str(context_size),
+               OLLAMA_NO_CLOUD="1", OLLAMA_NUM_PARALLEL="1", OLLAMA_MAX_LOADED_MODELS="1",
+               OLLAMA_FLASH_ATTENTION="1", OLLAMA_KV_CACHE_TYPE="q8_0")
+    try:
+        pid = _spawn([exe, "serve"], env, ROOT, "ollama-tmp-%d" % port)
+    except Exception as error:
+        return {"ok": False, "error": "auto-start failed: %s" % error}
+    if not _wait_true(lambda: _http_get(endpoint.rstrip("/") + "/api/version", 1.0), 20.0):
+        return {"ok": False, "error": "temporary instance on %s never became reachable (see runtime/tui/ollama-tmp-%d-stderr.log)" % (endpoint, port)}
+    record = _read_record()
+    now = time.time()
+    live_recorded = [entry for entry in (record.get("services") or {}).values()
+                     if isinstance(entry.get("pid"), int) and process_alive(entry["pid"])]
+    if record.get("owner") not in (None, SESSION_ID) and live_recorded and (now - record.get("heartbeat", 0)) < HEARTBEAT_TTL:
+        _terminate(pid)
+        return {"ok": False, "error": "another live TUI session owns the background services; use that window"}
+    services = dict(record.get("services") or {})
+    key = "ollama-tmp-%d" % port
+    services[key] = {"pid": pid, "image": "ollama.exe", "endpoint": endpoint,
+                     "temporary": True, "contextLength": context_size}
+    _write_record({"owner": SESSION_ID, "heartbeat": now, "services": services})
+    return {"ok": True, "endpoint": endpoint, "pid": pid, "key": key}
+
+
 def ensure_services(settings: dict) -> dict:
     """Start missing local services, adopt stale records, report honestly."""
     report: dict = {"started": [], "reused": [], "adopted": [], "problems": [],

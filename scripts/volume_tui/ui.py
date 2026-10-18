@@ -177,6 +177,20 @@ def _failure_hint(run_dir: Path) -> str | None:
     return None
 
 
+def _temporary_context_offer(settings: dict, problems: list[dict]) -> dict | None:
+    """Return the single Model-context blocker if a temporary instance can cover it, else None.
+
+    Pure predicate (testable): Local mode, exactly one problem, and it is the
+    context mismatch — meaning the user's Ollama is reachable but loaded with
+    a different context length. Anything else (Inference/Renderer DOWN, model
+    missing) still needs a manual fix.
+    """
+    if settings.get("mode") != "Local" or len(problems) != 1:
+        return None
+    only = problems[0]
+    return only if only.get("name") == "Model context" else None
+
+
 def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
     try:
         effective = cfg.build_effective_config(task_kind, "", settings) if task_kind != "custom" else None
@@ -226,14 +240,41 @@ def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
         return
     problems = _service_gate(settings)
     if problems:
-        _clear()
-        print("Run BLOCKED: required services are DOWN (no config written, no run created).")
-        for item in problems:
-            print("[DOWN] %s\n       %s" % (item["name"], item.get("detail", "")[:160]))
-            if item.get("fix"):
-                print("       fix: %s" % item["fix"])
-        _pause("Enter=back to menu")
-        return
+        remediable = _temporary_context_offer(settings, problems)
+        if remediable is not None and effective is not None:
+            want = cfg.example_config().get("contextSize", 16384)
+            choice = _menu("Context mismatch — start a temporary instance?",
+                           ["Your Ollama is reachable but loaded context %s." % remediable.get("detail", ""),
+                            "Temporary: a second TUI-owned Ollama (context %s) on a free 127.0.0.1 port," % want,
+                            "used ONLY by this run; your Ollama and saved settings stay untouched.",
+                            "It stops automatically when this TUI exits. Needs free VRAM for one more load.",
+                            "Manual: restart your own Ollama with OLLAMA_CONTEXT_LENGTH=%s." % want],
+                           ["Start temporary instance for this run", "Back (I will fix it manually)"])
+            if choice == 0:
+                started = screen_mod.run_with_spinner(
+                    "Starting temporary Ollama (context %s)" % want,
+                    services_mod.start_temporary_ollama, settings, want)
+                if started.get("ok"):
+                    effective["endpoint"] = started["endpoint"]
+                    print("Temporary inference for this run only: %s (pid %s; stops on TUI exit)."
+                          % (started["endpoint"], started["pid"]))
+                    shadow = dict(settings, endpoint=started["endpoint"])
+                    problems = _service_gate(shadow)
+                else:
+                    _clear()
+                    print("Temporary instance failed: %s" % started.get("error"))
+                    print("Fix your Ollama manually, then start a new run. Nothing was written.")
+                    _pause("Enter=back to menu")
+                    return
+        if problems:
+            _clear()
+            print("Run BLOCKED: required services are DOWN (no config written, no run created).")
+            for item in problems:
+                print("[DOWN] %s\n       %s" % (item["name"], item.get("detail", "")[:160]))
+                if item.get("fix"):
+                    print("       fix: %s" % item["fix"])
+            _pause("Enter=back to menu")
+            return
     config_path = cfg.write_run_config(effective, task_kind)
     print("Config: %s\nLaunching existing launcher (no second agent loop)..." % config_path)
     live_lines: list[str] = []

@@ -50,6 +50,8 @@ def _read_key():
             return input("> ").strip().lower()
         while True:
             ch = msvcrt.getch()
+            if ch == b"\x03":  # Ctrl+C → exit
+                raise KeyboardInterrupt()
             if ch in (b"\x00", b"\xe0"):
                 ch2 = msvcrt.getch()
                 return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(ch2.decode("latin1"), "")
@@ -517,6 +519,8 @@ def _live_view(run_dir: Path):
                 continue
             import msvcrt
             ch = msvcrt.getch()
+            if ch == b"\x03":  # Ctrl+C → exit
+                raise KeyboardInterrupt()
             if ch in (b"\x00", b"\xe0"):
                 ch2 = msvcrt.getch()
                 if ch2 == b"H":
@@ -584,6 +588,8 @@ def _live_view(run_dir: Path):
             while time.time() < deadline:
                 if msvcrt.kbhit():
                     ch = msvcrt.getch()
+                    if ch == b"\x03":  # Ctrl+C → exit
+                        raise KeyboardInterrupt()
                     if ch in (b"\x00", b"\xe0"):
                         ch2 = msvcrt.getch()
                         if ch2 == b"H":

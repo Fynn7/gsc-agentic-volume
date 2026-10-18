@@ -473,5 +473,49 @@ class TemporaryContextInstance(unittest.TestCase):
             self.assertIsNone(rel["kept"])
 
 
+class MessageColors(unittest.TestCase):
+    def test_every_category_has_its_own_color_and_warn_is_orange(self):
+        import screen as tui_screen
+        for cat in ("MODEL", "TOOL", "IMAGE", "INFER", "ERROR", "WARN", "FINISH"):
+            self.assertIn(cat, tui_screen.CATEGORY_COLORS)
+        self.assertEqual(len(set(tui_screen.CATEGORY_COLORS.values())), 7)
+        self.assertEqual(tui_screen.CATEGORY_COLORS["WARN"], "orange")
+        self.assertEqual(tui_screen.CATEGORY_COLORS["ERROR"], "red")
+
+    def test_warn_titles_go_orange_while_other_errors_stay_red(self):
+        import screen as tui_screen
+        import ui as tui_ui
+        real_isatty = tui_screen.sys.stdout.isatty
+        try:
+            tui_screen.sys.stdout.isatty = lambda: True
+            warn = tui_ui._cat_title({"cat": "ERROR", "title": "WARN  harness trouble"})
+            self.assertIn(tui_screen.COLORS["orange"], warn)
+            failed = tui_ui._cat_title({"cat": "ERROR", "title": "TOOL  render_scene  Failed"})
+            self.assertIn(tui_screen.COLORS["red"], failed)
+            model = tui_ui._cat_title({"cat": "MODEL", "title": "MODEL #1  Running"})
+            self.assertIn(tui_screen.COLORS["cyan"], model)
+        finally:
+            tui_screen.sys.stdout.isatty = real_isatty
+
+    def test_color_respects_no_color_and_pipes(self):
+        import screen as tui_screen
+        with patch.dict(tui_screen.os.environ, {"NO_COLOR": "1"}):
+            self.assertEqual(tui_screen.colored("x", "red"), "x")
+        self.assertEqual(tui_screen.visible_len("\x1b[31mabc\x1b[0m"), 3)
+        self.assertEqual(tui_screen.visible_len(tui_screen._truncate_ansi("\x1b[31mabcdef\x1b[0m", 3)), 3)
+
+    def test_status_colors(self):
+        import screen as tui_screen
+        import ui as tui_ui
+        real_isatty = tui_screen.sys.stdout.isatty
+        try:
+            tui_screen.sys.stdout.isatty = lambda: True
+            self.assertIn(tui_screen.COLORS["green"], tui_ui._color_status("Finished"))
+            self.assertIn(tui_screen.COLORS["red"], tui_ui._color_status("Failed"))
+            self.assertIn(tui_screen.COLORS["cyan"], tui_ui._color_status("Running"))
+        finally:
+            tui_screen.sys.stdout.isatty = real_isatty
+
+
 if __name__ == '__main__':
     unittest.main()

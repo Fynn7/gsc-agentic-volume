@@ -17,10 +17,99 @@ This module paints in place instead:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import threading
 import time
+
+# --- Per-category colors (stdlib ANSI only) ---------------------------------
+# 16-color codes stay readable on legacy conhost and Windows Terminal alike.
+# Warning orange uses 256-color slot 208 where the terminal supports it
+# (Windows Terminal / 256color TERM) and falls back to bright yellow.
+RESET = "\x1b[0m"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _supports_256() -> bool:
+    term = (os.environ.get("TERM") or "")
+    return bool(
+        os.environ.get("WT_SESSION")
+        or os.environ.get("COLORTERM")
+        or "256color" in term
+        or "truecolor" in term
+    )
+
+
+COLORS = {
+    "red": "\x1b[31m",
+    "green": "\x1b[32m",
+    "yellow": "\x1b[33m",
+    "blue": "\x1b[34m",
+    "magenta": "\x1b[35m",
+    "cyan": "\x1b[36m",
+    "gray": "\x1b[90m",
+    "bright_red": "\x1b[91m",
+    "bright_green": "\x1b[92m",
+    "bright_yellow": "\x1b[93m",
+    "bright_blue": "\x1b[94m",
+    "bright_magenta": "\x1b[95m",
+    "bright_cyan": "\x1b[96m",
+    "bold": "\x1b[1m",
+    "orange": "\x1b[38;5;208m" if _supports_256() else "\x1b[93m",
+}
+
+# Event category -> color name. Every live-trace category has its own color;
+# warnings are orange, errors red, finished runs green.
+CATEGORY_COLORS = {
+    "MODEL": "cyan",
+    "TOOL": "bright_blue",
+    "IMAGE": "green",
+    "INFER": "magenta",
+    "ERROR": "red",
+    "WARN": "orange",
+    "FINISH": "bright_green",
+}
+
+
+def _color_enabled(stream=None) -> bool:
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    target = stream or sys.stdout
+    try:
+        return bool(target.isatty())
+    except Exception:
+        return False
+
+
+def colored(text: str, name: str, stream=None) -> str:
+    """Wrap text in a named color; plain text when color is unavailable."""
+    code = COLORS.get(name, "")
+    if not code or not _color_enabled(stream):
+        return text
+    return "%s%s%s" % (code, text, RESET)
+
+
+def visible_len(text: str) -> int:
+    """Printable width ignoring ANSI escape sequences."""
+    return len(_ANSI_RE.sub("", text))
+
+
+def _truncate_ansi(text: str, width: int) -> str:
+    """Cut to `width` visible cells without splitting an escape sequence."""
+    out: list[str] = []
+    shown = 0
+    i = 0
+    while i < len(text) and shown < width:
+        match = _ANSI_RE.match(text, i)
+        if match:
+            out.append(match.group(0))
+            i = match.end()
+        else:
+            out.append(text[i])
+            i += 1
+            shown += 1
+    return "".join(out)
 
 # Braille dots render in Windows Terminal; plain conhost falls back to ASCII.
 # Probe once: try encoding with the stdout codec, else use ASCII.
@@ -103,8 +192,10 @@ class Screen:
         else:
             out.append("\x1b[H")
         for line in lines:
-            text = line[: max(1, width)]
-            out.append(text + " " * max(0, width - len(text)) + "\n")
+            # ANSI-aware: truncate by visible cells, pad by visible width, and
+            # always reset at end of line so no color bleeds into the next row.
+            text = _truncate_ansi(line, max(1, width))
+            out.append(text + RESET + " " * max(0, width - visible_len(text)) + "\n")
         out.append("\x1b[J")
         try:
             self.stream.write("".join(out))

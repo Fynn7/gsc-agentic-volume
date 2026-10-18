@@ -63,6 +63,23 @@ def _read_key():
     return input("number + Enter (b=back): ").strip().lower()
 
 
+def _cat_title(event: dict) -> str:
+    """Event title in its category color (warnings orange, errors red)."""
+    title = event["title"][:110]
+    color = screen_mod.CATEGORY_COLORS.get(event.get("cat", ""))
+    if event.get("cat") == "ERROR" and title.startswith("WARN"):
+        color = "orange"
+    return screen_mod.colored(title, color) if color else title
+
+
+def _color_status(status: str) -> str:
+    """Finished green / Failed red / Running cyan / Unknown gray."""
+    return screen_mod.colored(status, {
+        "Finished": "green", "Failed": "red", "Running": "cyan",
+        "Unknown": "gray", "finished": "green", "failed": "red",
+    }.get(status, "")) if status else status
+
+
 def _menu(title: str, lines: list[str], options: list[str], start: int = 0) -> int | None:
     """Arrow menu. Returns index or None on Esc. POSIX fallback: numeric input."""
     if os.name != "nt":
@@ -87,11 +104,11 @@ def _menu(title: str, lines: list[str], options: list[str], start: int = 0) -> i
     frame = 0
     with screen_mod.Screen() as scr:
         while True:
-            scr.draw(
-                [title, "=" * 70, *lines, "-" * 70,
-                 *[("> " if i == idx else "  ") + o for i, o in enumerate(options)],
-                 "-" * 70, SHORTCUTS]
-            )
+            rows = [title, "=" * 70, *lines, "-" * 70]
+            for i, o in enumerate(options):
+                rows.append(screen_mod.colored("> " + o, "bright_cyan") if i == idx else "  " + o)
+            rows += ["-" * 70, SHORTCUTS]
+            scr.draw(rows)
             key = _read_key()
             frame += 1
             if key == "up":
@@ -140,13 +157,18 @@ def _status_lines(settings: dict) -> list[str]:
     runs = runs_mod.discover_runs(limit=50)
     running = [r for r in runs if r["status"] == "Running"]
     last = runs[0] if runs else None
+    inference = get("Inference")
+    renderer = get("Renderer")
     return [
         "Mode: %s   Model: %s" % (settings.get("mode"), settings.get("model")),
-        "Inference: %s" % ("OK" if get("Inference").get("ok") else "DOWN: %s" % get("Inference").get("detail", "")[:80]),
-        "Renderer:  %s" % ("OK" if get("Renderer").get("ok") else "DOWN: %s" % get("Renderer").get("detail", "")[:80]),
+        screen_mod.colored("Inference: %s" % ("OK" if inference.get("ok") else "DOWN: %s" % inference.get("detail", "")[:80]),
+                           "green" if inference.get("ok") else "red"),
+        screen_mod.colored("Renderer:  %s" % ("OK" if renderer.get("ok") else "DOWN: %s" % renderer.get("detail", "")[:80]),
+                           "green" if renderer.get("ok") else "red"),
         "Services: %s" % services_mod.owned_summary(),
         "Running now: %s" % (running[0]["runId"] if running else "none"),
-        "Last run: %s (%s)" % (last["runId"] if last else "none", last["status"] if last else "-"),
+        "Last run: %s (%s)" % (last["runId"] if last else "none",
+                               _color_status(last["status"]) if last else "-"),
     ]
 
 
@@ -162,6 +184,35 @@ def _service_gate(settings: dict) -> list[dict]:
     except Exception:
         pass
     return down
+
+
+def _print_problem(item: dict):
+    """One DOWN item: name red, fix orange. Direct print (one-shot screens)."""
+    print(screen_mod.colored("[DOWN] %s" % item["name"], "red"))
+    print("       %s" % (item.get("detail", "")[:160]))
+    if item.get("fix"):
+        print(screen_mod.colored("       fix: %s" % item["fix"], "orange"))
+
+
+def _print_check(item: dict):
+    """One preflight item: OK green, !! red, fix orange."""
+    mark = "OK" if item["ok"] else "!!"
+    print("[%s] %s %s" % (screen_mod.colored(mark, "green" if item["ok"] else "red"),
+                          item["name"], (item.get("detail", "") or "")[:100]))
+    if not item["ok"] and item.get("fix"):
+        print(screen_mod.colored("     fix: %s" % item["fix"], "orange"))
+
+
+def _print_verify_line(line: str):
+    """Verify summary: passed green, NOT passed red, UNVERIFIED orange."""
+    if "NOT passed" in line:
+        print(screen_mod.colored("- " + line, "red"))
+    elif "UNVERIFIED" in line:
+        print(screen_mod.colored("- " + line, "orange"))
+    elif "passed" in line:
+        print(screen_mod.colored("- " + line, "green"))
+    else:
+        print("- " + line)
 
 
 def _failure_hint(run_dir: Path) -> str | None:
@@ -270,9 +321,7 @@ def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
             _clear()
             print("Run BLOCKED: required services are DOWN (no config written, no run created).")
             for item in problems:
-                print("[DOWN] %s\n       %s" % (item["name"], item.get("detail", "")[:160]))
-                if item.get("fix"):
-                    print("       fix: %s" % item["fix"])
+                _print_problem(item)
             _pause("Enter=back to menu")
             return
     config_path = cfg.write_run_config(effective, task_kind)
@@ -355,9 +404,11 @@ def _live_view(run_dir: Path):
         status = run_record.get("status", "?")
         if finished:
             total = (done_at if done_at is not None else time.time()) - start_ts
-            head = ("Live trace: %s  [%s] ■ done in %.0fs  events=%d (frozen — v=verify, Esc=back)%s" % (
-                run_dir.name, status, total, len(shown),
-                ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
+            head = screen_mod.colored(
+                ("Live trace: %s  [%s] ■ done in %.0fs  events=%d (frozen — v=verify, Esc=back)%s" % (
+                    run_dir.name, status, total, len(shown),
+                    ("  scroll +%d (Down returns to tail)" % offset) if offset else "")),
+                "green")
         else:
             state_mark = "%s working %s" % (
                 screen_mod.spinner(frame), screen_mod.dots(frame))
@@ -369,27 +420,28 @@ def _live_view(run_dir: Path):
         end = max(0, len(shown) - offset)
         window = shown[max(0, end - 18):end]
         for event in window:
-            title = event["title"][:110]
+            title = _cat_title(event)
             # In-flight steps keep their own spinner so waits are visible per line.
             if window and not finished and event is window[-1] and event.get("cat") in ("MODEL", "INFER", "TOOL"):
                 title = "%s %s" % (screen_mod.spinner(frame), title)
             body.append("  " + title)
             if detail_on and event.get("detail"):
                 for dl in event["detail"].split("\n")[:4]:
-                    body.append("      %s" % dl[:110])
+                    body.append(screen_mod.colored("      %s" % dl[:110], "gray"))
             if event.get("image"):
-                body.append("      [Open image: i] rev=%s" % event.get("revision"))
+                body.append(screen_mod.colored("      [Open image: i] rev=%s" % event.get("revision"), "green"))
         body.append("-" * 70)
         body.append("i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("back" if finished else "close (agent keeps running)"))
         if finished:
             body.append("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
             if run_record.get("status") == "failed":
                 hint = _failure_hint(run_dir)
-                body.append("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
-                                             " (0 events: the harness never started)" if not shown else ""))
+                body.append(screen_mod.colored("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
+                                             " (0 events: the harness never started)" if not shown else ""), "red"))
         else:
-            body.append("%s Waiting for model/tool/renderer — elapsed above is live, no fake %%."
-                        % screen_mod.spinner(frame))
+            body.append(screen_mod.colored(
+                "%s Waiting for model/tool/renderer — elapsed above is live, no fake %%."
+                % screen_mod.spinner(frame), "orange"))
         return body
 
     def _read_status() -> dict:
@@ -574,7 +626,7 @@ def _history():
     while True:
         found = runs_mod.discover_runs()
         lines = ["%d real run(s) found (read-only replay; never re-invokes model)." % len(found)]
-        options = ["%s  %s  %s  frames=%s  %s" % (r["runId"], r["status"], r["model"], r["frames"], r.get("task", "?")) for r in found]
+        options = ["%s  %s  %s  frames=%s  %s" % (r["runId"], _color_status(r["status"]), r["model"], r["frames"], r.get("task", "?")) for r in found]
         options.append("Back")
         choice = _menu("History", lines, options or ["Back"])
         if choice is None or choice >= len(found):
@@ -598,7 +650,8 @@ def _history_detail(item: dict):
         info = ["run=%s status=%s model=%s" % (item["runId"], item["status"], item["model"]),
                 "dir=%s" % run_dir,
                 "session=%s exit=%s state=%s" % (manifest.get("sessionId"), manifest.get("exitCode"), manifest.get("state")),
-                "verification: %s" % ("present" if verification else "missing — press Verify (no model call)")]
+                "verification: %s" % (screen_mod.colored("present", "green") if verification
+                                            else screen_mod.colored("missing — press Verify (no model call)", "orange"))]
         choice = _menu("Run detail (read-only)", info,
                        ["Replay events", "Verify now", "Open final PNG", "Open run folder", "Back"])
         if choice is None or choice == 4:
@@ -656,7 +709,7 @@ def _verify_view(run_dir: str):
     _clear()
     hint = _failure_hint(Path(run_dir))
     if hint:
-        print("Run FAILED: %s" % hint)
+        print(screen_mod.colored("Run FAILED: %s" % hint, "red"))
     if not (Path(run_dir) / "session.json").exists():
         print("Nothing to verify: no session.json (the harness never started).")
         print("Fix the cause above, then start a new run. This evidence is kept as-is.")
@@ -667,7 +720,7 @@ def _verify_view(run_dir: str):
         runs_mod.run_verify, run_dir)
     print("exit=%s" % result["code"])
     for line in runs_mod.verify_summary(result["report"]):
-        print("- " + line)
+        _print_verify_line(line)
     print("\nFull report kept at %s" % (Path(run_dir) / "verification.json"))
     _pause()
 
@@ -769,9 +822,7 @@ def _main() -> int:
         _clear()
         print("Volume Agent TUI — preflight (no model call made)")
         for item in env_state["items"]:
-            print("[%s] %s %s" % ("OK" if item["ok"] else "!!", item["name"], item.get("detail", "")[:100]))
-            if not item["ok"] and item.get("fix"):
-                print("     fix: %s" % item["fix"])
+            _print_check(item)
         print("-" * 70)
         if _menu("Continue anyway?", ["Missing files/tools stop before any Run."], ["Enter TUI", "Exit"]) != 0:
             return 0

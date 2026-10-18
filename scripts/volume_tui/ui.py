@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -383,6 +384,69 @@ def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
     thread.join(timeout=1)
 
 
+def _build_live_frame(run_dir: Path, shown: list[dict], offset: int, detail_on: bool,
+                      frame: int, start_ts: float, last_event_ts: float,
+                      done_at: float | None, run_record: dict, finished: bool) -> list[str]:
+    """Assemble one live-trace frame, fitted to the viewport height.
+
+    Screen.draw truncates every line to the terminal width, so one line is
+    exactly one row: a frame taller than the viewport scrolls on every
+    repaint even with in-place ANSI painting. Older event lines are cut from
+    the front (newest stays visible) once the frame would overflow.
+    """
+    status = run_record.get("status", "?")
+    if finished:
+        total = (done_at if done_at is not None else time.time()) - start_ts
+        head = screen_mod.colored(
+            ("Live trace: %s  [%s] ■ done in %.0fs  events=%d (frozen — v=verify, Esc=back)%s" % (
+                run_dir.name, status, total, len(shown),
+                ("  scroll +%d (Down returns to tail)" % offset) if offset else "")),
+            "green")
+    else:
+        state_mark = "%s working %s" % (
+            screen_mod.spinner(frame), screen_mod.dots(frame))
+        head = ("Live trace: %s  [%s] %s  events=%d  wait=%.0fs%s" % (
+            run_dir.name, status, state_mark, len(shown),
+            time.time() - last_event_ts,
+            ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
+    top = [head, "=" * 70]
+    event_lines: list[str] = []
+    end = max(0, len(shown) - offset)
+    window = shown[max(0, end - 18):end]
+    for event in window:
+        title = _cat_title(event)
+        # In-flight steps keep their own spinner so waits are visible per line.
+        if window and not finished and event is window[-1] and event.get("cat") in ("MODEL", "INFER", "TOOL"):
+            title = "%s %s" % (screen_mod.spinner(frame), title)
+        event_lines.append("  " + title)
+        if detail_on and event.get("detail"):
+            for dl in event["detail"].split("\n")[:10]:
+                event_lines.append(screen_mod.colored("      %s" % dl[:160], "gray"))
+        if event.get("image"):
+            event_lines.append(screen_mod.colored("      [Open image: i] rev=%s" % event.get("revision"), "green"))
+    foot = ["-" * 70,
+            "i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("back" if finished else "close (agent keeps running)")]
+    if finished:
+        foot.append("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
+        if run_record.get("status") == "failed":
+            hint = _failure_hint(run_dir)
+            foot.append(screen_mod.colored("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
+                                         " (0 events: the harness never started)" if not shown else ""), "red"))
+    try:
+        rows = shutil.get_terminal_size((80, 24)).lines
+    except Exception:
+        rows = 24
+    budget = max(4, max(10, rows - 1) - len(top) - len(foot))
+    if len(event_lines) > budget and budget > 1:
+        hidden = len(event_lines) - (budget - 1)
+        event_lines = ([screen_mod.colored(
+            "... %d earlier line(s) hidden (Up scrolls back)" % hidden, "gray")]
+            + event_lines[hidden:])
+    elif len(event_lines) > budget:
+        event_lines = event_lines[-budget:]
+    return top + event_lines + foot
+
+
 def _live_view(run_dir: Path):
     """Real-time trace: poll EventTail, show Tool Name -> Args -> Result -> Duration -> Image.
 
@@ -401,46 +465,8 @@ def _live_view(run_dir: Path):
     done_at: float | None = None  # latched the moment finished/failed is seen
 
     def _frame_lines(run_record: dict, finished: bool) -> list[str]:
-        status = run_record.get("status", "?")
-        if finished:
-            total = (done_at if done_at is not None else time.time()) - start_ts
-            head = screen_mod.colored(
-                ("Live trace: %s  [%s] ■ done in %.0fs  events=%d (frozen — v=verify, Esc=back)%s" % (
-                    run_dir.name, status, total, len(shown),
-                    ("  scroll +%d (Down returns to tail)" % offset) if offset else "")),
-                "green")
-        else:
-            state_mark = "%s working %s" % (
-                screen_mod.spinner(frame), screen_mod.dots(frame))
-            head = ("Live trace: %s  [%s] %s  events=%d  wait=%.0fs%s" % (
-                run_dir.name, status, state_mark, len(shown),
-                time.time() - last_event_ts,
-                ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
-        body = [head, "=" * 70]
-        end = max(0, len(shown) - offset)
-        window = shown[max(0, end - 18):end]
-        for event in window:
-            title = _cat_title(event)
-            # In-flight steps keep their own spinner so waits are visible per line.
-            if window and not finished and event is window[-1] and event.get("cat") in ("MODEL", "INFER", "TOOL"):
-                title = "%s %s" % (screen_mod.spinner(frame), title)
-            body.append("  " + title)
-            if detail_on and event.get("detail"):
-                for dl in event["detail"].split("\n")[:10]:
-                    body.append(screen_mod.colored("      %s" % dl[:160], "gray"))
-            if event.get("image"):
-                body.append(screen_mod.colored("      [Open image: i] rev=%s" % event.get("revision"), "green"))
-        body.append("-" * 70)
-        body.append("i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("back" if finished else "close (agent keeps running)"))
-        if finished:
-            body.append("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
-            if run_record.get("status") == "failed":
-                hint = _failure_hint(run_dir)
-                body.append(screen_mod.colored("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
-                                             " (0 events: the harness never started)" if not shown else ""), "red"))
-        else:
-            pass
-        return body
+        return _build_live_frame(run_dir, shown, offset, detail_on, frame,
+                                 start_ts, last_event_ts, done_at, run_record, finished)
 
     def _read_status() -> dict:
         try:

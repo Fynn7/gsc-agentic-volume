@@ -1,7 +1,0 @@
-{
-  "name": "gsc-agentic-volume",
-  "private": true,
-  "scripts": {
-    "dev": "npm --prefix frontend run dev"
-  }
-}

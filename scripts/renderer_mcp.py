@@ -24,8 +24,7 @@ def main():
     parser.add_argument('--timeout', type=float, default=120)
     args = parser.parse_args()
     if args.desktop_config:
-        from desktop_mcp import serve
-        return serve(args.desktop_config)
+        parser.error('--desktop-config was removed with the Desktop harness; this tree is TUI-only')
     if not args.service or not args.session: parser.error('--service and --session are required in legacy mode')
     base = args.service.rstrip('/')
     if urlsplit(base).hostname not in ('127.0.0.1', 'localhost'): raise ValueError('Renderer service must be loopback')

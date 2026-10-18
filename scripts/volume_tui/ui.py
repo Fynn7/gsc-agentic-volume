@@ -25,13 +25,18 @@ import config as cfg
 import env as env_mod
 import runs as runs_mod
 import runner as runner_mod
+import screen as screen_mod
 import services as services_mod
 import trace_events as trace_mod
 
 SHORTCUTS = "Up/Down select  Enter open  Esc back  i image  d details  o folder  q quit"
+# Shared loading tick: one animation family everywhere (menu/live/startup/verify).
+TICK = 0.12
 
 
 def _clear():
+    # Legacy one-shot clear. Live loops must NOT use this per frame (it
+    # flashes); they paint in place via screen_mod.Screen instead.
     os.system("cls" if os.name == "nt" else "clear")
 
 
@@ -79,28 +84,28 @@ def _menu(title: str, lines: list[str], options: list[str], start: int = 0) -> i
             return None
     idx = start
     import msvcrt  # noqa: F401
-    while True:
-        _clear()
-        print(title + "\n" + "=" * 70)
-        for l in lines:
-            print(l)
-        print("-" * 70)
-        for i, o in enumerate(options):
-            print(("> " if i == idx else "  ") + o)
-        print("-" * 70 + "\n" + SHORTCUTS)
-        key = _read_key()
-        if key == "up":
-            idx = (idx - 1) % len(options)
-        elif key == "down":
-            idx = (idx + 1) % len(options)
-        elif key == "enter":
-            return idx
-        elif key == "esc":
-            return None
-        elif key and key.isdigit():
-            n = int(key) - 1
-            if 0 <= n < len(options):
-                return n
+    frame = 0
+    with screen_mod.Screen() as scr:
+        while True:
+            scr.draw(
+                [title, "=" * 70, *lines, "-" * 70,
+                 *[("> " if i == idx else "  ") + o for i, o in enumerate(options)],
+                 "-" * 70, SHORTCUTS]
+            )
+            key = _read_key()
+            frame += 1
+            if key == "up":
+                idx = (idx - 1) % len(options)
+            elif key == "down":
+                idx = (idx + 1) % len(options)
+            elif key == "enter":
+                return idx
+            elif key == "esc":
+                return None
+            elif key and key.isdigit():
+                n = int(key) - 1
+                if 0 <= n < len(options):
+                    return n
 
 
 def _pause(msg="Enter=continue Esc=back"):
@@ -147,10 +152,13 @@ def _status_lines(settings: dict) -> list[str]:
 
 def _service_gate(settings: dict) -> list[dict]:
     """Fresh (uncached) Inference+Renderer+model check; blocks doomed runs before any side effect."""
-    items = env_mod.check_environment(settings)["items"]
+    items = screen_mod.run_with_spinner(
+        "Checking inference + renderer + model",
+        lambda: env_mod.check_environment(settings))["items"]
     down = [i for i in items if i["name"].startswith(("Inference", "Renderer")) and not i["ok"]]
     try:
-        down += services_mod.model_problems(settings)
+        down += screen_mod.run_with_spinner(
+            "Checking required model", services_mod.model_problems, settings)
     except Exception:
         pass
     return down
@@ -244,27 +252,34 @@ def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
 
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
-    # Wait until run_started or launcher exit.
+    # Wait until run_started or launcher exit (flicker-free + spinner).
     run_dir: Path | None = None
-    while thread.is_alive():
-        time.sleep(0.5)
-        with lock:
-            for raw in list(live_lines):
-                try:
-                    payload = json.loads(raw)
-                except ValueError:
-                    continue
-                if payload.get("event") == "run_started" and payload.get("directory"):
-                    run_dir = Path(payload["directory"])
-                    break
-        if run_dir is not None:
-            break
-        _clear()
-        print("Starting... (duplicate-task launches are refused with exit 3, nothing killed)")
-        with lock:
-            for raw in live_lines[-8:]:
-                print("  " + raw[:160])
-        print("\nWaiting for run_started... (Esc aborts VIEW only, agent keeps running)")
+    start_ts = time.time()
+    frame = 0
+    with screen_mod.Screen() as scr:
+        while thread.is_alive():
+            time.sleep(TICK)
+            with lock:
+                for raw in list(live_lines):
+                    try:
+                        payload = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if payload.get("event") == "run_started" and payload.get("directory"):
+                        run_dir = Path(payload["directory"])
+                        break
+            if run_dir is not None:
+                break
+            with lock:
+                tail_log = list(live_lines[-8:])
+            scr.draw(
+                ["%s Starting... (%.0fs) (duplicate-task launches are refused with exit 3, nothing killed)"
+                 % (screen_mod.spinner(frame), time.time() - start_ts),
+                 *["  " + raw[:160] for raw in tail_log],
+                 "",
+                 "Waiting for run_started... (Esc aborts VIEW only, agent keeps running)"]
+            )
+            frame += 1
     if run_dir is None and "result" in box and getattr(box["result"], "directory", None):
         run_dir = box["result"].directory
     if run_dir is None:
@@ -285,102 +300,137 @@ def _live_view(run_dir: Path):
     shown: list[dict] = []
     detail_on = True
     offset = 0  # 0 = live tail; Up scrolls back, Down returns toward the tail.
-    print("Following %s (read-only; closing this view never stops the agent)..." % run_dir)
-    time.sleep(0.5)
-    while True:
-        # Re-resolve session dir once the launcher writes session.json.
-        if tail.session_dir is None:
-            found = trace_mod.resolve_session_dir(run_dir)
-            if found:
-                tail.session_dir = found
-        for event in tail.poll():
-            shown.append(event)
-        run_record = {}
-        try:
-            run_record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
-        finished = run_record.get("status") in ("finished", "failed")
-        _clear()
-        print("Live trace: %s  [%s]  events=%d%s  (Waiting for model = elapsed only, no fake %%)" % (
-            run_dir.name, run_record.get("status", "?"), len(shown),
+    start_ts = time.time()
+    last_event_ts = start_ts
+    frame = 0
+
+    def _frame_lines(run_record: dict, finished: bool) -> list[str]:
+        status = run_record.get("status", "?")
+        if finished:
+            state_mark = "■ done"
+        else:
+            state_mark = "%s working %s" % (
+                screen_mod.spinner(frame), screen_mod.dots(frame))
+        head = ("Live trace: %s  [%s] %s  events=%d  wait=%.0fs%s" % (
+            run_dir.name, status, state_mark, len(shown),
+            time.time() - last_event_ts,
             ("  scroll +%d (Down returns to tail)" % offset) if offset else ""))
-        print("=" * 70)
+        body = [head, "=" * 70]
         end = max(0, len(shown) - offset)
         window = shown[max(0, end - 18):end]
         for event in window:
-            print("  %s" % event["title"][:110])
+            title = event["title"][:110]
+            # In-flight steps keep their own spinner so waits are visible per line.
+            if window and not finished and event is window[-1] and event.get("cat") in ("MODEL", "INFER", "TOOL"):
+                title = "%s %s" % (screen_mod.spinner(frame), title)
+            body.append("  " + title)
             if detail_on and event.get("detail"):
                 for dl in event["detail"].split("\n")[:4]:
-                    print("      %s" % dl[:110])
+                    body.append("      %s" % dl[:110])
             if event.get("image"):
-                print("      [Open image: i] rev=%s" % event.get("revision"))
-        print("-" * 70)
-        print("i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("close (agent keeps running)" if not finished else "back"))
+                body.append("      [Open image: i] rev=%s" % event.get("revision"))
+        body.append("-" * 70)
+        body.append("i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("close (agent keeps running)" if not finished else "back"))
         if finished:
-            print("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
+            body.append("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
             if run_record.get("status") == "failed":
                 hint = _failure_hint(run_dir)
-                print("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
-                                       " (0 events: the harness never started)" if not shown else ""))
-        if os.name != "nt":
-            raw = input("[i/d/o/v/u(p)/n(ewer)/Esc]> ").strip().lower()
-            if raw == "i":
-                _open_selected_image(shown)
-            elif raw == "d":
-                detail_on = not detail_on
-            elif raw == "u":
+                body.append("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
+                                             " (0 events: the harness never started)" if not shown else ""))
+        else:
+            body.append("%s Waiting for model/tool/renderer — elapsed above is live, no fake %%."
+                        % screen_mod.spinner(frame))
+        return body
+
+    with screen_mod.Screen() as scr:
+        while True:
+            # Re-resolve session dir once the launcher writes session.json.
+            if tail.session_dir is None:
+                found = trace_mod.resolve_session_dir(run_dir)
+                if found:
+                    tail.session_dir = found
+            fresh = tail.poll()
+            if fresh:
+                shown.extend(fresh)
+                last_event_ts = time.time()
+            run_record = {}
+            try:
+                run_record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            finished = run_record.get("status") in ("finished", "failed")
+            scr.draw(_frame_lines(run_record, finished))
+            frame += 1
+            if os.name != "nt":
+                raw = input("[i/d/o/v/u(p)/n(ewer)/Esc]> ").strip().lower()
+                if raw == "i":
+                    _open_selected_image(shown)
+                elif raw == "d":
+                    detail_on = not detail_on
+                elif raw == "u":
+                    offset = offset + 5
+                elif raw == "n":
+                    offset = max(0, offset - 5)
+                elif raw == "o":
+                    _open_path(str(run_dir))
+                elif raw == "v" and finished:
+                    _verify_view(str(run_dir))
+                    break
+                elif raw in ("", "b", "q"):
+                    break
+                continue
+            # Windows non-blocking poll: repaint at ~8fps with spinner, no cls.
+            import msvcrt
+            deadline = time.time() + 1.0
+            pressed = ""
+            while time.time() < deadline:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getch()
+                    if ch in (b"\x00", b"\xe0"):
+                        ch2 = msvcrt.getch()
+                        if ch2 == b"H":
+                            pressed = "scroll-up"
+                        elif ch2 == b"P":
+                            pressed = "scroll-down"
+                        else:
+                            continue
+                        break
+                    if ch == b"\x1b":
+                        pressed = "esc"
+                        break
+                    try:
+                        pressed = ch.decode("utf-8", "ignore").lower()
+                    except Exception:
+                        pressed = ""
+                    break
+                time.sleep(TICK)
+                # Animate the wait even with zero new events (no full clear).
+                fresh = tail.poll()
+                if fresh:
+                    shown.extend(fresh)
+                    last_event_ts = time.time()
+                try:
+                    run_record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    pass
+                finished = run_record.get("status") in ("finished", "failed")
+                scr.draw(_frame_lines(run_record, finished))
+                frame += 1
+            if pressed == "esc":
+                break
+            elif pressed == "scroll-up":
                 offset = offset + 5
-            elif raw == "n":
+            elif pressed == "scroll-down":
                 offset = max(0, offset - 5)
-            elif raw == "o":
+            elif pressed == "d":
+                detail_on = not detail_on
+            elif pressed == "i":
+                _open_selected_image(shown)
+            elif pressed == "o":
                 _open_path(str(run_dir))
-            elif raw == "v" and finished:
+            elif pressed == "v" and finished:
                 _verify_view(str(run_dir))
                 break
-            elif raw in ("", "b", "q"):
-                break
-            continue
-        # Windows non-blocking poll with 1s refresh.
-        import msvcrt
-        deadline = time.time() + 1.0
-        pressed = ""
-        while time.time() < deadline:
-            if msvcrt.kbhit():
-                ch = msvcrt.getch()
-                if ch in (b"\x00", b"\xe0"):
-                    ch2 = msvcrt.getch()
-                    if ch2 == b"H":
-                        pressed = "scroll-up"
-                    elif ch2 == b"P":
-                        pressed = "scroll-down"
-                    else:
-                        continue
-                    break
-                if ch == b"\x1b":
-                    pressed = "esc"
-                    break
-                try:
-                    pressed = ch.decode("utf-8", "ignore").lower()
-                except Exception:
-                    pressed = ""
-                break
-            time.sleep(0.05)
-        if pressed == "esc":
-            break
-        elif pressed == "scroll-up":
-            offset = offset + 5
-        elif pressed == "scroll-down":
-            offset = max(0, offset - 5)
-        elif pressed == "d":
-            detail_on = not detail_on
-        elif pressed == "i":
-            _open_selected_image(shown)
-        elif pressed == "o":
-            _open_path(str(run_dir))
-        elif pressed == "v" and finished:
-            _verify_view(str(run_dir))
-            break
 
 
 def _open_selected_image(shown: list[dict]):
@@ -493,8 +543,9 @@ def _verify_view(run_dir: str):
         print("Fix the cause above, then start a new run. This evidence is kept as-is.")
         _pause()
         return
-    print("Verify (existing verifier only; no model call)...")
-    result = runs_mod.run_verify(run_dir)
+    result = screen_mod.run_with_spinner(
+        "Verifying (existing verifier only; no model call)",
+        runs_mod.run_verify, run_dir)
     print("exit=%s" % result["code"])
     for line in runs_mod.verify_summary(result["report"]):
         print("- " + line)
@@ -541,12 +592,19 @@ def _settings(settings: dict) -> dict:
             _clear()
             print("Checking H200 tunnel + remote model (honest, no silent fallback)...")
             import urllib.request
-            endpoint = settings["h200Endpoint"].rstrip("/")
-            try:
+
+            def _probe_h200():
+                endpoint = settings["h200Endpoint"].rstrip("/")
                 with urllib.request.urlopen(endpoint + "/api/version", timeout=5) as r:
-                    print("tunnel OK: %s" % json.load(r))
+                    version = json.load(r)
                 with urllib.request.urlopen(endpoint + "/api/tags", timeout=10) as r:
                     tags = json.load(r)
+                return version, tags
+
+            try:
+                version, tags = screen_mod.run_with_spinner(
+                    "Probing H200 tunnel + remote model", _probe_h200)
+                print("tunnel OK: %s" % version)
                 names = [m.get("name") for m in tags.get("models", [])]
                 print("remote models: %s" % names[:10])
                 print("wanted %s: %s" % (settings["model"],
@@ -579,13 +637,15 @@ def _main() -> int:
         print("Open Windows PowerShell or Windows Terminal and run .\\Start-VolumeTUI.ps1 there.")
         return 2
     settings = cfg.load_settings()
-    print("Starting owned background services (Local loopback only; nothing foreign is touched)...")
-    svc = services_mod.ensure_services(settings)
+    svc = screen_mod.run_with_spinner(
+        "Starting owned background services (Local loopback only)",
+        services_mod.ensure_services, settings)
     for line in services_mod.report_lines(svc):
         print(line)
     if svc.get("owns"):
         services_mod.heartbeat_start()
-    env_state = env_mod.check_environment(settings)
+    env_state = screen_mod.run_with_spinner(
+        "Running preflight checks", env_mod.check_environment, settings)
     if not env_state["ok"]:
         _clear()
         print("Volume Agent TUI — preflight (no model call made)")

@@ -1,11 +1,14 @@
 """Structured event tailing that reuses agent_console semantics.
 
-Same three sources as scripts/agent_console.py (harness.jsonl,
-runtime/<session>/events.jsonl, http/*.metadata.json), same dedup/order
-(harness -> events -> http per poll), same partial-line handling: the last
-line without a trailing newline is buffered, never parsed. No base64 bodies
-are ever loaded; request/response *.bin files are only counted, and pixel
-matching stays inside verify_local_agent.py.
+Sources: harness.jsonl, the run's own session.json (embedded events array,
+first choice — always in the run dir), runtime/<session>/events.jsonl
+(gap-fill by sequence number), http/*.metadata.json, plus the recorded
+request bodies for per-call request summaries. Same partial-line handling
+as agent_console: the last line without a trailing newline is buffered,
+never parsed. Image bytes are never loaded into the view; request/response
+bodies are summarized (model, text heads, tool names/args, image counts)
+and base64 is never printed; pixel matching stays inside
+verify_local_agent.py.
 """
 from __future__ import annotations
 
@@ -23,6 +26,61 @@ def _http_index(path: Path) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _request_summary(run_dir: Path, index: int) -> str:
+    """What was actually sent to the model for call #index (no base64).
+
+    Reads the recorded request body (forwarded copy preferred) and reports
+    model, message roles with text heads, tool calls with brief arguments,
+    and tool outputs as text heads + image counts/byte sizes. Image bytes
+    are never included.
+    """
+    for name in ("http-%03d.forwarded.bin" % index, "http-%03d.request.bin" % index):
+        path = run_dir / "http" / name
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > 32 * 1024 * 1024:
+                return "request body too large to summarize (%d bytes)" % path.stat().st_size
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        lines = ["model=%s" % payload.get("model", "?")]
+        tools = payload.get("tools") or []
+        if tools:
+            lines.append("tools=%s" % ",".join(str(t.get("name", "?")) for t in tools if isinstance(t, dict)))
+        for item in (payload.get("input") or []):
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type")
+            if kind == "message":
+                texts = [c.get("text", "") for c in (item.get("content") or [])
+                         if isinstance(c, dict) and isinstance(c.get("text"), str)]
+                head = console_mod._brief(" ".join(texts), 160)
+                lines.append("%s: %s" % (item.get("role", "?"), head))
+            elif kind == "function_call":
+                lines.append("call %s %s" % (
+                    item.get("name", "?"), console_mod._brief(item.get("arguments", ""), 200)))
+            elif kind == "function_call_output":
+                texts, images, image_bytes = [], 0, 0
+                for chunk in (item.get("output") or []):
+                    if not isinstance(chunk, dict):
+                        continue
+                    if isinstance(chunk.get("text"), str):
+                        texts.append(chunk["text"])
+                    if chunk.get("type") == "input_image":
+                        images += 1
+                        url = chunk.get("image_url") or ""
+                        image_bytes += len(url) if isinstance(url, str) else 0
+                if texts:
+                    lines.append("output: %s" % console_mod._brief(" ".join(texts), 200))
+                if images:
+                    lines.append("output: %d image(s) ~%d bytes (bytes not shown)" % (images, image_bytes))
+                if not texts and not images:
+                    lines.append("output: (empty)")
+        return "\n".join(lines) if lines else "(empty request body)"
+    return "(request body not recorded yet)"
+
+
 class EventTail:
     """Incremental, read-only tail producing compact display dicts."""
 
@@ -32,6 +90,8 @@ class EventTail:
         self._files: dict[str, dict] = {}
         self._seen_request: set[str] = set()
         self._seen_metadata: set[str] = set()
+        self._seen_seq: set = set()
+        self._session_offset = 0
         self._turn = 0
         self.counters = {"images": 0, "tools": 0, "http": 0}
 
@@ -63,6 +123,7 @@ class EventTail:
     def poll(self) -> list[dict]:
         events: list[dict] = []
         events += self._poll_harness()
+        events += self._poll_session_json()
         events += self._poll_events()
         events += self._poll_http()
         return events
@@ -102,6 +163,79 @@ class EventTail:
                                 "detail": console_mod._brief(item.get("message", ""), 320)})
         return out
 
+    # -- run_dir/session.json (embedded events array; always in the run dir) --
+    def _poll_session_json(self) -> list[dict]:
+        """Tool/image/finish evidence from the run's own session.json.
+
+        The service event log under runtime/<session>/events.jsonl may be
+        unreachable while a run is live (session id unknown until the copy
+        lands). The run directory's session.json embeds the same event
+        sequence, so poll it first; the events.jsonl tail below only fills
+        gaps by sequence number.
+        """
+        out = []
+        try:
+            data = json.loads((self.run_dir / "session.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return out
+        events = data.get("events")
+        if not isinstance(events, list):
+            return out
+        start = self._session_offset
+        if start > len(events):
+            start = 0
+        for record in events[start:]:
+            self._session_offset += 1
+            if not isinstance(record, dict):
+                continue
+            seq = record.get("seq")
+            if seq is not None:
+                if seq in self._seen_seq:
+                    continue
+                self._seen_seq.add(seq)
+            event = self._service_record(record)
+            if event is not None:
+                out.append(event)
+        return out
+
+    def _service_record(self, record: dict) -> dict | None:
+        """One service event (shared by session.json and events.jsonl tails)."""
+        kind = record.get("kind")
+        if kind in ("initial_render", "render", "slice"):
+            result = record.get("result") or {}
+            image = result.get("image")
+            scene = result.get("scene") or {}
+            rev = scene.get("revision")
+            self.counters["images"] += 1
+            label = ("Frame %d" % self.counters["images"]) if kind != "slice" else "Slice"
+            return {"cat": "IMAGE", "title": "IMAGE %s  Native PNG saved" % label,
+                    "detail": "rev=%s nonblack=%s\n%s" % (
+                        rev, result.get("nonblackPixels"), image),
+                    "image": image, "revision": rev}
+        elif kind == "external_tool_call":
+            self.counters["tools"] += 1
+            return {"cat": "TOOL", "title": "TOOL  %s  Started" % record.get("name"),
+                    "detail": console_mod._brief(record.get("arguments", {}), 240)}
+        elif kind == "external_tool_return":
+            try:
+                seconds = " %.2fs" % float(record["seconds"])
+            except (KeyError, TypeError, ValueError):
+                seconds = ""
+            return {"cat": "TOOL", "title": "TOOL  %s  Success (%s)" % (record.get("name"), seconds.strip() or "?"),
+                    "detail": ""}
+        elif kind == "tool_error":
+            return {"cat": "ERROR", "title": "TOOL  %s  Failed" % record.get("name"),
+                    "detail": console_mod._brief(record.get("message", ""), 300)}
+        elif kind == "finish":
+            return {"cat": "FINISH", "title": "FINISH  selected revision %s" % record.get("selectedRevision"),
+                    "detail": "verification=%s claim: %s" % (
+                        record.get("externalTaskVerification"),
+                        console_mod._brief(record.get("modelClaim", ""), 400))}
+        elif kind == "error":
+            return {"cat": "ERROR", "title": "ERROR",
+                    "detail": console_mod._brief(record.get("message", ""), 300)}
+        return None
+
     # -- runtime/<session>/events.jsonl (tools + images) ------------------
     def _poll_events(self) -> list[dict]:
         out = []
@@ -112,40 +246,14 @@ class EventTail:
                 record = json.loads(line)
             except ValueError:
                 continue
-            kind = record.get("kind")
-            if kind in ("initial_render", "render", "slice"):
-                result = record.get("result") or {}
-                image = result.get("image")
-                scene = result.get("scene") or {}
-                rev = scene.get("revision")
-                self.counters["images"] += 1
-                label = ("Frame %d" % self.counters["images"]) if kind != "slice" else "Slice"
-                out.append({"cat": "IMAGE", "title": "IMAGE %s  Native PNG saved" % label,
-                            "detail": "rev=%s nonblack=%s\n%s" % (
-                                rev, result.get("nonblackPixels"), image),
-                            "image": image, "revision": rev})
-            elif kind == "external_tool_call":
-                self.counters["tools"] += 1
-                out.append({"cat": "TOOL", "title": "TOOL  %s  Started" % record.get("name"),
-                            "detail": console_mod._brief(record.get("arguments", {}), 240)})
-            elif kind == "external_tool_return":
-                try:
-                    seconds = " %.2fs" % float(record["seconds"])
-                except (KeyError, TypeError, ValueError):
-                    seconds = ""
-                out.append({"cat": "TOOL", "title": "TOOL  %s  Success (%s)" % (record.get("name"), seconds.strip() or "?"),
-                            "detail": ""})
-            elif kind == "tool_error":
-                out.append({"cat": "ERROR", "title": "TOOL  %s  Failed" % record.get("name"),
-                            "detail": console_mod._brief(record.get("message", ""), 300)})
-            elif kind == "finish":
-                out.append({"cat": "FINISH", "title": "FINISH  selected revision %s" % record.get("selectedRevision"),
-                            "detail": "verification=%s claim: %s" % (
-                                record.get("externalTaskVerification"),
-                                console_mod._brief(record.get("modelClaim", ""), 400))})
-            elif kind == "error":
-                out.append({"cat": "ERROR", "title": "ERROR",
-                            "detail": console_mod._brief(record.get("message", ""), 300)})
+            seq = record.get("seq")
+            if seq is not None:
+                if seq in self._seen_seq:
+                    continue
+                self._seen_seq.add(seq)
+            event = self._service_record(record)
+            if event is not None:
+                out.append(event)
         return out
 
     # -- http/*.metadata.json (inference) ----------------------------------
@@ -158,8 +266,9 @@ class EventTail:
             if path.name in self._seen_request:
                 continue
             self._seen_request.add(path.name)
-            out.append({"cat": "INFER", "title": "INFER  call #%d  Waiting for model" % _http_index(path),
-                        "detail": "request sent; elapsed time shown live, no fake percent"})
+            index = _http_index(path)
+            out.append({"cat": "INFER", "title": "INFER  call #%d  Sent to model" % index,
+                        "detail": _request_summary(self.run_dir, index)})
         for path in sorted(directory.glob("http-*.metadata.json"), key=_http_index):
             if path.name in self._seen_metadata:
                 continue

@@ -136,6 +136,61 @@ class TraceEvents(unittest.TestCase):
             # The completed line is still invalid JSON ("broken...), so it stays skipped.
             self.assertEqual([e["cat"] for e in tail.poll()], [])
 
+    def test_infer_event_shows_request_summary_not_filler(self):
+        import ui as tui_ui
+        import inspect
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir, session_dir = self._fixture_run(Path(tmp))
+            (run_dir / "http" / "http-001.forwarded.bin").write_text(json.dumps({
+                "model": "qwen3.6:35b",
+                "input": [
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "rotate the camera now"}]},
+                    {"type": "function_call", "name": "render_scene",
+                     "arguments": '{"rotationXYZ":[25,-35,10]}'},
+                    {"type": "function_call_output", "call_id": "c1", "output": [
+                        {"type": "input_text", "text": "rev=1 nonblack=5"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,AAAA",
+                         "detail": "auto"}]},
+                ],
+                "tools": [{"name": "mcp__renderer"}]}), encoding="utf-8")
+            tail = tui_trace.EventTail(run_dir, session_dir)
+            infer = [e for e in tail.poll() if e["cat"] == "INFER" and "Sent to model" in e["title"]]
+            self.assertEqual(len(infer), 1)
+            detail = infer[0]["detail"]
+            self.assertIn("model=qwen3.6:35b", detail)
+            self.assertIn("rotate the camera", detail)
+            self.assertIn("render_scene", detail)
+            self.assertIn("1 image(s)", detail)
+            self.assertNotIn("AAAA", detail)
+            self.assertNotIn("fake", detail)
+        self.assertNotIn("fake", inspect.getsource(tui_ui._live_view))
+
+    def test_session_json_events_need_no_session_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run-y"
+            run_dir.mkdir()
+            (run_dir / "session.json").write_text(json.dumps({"id": "sid-y", "events": [
+                {"seq": 0, "kind": "external_tool_call", "name": "render_scene",
+                 "arguments": {"rotationXYZ": [25, -35, 10]}},
+                {"seq": 1, "kind": "render", "result": {
+                    "image": "D:/g.png", "scene": {"revision": 1}, "nonblackPixels": 7}},
+                {"seq": 2, "kind": "finish", "selectedRevision": 1,
+                 "externalTaskVerification": "unverified", "modelClaim": "done"}]}),
+                encoding="utf-8")
+            tail = tui_trace.EventTail(run_dir, None)
+            cats = [e["cat"] for e in tail.poll()]
+            self.assertEqual(cats, ["TOOL", "IMAGE", "FINISH"])
+            # Gap-fill from events.jsonl uses the same sequence space: no doubles.
+            session_dir = Path(tmp) / "sid-y"
+            session_dir.mkdir()
+            (session_dir / "events.jsonl").write_text(
+                '{"seq": 1, "kind": "render", "result": {"image": "D:/g.png",'
+                ' "scene": {"revision": 1}, "nonblackPixels": 7}}\n',
+                encoding="utf-8")
+            tail.session_dir = session_dir
+            self.assertEqual(tail.poll(), [])
+
     def test_history_tolerates_missing_and_old_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

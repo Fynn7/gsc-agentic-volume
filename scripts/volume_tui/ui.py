@@ -426,8 +426,8 @@ def _live_view(run_dir: Path):
                 title = "%s %s" % (screen_mod.spinner(frame), title)
             body.append("  " + title)
             if detail_on and event.get("detail"):
-                for dl in event["detail"].split("\n")[:4]:
-                    body.append(screen_mod.colored("      %s" % dl[:110], "gray"))
+                for dl in event["detail"].split("\n")[:10]:
+                    body.append(screen_mod.colored("      %s" % dl[:160], "gray"))
             if event.get("image"):
                 body.append(screen_mod.colored("      [Open image: i] rev=%s" % event.get("revision"), "green"))
         body.append("-" * 70)
@@ -439,9 +439,7 @@ def _live_view(run_dir: Path):
                 body.append(screen_mod.colored("FAILED %s%s" % (hint or "cause unknown — open the run folder and read failure.json",
                                              " (0 events: the harness never started)" if not shown else ""), "red"))
         else:
-            body.append(screen_mod.colored(
-                "%s Waiting for model/tool/renderer — elapsed above is live, no fake %%."
-                % screen_mod.spinner(frame), "orange"))
+            pass
         return body
 
     def _read_status() -> dict:

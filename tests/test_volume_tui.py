@@ -278,6 +278,131 @@ class SelfAcceptanceFixes(unittest.TestCase):
             (root / "failure.json").write_text(json.dumps({"error": "boom  info"}))
             self.assertIn("boom", tui_ui._failure_hint(root))
 
+    def test_renderer_down_hint_names_the_real_start_command(self):
+        import env as tui_env
+        with patch.object(tui_env, "_http_json", side_effect=OSError("refused")):
+            items = tui_env.check_environment({"mode": "Local", "endpoint": "http://127.0.0.1:11434",
+                                               "h200Endpoint": "http://127.0.0.1:11435",
+                                               "rendererService": "http://127.0.0.1:8765",
+                                               "model": "qwen3.6:35b"})["items"]
+        renderer = next(i for i in items if i["name"].startswith("Renderer"))
+        self.assertFalse(renderer["ok"])
+        self.assertIn("src/app.py", renderer["fix"])
+
+    def test_service_lifecycle_autostart_and_release(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = {"mode": "Local", "model": "qwen3.6:35b",
+                        "endpoint": "http://127.0.0.1:11499",
+                        "h200Endpoint": "http://127.0.0.1:11498",
+                        "rendererService": "http://127.0.0.1:18765"}
+            state = {"ollama_up": False, "renderer_up": False}
+            want_context = tui_config.example_config().get("contextSize")
+
+            def fake_http(url, timeout=5.0):
+                if url.endswith("/api/version") and state["ollama_up"]:
+                    return {"version": "test"}
+                if url.endswith("/api/tags"):
+                    if not state["ollama_up"]:
+                        raise OSError("refused")
+                    return {"models": [{"name": "qwen3.6:35b"}]}
+                if url.endswith("/api/ps"):
+                    return {"models": [{"name": "qwen3.6:35b", "context_length": want_context}]}
+                if url.endswith("/api/service"):
+                    if not state["renderer_up"]:
+                        raise OSError("refused")
+                    return {"service": "gav-native-renderer"}
+                raise OSError("refused")
+
+            def fake_spawn(cmd, env, cwd, stem):
+                if stem == "ollama":
+                    state["ollama_up"] = True
+                    return 1111
+                state["renderer_up"] = True
+                return 2222
+
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "_http_get", side_effect=fake_http), \
+                 patch.object(tui_services, "_spawn", side_effect=fake_spawn), \
+                 patch.object(tui_services.shutil, "which", return_value="C:/fake/ollama.exe"):
+                report = tui_services.ensure_services(settings)
+                self.assertEqual(len(report["started"]), 2)
+                self.assertEqual(report["problems"], [])
+                record = json.loads((root / "services.json").read_text(encoding="utf-8"))
+                self.assertEqual(record["services"]["ollama"]["pid"], 1111)
+
+                killed = []
+
+                def fake_image(pid):
+                    return {1111: "ollama.exe", 2222: "python.exe"}.get(pid)
+
+                with patch.object(tui_services, "_image_of_pid", side_effect=fake_image), \
+                     patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True), \
+                     patch.object(tui_services.runs_mod, "discover_runs", return_value=[]), \
+                     patch.object(tui_services, "process_alive", return_value=True), \
+                     patch.object(tui_services, "_live_launchers", return_value=[]):
+                    rel = tui_services.release_owned_services()
+                self.assertEqual(sorted(killed), [1111, 2222])
+                self.assertIsNone(rel["kept"])
+                record = json.loads((root / "services.json").read_text(encoding="utf-8"))
+                self.assertEqual(record["services"], {})
+
+    def test_release_refuses_while_agent_running(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "services.json").write_text(json.dumps(
+                {"owner": tui_services.SESSION_ID, "heartbeat": 9999999999.0,
+                 "services": {"ollama": {"pid": 31337, "image": "ollama.exe"}}}))
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-x", "status": "Running"}]):
+                killed = []
+                with patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True):
+                    rel = tui_services.release_owned_services()
+                self.assertEqual(killed, [])
+                self.assertIn("still live", rel["kept"])
+                record = json.loads((root / "services.json").read_text(encoding="utf-8"))
+                self.assertIn("ollama", record["services"])
+
+    def test_release_never_touches_foreign_images(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "services.json").write_text(json.dumps(
+                {"owner": tui_services.SESSION_ID, "heartbeat": 9999999999.0,
+                 "services": {"renderer": {"pid": 42424, "image": "python.exe"}}}))
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "process_alive", return_value=True), \
+                 patch.object(tui_services, "_image_of_pid", return_value="notepad.exe"), \
+                 patch.object(tui_services.runs_mod, "discover_runs", return_value=[]), \
+                 patch.object(tui_services, "_live_launchers", return_value=[]):
+                killed = []
+                with patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True):
+                    rel = tui_services.release_owned_services()
+                self.assertEqual(killed, [])
+                self.assertTrue(any("no longer ours" in s for s in rel["skipped"]))
+
+    def test_h200_never_autostarts(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = {"mode": "H200", "model": "qwen3.6:35b",
+                        "endpoint": "http://127.0.0.1:11434",
+                        "h200Endpoint": "http://127.0.0.1:11498",
+                        "rendererService": "http://127.0.0.1:18766"}
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "_http_get", side_effect=OSError("no tunnel")), \
+                 patch.object(tui_services, "_image_of_pid", return_value=None), \
+                 patch.object(tui_services, "_wait_true", return_value=False):
+                spawned = []
+                with patch.object(tui_services, "_spawn", side_effect=lambda *a: spawned.append(a[3]) or 999):
+                    report = tui_services.ensure_services(settings)
+                # Local renderer is still managed in H200 mode; Ollama/tunnel never is.
+                self.assertNotIn("ollama", spawned)
+                self.assertTrue(any("H200" in p["name"] for p in report["problems"]))
+
     def test_no_tty_refuses_with_guidance_not_traceback(self):
         import io
         import ui as tui_ui

@@ -34,7 +34,7 @@ $tuiDir = Join-Path $repoRoot 'runtime\tui'
 New-Item -ItemType Directory -Path $tuiDir -Force | Out-Null
 
 if ($StartOllama) {
-  Write-Host 'Note: -StartOllama is accepted for parity but the TUI itself never auto-starts inference silently; use Settings + Run preflight messages.'
+  Write-Host 'Note: -StartOllama is legacy; the TUI starts missing local services itself on entry and stops its own on exit.'
 }
 
 # Read default settings for a one-line status (no model request).

@@ -63,6 +63,18 @@
 - `scripts/volume_tui/{config,env,runs,trace_events,runner,ui}.py` — control/display only.
 - `tests/test_volume_tui.py` — non-recursive (launcher `execute` mocked; no Qwen call).
 
+## Service lifecycle (auto-start on entry, auto-stop on exit)
+
+- TUI entry runs `services.ensure_services`: missing **Local loopback**
+  Ollama/Renderer are started detached (logs under `runtime/tui/`) and
+  recorded in `runtime/tui/services.json` with session id + pid + image.
+- Exit runs `services.release_owned_services`: only recorded, re-verified
+  (pid alive + image name match) processes are terminated. Refused while any
+  agent run (`Running`) or launcher lock is live — services stay up instead.
+- Never auto-started: H200 tunnel/endpoint, non-loopback URLs. Never
+  downloaded: models (`ollama pull` stays manual). Never touched: foreign
+  processes, harness children, another live TUI session (heartbeat-guarded).
+
 ## Self-acceptance fixes (2026-10-18, no model run, evidence untouched)
 
 1. `Start-VolumeTUI.ps1` used repo-relative paths — fails from any other cwd. Now absolute via `$repoRoot`.

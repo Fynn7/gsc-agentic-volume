@@ -25,6 +25,7 @@ import config as cfg
 import env as env_mod
 import runs as runs_mod
 import runner as runner_mod
+import services as services_mod
 import trace_events as trace_mod
 
 SHORTCUTS = "Up/Down select  Enter open  Esc back  i image  d details  o folder  q quit"
@@ -138,15 +139,21 @@ def _status_lines(settings: dict) -> list[str]:
         "Mode: %s   Model: %s" % (settings.get("mode"), settings.get("model")),
         "Inference: %s" % ("OK" if get("Inference").get("ok") else "DOWN: %s" % get("Inference").get("detail", "")[:80]),
         "Renderer:  %s" % ("OK" if get("Renderer").get("ok") else "DOWN: %s" % get("Renderer").get("detail", "")[:80]),
+        "Services: %s" % services_mod.owned_summary(),
         "Running now: %s" % (running[0]["runId"] if running else "none"),
         "Last run: %s (%s)" % (last["runId"] if last else "none", last["status"] if last else "-"),
     ]
 
 
 def _service_gate(settings: dict) -> list[dict]:
-    """Fresh (uncached) Inference+Renderer check; blocks doomed runs before any side effect."""
+    """Fresh (uncached) Inference+Renderer+model check; blocks doomed runs before any side effect."""
     items = env_mod.check_environment(settings)["items"]
-    return [i for i in items if i["name"].startswith(("Inference", "Renderer")) and not i["ok"]]
+    down = [i for i in items if i["name"].startswith(("Inference", "Renderer")) and not i["ok"]]
+    try:
+        down += services_mod.model_problems(settings)
+    except Exception:
+        pass
+    return down
 
 
 def _failure_hint(run_dir: Path) -> str | None:
@@ -557,6 +564,13 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nInterrupted; the agent (if any) keeps running and no evidence was touched.")
         return 130
+    finally:
+        try:
+            services_mod.heartbeat_stop()
+            for line in services_mod.release_lines(services_mod.release_owned_services()):
+                print(line)
+        except Exception as error:
+            print("Service release skipped: %s" % error)
 
 
 def _main() -> int:
@@ -565,6 +579,12 @@ def _main() -> int:
         print("Open Windows PowerShell or Windows Terminal and run .\\Start-VolumeTUI.ps1 there.")
         return 2
     settings = cfg.load_settings()
+    print("Starting owned background services (Local loopback only; nothing foreign is touched)...")
+    svc = services_mod.ensure_services(settings)
+    for line in services_mod.report_lines(svc):
+        print(line)
+    if svc.get("owns"):
+        services_mod.heartbeat_start()
     env_state = env_mod.check_environment(settings)
     if not env_state["ok"]:
         _clear()

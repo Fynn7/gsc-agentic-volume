@@ -65,7 +65,8 @@ def check_environment(settings: dict) -> dict:
             "" if ok else "Port conflict: the URL does not identify gav-native-renderer. Check port 8765.")
     except Exception as error:
         add("Renderer %s" % renderer, False, str(error)[:160],
-            "Start the renderer via scripts/start-local-vlm.ps1 once, or let the next Run start it; TUI keeps it for reuse.")
+            "The TUI auto-starts it on entry; if this persists, start it yourself from the "
+            "repo root with the Codex bundled python: python -B src/app.py --port 8765.")
 
     model_ok = True
     if settings.get("mode") == "H200":

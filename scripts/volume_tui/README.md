@@ -94,6 +94,15 @@
 - Exit runs `services.release_owned_services`: only recorded, re-verified
   (pid alive + image name match) processes are terminated. Refused while any
   agent run (`Running`) or launcher lock is live — services stay up instead.
+- **Ctrl+C is a hard stop** (`services.shutdown_all`): this TUI's
+  launcher/harness/MCP process trees are killed first, then every local
+  `ollama*` image (server, model runner, tray app) so the model is unloaded
+  from VRAM, then the recorded renderer. A second Ctrl+C cannot abort cleanup
+  (`SIGINT` is ignored during shutdown). The stopped Ollama endpoint is
+  re-probed and reported as `verified down` or `STILL ANSWERING` — never
+  assumed. Evidence directories are only read; nothing is deleted.
+- Normal quit/Esc keeps a live agent running (its process tree is untouched);
+  Esc in the live view closes the view only. Ctrl+C is the explicit stop-all.
 - Never auto-started: H200 tunnel/endpoint, non-loopback URLs. Never
   downloaded: models (`ollama pull` stays manual). Never touched: foreign
   processes, harness children, another live TUI session (heartbeat-guarded).
@@ -136,3 +145,26 @@ Cached paths finish before the first frame, so routine menu redraws do not flash
 12. Verify always used `sys.executable` (worker venv lacks NumPy). Now falls back to the Codex bundled interpreter.
 
 Verified: 16 TUI + 32 lifecycle tests green; real-history probe labels Task A; `git status` shows only the three new paths.
+
+## Ctrl+C hard stop (2026-10-19)
+
+Reported: Ctrl+C left the harness running and Ollama still held the model.
+Cause: `main()` only did a soft release in `finally`, and that release refused
+to stop services while a run still looked `Running`; a second Ctrl+C during
+that release aborted it with a traceback.
+
+1. `ui.main` now handles `KeyboardInterrupt` first with `services.shutdown_all`.
+2. `_terminate_agent_trees` kills the tracked launcher (`runner.stop_active`,
+   `/T /F`), then live descendants and lock/manifest harness PIDs — so codex
+   and its renderer-MCP children stop requesting inference before Ollama dies.
+3. `terminate_local_inference` kills every local `ollama*` process (including
+   a reused instance that predated the TUI) and re-probes `/api/version` for
+   up to 5s, reporting `verified down` only when the endpoint is gone.
+4. `release_owned_services(force=True)` stops the recorded renderer without
+   the "live run" refusal that previously kept everything alive.
+5. `SIGINT` is ignored inside shutdown, so repeated Ctrl+C cannot interrupt
+   the kill sequence. `run_local_agent.stop_harness` does the same for its
+   harness child and records `failure.json` with `status=interrupted`.
+6. Esc / menu quit keep their old semantics: close the view/TUI, leave a live
+   agent alone.
+

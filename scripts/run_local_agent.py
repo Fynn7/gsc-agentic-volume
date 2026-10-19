@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +36,33 @@ PROVENANCE_SOURCES = [ROOT / 'src/app.py', ROOT / 'src/renderer.py', ROOT / 'src
 
 def write_json(path, data):
     path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+
+
+def stop_harness(process):
+    """Kill the harness and every child it spawned (Ctrl+C / timeout).
+
+    Uses `/T` so codex's MCP server children die too; a follow-up Ctrl+C must
+    not abort the kill, so SIGINT is ignored for the rest of this process.
+    """
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/pid', str(process.pid), '/T', '/F'],
+                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            process.terminate()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def http(base, path, body=None, timeout=120):
@@ -258,10 +286,16 @@ def execute(context, show_images=False, open_images=False):
             try: manifest['exitCode']=process.wait(timeout=config['taskTimeoutSeconds'])
             except subprocess.TimeoutExpired:
                 manifest['timedOut']=True
-                subprocess.run(['taskkill','/pid',str(process.pid),'/T','/F'],capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
-                process.wait(); manifest['exitCode']=process.returncode
+                stop_harness(process)
+                manifest['exitCode']=process.returncode
+            except KeyboardInterrupt:
+                manifest['interrupted']=True
+                stop_harness(process)
+                manifest['exitCode']=process.returncode
+                raise
     finally:
         stop.set(); telemetry.join(10); server.shutdown(); server.server_close()
+        interrupted=bool(manifest.get('interrupted'))
         manifest.update(ended=time.time(),httpRequests=recorder.count)
         manifest['seconds']=manifest['ended']-manifest['started']
         manifest['totalSeconds']=manifest['ended']-manifest['runStarted']
@@ -273,8 +307,13 @@ def execute(context, show_images=False, open_images=False):
         trace.stop()
         trace.poll_once()
         trace.summary(manifest)
-        context.record.update(status='finished', ended=manifest['ended'], exitCode=manifest.get('exitCode'),
+        context.record.update(status='failed' if interrupted else 'finished', ended=manifest['ended'], exitCode=manifest.get('exitCode'),
                               timedOut=bool(manifest.get('timedOut')), sessionId=session['id'])
+        if interrupted:
+            context.record['interrupted']=True
+            context.record['error']='interrupted by Ctrl+C; harness and its child processes were terminated'
+            write_json(directory/'failure.json', {'status':'interrupted','stage':'run','time':time.time(),
+                                                  'error':context.record['error'],'taskSuccess':'unverified'})
         write_json(directory/'run.json', context.record)
     return exit_code_from_manifest(manifest)
 
@@ -339,6 +378,9 @@ def main(argv=None):
                       'directory': str(context.directory), 'configSource': str(context.source)}), flush=True)
     try:
         return execute(context, show_images=args.show_images, open_images=args.open_images)
+    except KeyboardInterrupt:
+        # execute() already killed the harness tree and recorded the interruption.
+        return 130
     except Exception as error:
         failure = mark_failed(context, error)
         report_failure('run', error, args.debug, response=failure.get('response'), directory=context.directory)

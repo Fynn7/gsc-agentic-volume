@@ -31,7 +31,7 @@ import services as services_mod
 import trace_events as trace_mod
 import volumes as volumes_mod
 
-SHORTCUTS = "Up/Down select  Enter open  Esc back  i image  d details  o folder  q quit"
+SHORTCUTS = "Up/Down select  Enter open  Esc back  i image  d details  o folder  q quit  Ctrl+C stop all"
 # Shared loading tick: one animation family everywhere (menu/live/startup/verify).
 TICK = 0.12
 
@@ -448,7 +448,7 @@ def _build_live_frame(run_dir: Path, shown: list[dict], offset: int, detail_on: 
         if event.get("image"):
             event_lines.append(screen_mod.colored("      [Open image: i] rev=%s" % event.get("revision"), "green"))
     foot = ["-" * 70,
-            "i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s" % ("back" if finished else "close (agent keeps running)")]
+            "i=image (choose)  d=details  Up/Down=scroll  o=run folder  Esc=%s  Ctrl+C=STOP agent+Ollama" % ("back" if finished else "close view")]
     if finished:
         foot.append("Run %s (exit kept in manifest.json). Press v=verify, Esc=back." % run_record.get("status"))
         if run_record.get("status") == "failed":
@@ -912,21 +912,36 @@ def _settings(settings: dict) -> dict:
 
 
 def main() -> int:
-    """Crash-safe entry: Ctrl+C exits the TUI only, never the agent or evidence."""
+    """Crash-safe entry.
+
+    Ctrl+C is a hard stop: this TUI's launcher/harness/MCP tree, the Local
+    Ollama process (unloading the model) and TUI-owned services (renderer) are
+    all terminated before exit. Evidence on disk is never deleted. A second
+    Ctrl+C during cleanup cannot abort it.
+    """
     try:
         return _main()
     except KeyboardInterrupt:
-        print("\nInterrupted; the agent (if any) keeps running and no evidence was touched.")
+        print("\nInterrupted — stopping agent, local Ollama and TUI-owned services...")
+        try:
+            report = services_mod.shutdown_all()
+            for line in services_mod.shutdown_lines(report):
+                print(line)
+        except Exception as error:  # noqa: BLE001 - never traceback on Ctrl+C
+            print("Shutdown problem: %s" % error)
         return 130
     finally:
+        # Normal exit (menu quit / Esc): only services this TUI owns are
+        # released, and a live agent keeps them (its run is still writing).
         try:
             services_mod.heartbeat_stop()
-            if sys.stdout.isatty():
-                release = screen_mod.run_with_spinner(
-                    "Stopping TUI-owned services", services_mod.release_owned_services)
-            else:
-                release = services_mod.release_owned_services()
+            release = services_mod.release_owned_services()
             for line in services_mod.release_lines(release):
+                print(line)
+        except KeyboardInterrupt:
+            # Ctrl+C landed during an ordinary exit: escalate to the full stop.
+            report = services_mod.shutdown_all()
+            for line in services_mod.shutdown_lines(report):
                 print(line)
         except Exception as error:
             print("Service release skipped: %s" % error)

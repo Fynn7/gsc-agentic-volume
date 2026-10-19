@@ -19,6 +19,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -117,6 +118,239 @@ def _terminate(pid: int) -> bool:
         return True
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+# Images the TUI itself may have spawned. Used only for descendants of this
+# process, so an unrelated program with the same image name is never matched.
+_OWNED_IMAGES = ("python.exe", "pythonw.exe", "codex.exe", "node.exe")
+_LAUNCHER_IMAGES = ("python.exe", "pythonw.exe", "py.exe")
+_HARNESS_IMAGES = ("codex.exe",)
+
+
+def _block_interrupts() -> None:
+    """Make the shutdown path immune to a second Ctrl+C."""
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError, AttributeError):
+        pass
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    """Live descendant PIDs of `root_pid` via a Toolhelp snapshot (Windows)."""
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+
+    class Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    invalid = wintypes.HANDLE(-1).value
+    if not snapshot or snapshot == invalid:
+        return []
+    parents: dict[int, int] = {}
+    entry = Entry()
+    entry.dwSize = ctypes.sizeof(Entry)
+    try:
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+    found: list[int] = []
+    stack = list(children.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        found.append(pid)
+        stack.extend(children.get(pid, []))
+    return found
+
+
+def _pids_with_images(prefixes: tuple[str, ...]) -> list[int]:
+    """Live PIDs whose image name starts with one of `prefixes` (Windows only)."""
+    if os.name != "nt":
+        return []
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids: list[int] = []
+    for line in out.stdout.splitlines():
+        parts = [piece.strip().strip('"') for piece in line.split('","')]
+        if len(parts) < 2 or not parts[1].isdigit():
+            continue
+        image = parts[0].lower()
+        if any(image.startswith(prefix) for prefix in prefixes):
+            pids.append(int(parts[1]))
+    return pids
+
+
+def _listener_pids(port: int) -> list[int]:
+    """PIDs listening on a TCP `port` (netstat is present on every Windows box)."""
+    if os.name != "nt":
+        return []
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids: set[int] = set()
+    for line in out.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0].upper() != "TCP" or fields[3].upper() != "LISTENING":
+            continue
+        local, pid = fields[1], fields[4]
+        if local.rsplit(":", 1)[-1] == str(port) and pid.isdigit():
+            pids.add(int(pid))
+    return sorted(pids)
+
+
+def _endpoint_up(endpoint: str, timeout: float = 1.0) -> bool:
+    try:
+        _http_get(endpoint.rstrip("/") + "/api/version", timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _recorded_run_pids() -> list[tuple[int, tuple[str, ...]]]:
+    """Launcher/harness PIDs from lock files, for trees the snapshot missed."""
+    found: list[tuple[int, tuple[str, ...]]] = []
+    try:
+        files = list((ROOT / "runtime" / "locks").glob("*.lock"))
+    except OSError:
+        return found
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        launcher = data.get("pid")
+        if isinstance(launcher, int) and process_alive(launcher):
+            found.append((launcher, _LAUNCHER_IMAGES))
+        harness = data.get("harnessPid")
+        if isinstance(harness, int) and process_alive(harness):
+            found.append((harness, _HARNESS_IMAGES))
+    return found
+
+
+def _manifest_run_pids() -> list[tuple[int, tuple[str, ...]]]:
+    """Harness PIDs recorded by live runs when their launcher already exited."""
+    found: list[tuple[int, tuple[str, ...]]] = []
+    try:
+        entries = runs_mod.discover_runs(limit=50, _fresh=True)
+    except Exception:
+        return found
+    for entry in entries:
+        if entry.get("status") != "Running":
+            continue
+        pid = (entry.get("manifest") or {}).get("pid")
+        if isinstance(pid, int) and process_alive(pid):
+            found.append((pid, _HARNESS_IMAGES))
+    return found
+
+
+def _terminate_agent_trees() -> dict:
+    """Kill this TUI's launcher/harness/MCP trees (agent first, never the TUI)."""
+    report: dict = {"stopped": [], "failed": []}
+    try:
+        import runner as runner_mod
+        report["stopped"].extend("launcher pid %d" % pid for pid in runner_mod.stop_active())
+    except Exception as error:  # noqa: BLE001 - shutdown must continue
+        report["failed"].append("launcher: %s" % error)
+    mine = os.getpid()
+    killed: set[int] = set()
+    for pid in _descendant_pids(mine):
+        if pid == mine:
+            continue
+        image = (_image_of_pid(pid) or "").lower()
+        if image in _OWNED_IMAGES:
+            if _terminate(pid):
+                killed.add(pid)
+                report["stopped"].append("%s pid %d" % (image, pid))
+    seen: set[int] = set()
+    for pid, images in _recorded_run_pids() + _manifest_run_pids():
+        if pid in seen or pid in killed:
+            continue
+        seen.add(pid)
+        if not process_alive(pid):
+            continue
+        image = (_image_of_pid(pid) or "").lower()
+        if image not in images:
+            continue
+        if _terminate(pid):
+            report["stopped"].append("%s pid %d" % (image, pid))
+        else:
+            report["failed"].append("%s pid %d (terminate failed)" % (image, pid))
+    return report
+
+
+def terminate_local_inference(settings: dict | None = None) -> dict:
+    """Hard-stop the Local Ollama server so the model is unloaded from VRAM.
+
+    Ctrl+C is a full stop: every `ollama*` image is terminated (server, model
+    runner, tray app), including an instance that predated this TUI and was
+    only "reused". H200 endpoints are remote and are never touched.
+    """
+    report: dict = {"stopped": [], "failed": [], "endpoint": None, "verified": None}
+    settings = settings or config_mod.load_settings()
+    if settings.get("mode") != "Local":
+        return report
+    parsed = _loopback(settings.get("endpoint", ""))
+    if parsed is None:
+        return report
+    endpoint = settings["endpoint"]
+    report["endpoint"] = endpoint
+    pids = set(_pids_with_images(("ollama",)))
+    for pid in _listener_pids(parsed[1]):
+        if (_image_of_pid(pid) or "").lower().startswith("ollama"):
+            pids.add(pid)
+    if not pids:
+        report["verified"] = not _endpoint_up(endpoint)
+        return report
+    for pid in sorted(pids):
+        image = (_image_of_pid(pid) or "").lower()
+        if not image.startswith("ollama"):
+            continue  # never kill a foreign listener on the configured port
+        if _terminate(pid):
+            report["stopped"].append("%s pid %d" % (image, pid))
+        else:
+            report["failed"].append("%s pid %d (terminate failed)" % (image, pid))
+    deadline = time.time() + 5.0
+    while time.time() < deadline and _endpoint_up(endpoint):
+        time.sleep(0.2)
+    report["verified"] = not _endpoint_up(endpoint)
+    if not report["verified"]:
+        report["failed"].append("inference still answering on %s after kill" % endpoint)
+    return report
 
 
 def _loopback(url: str) -> tuple[str, int] | None:
@@ -389,7 +623,12 @@ def heartbeat_start() -> None:
 def heartbeat_stop() -> None:
     global _hb_thread
     _hb_stop.set()
-    _hb_thread = None
+    thread, _hb_thread = _hb_thread, None
+    if thread is not None:
+        try:
+            thread.join(timeout=2.0)
+        except RuntimeError:
+            pass
 
 
 def _live_runs() -> list[str]:
@@ -420,16 +659,22 @@ def _live_launchers() -> list[str]:
     return hits
 
 
-def release_owned_services() -> dict:
-    """Stop exactly our own services; refuse while any agent/launcher is active."""
+def release_owned_services(force: bool = False) -> dict:
+    """Stop exactly our own services; refuse while any agent/launcher is active.
+
+    `force=True` is used by the Ctrl+C path after the agent tree has already
+    been terminated: the "live run" gate is then meaningless (the evidence on
+    disk still says Running) and must not keep Ollama loaded.
+    """
     report: dict = {"stopped": [], "kept": None, "skipped": []}
     record = _read_record()
     if record.get("owner") != SESSION_ID or not record.get("services"):
         return report
-    blockers = _live_runs() + _live_launchers()
-    if blockers:
-        report["kept"] = "activity still live (%s); owned services left running" % blockers[0]
-        return report
+    if not force:
+        blockers = _live_runs() + _live_launchers()
+        if blockers:
+            report["kept"] = "activity still live (%s); owned services left running" % blockers[0]
+            return report
     remaining = {}
     for kind, entry in record["services"].items():
         pid = entry.get("pid")
@@ -445,6 +690,45 @@ def release_owned_services() -> dict:
             remaining[kind] = entry
     _write_record({"owner": SESSION_ID, "heartbeat": time.time(), "services": remaining})
     return report
+
+
+def shutdown_all(settings: dict | None = None) -> dict:
+    """Ctrl+C hard stop: agent tree -> local Ollama -> TUI-owned services.
+
+    A second Ctrl+C cannot abort it (`SIGINT` is ignored for the rest of the
+    process). Evidence directories are only read, never deleted. Verification
+    of the Ollama stop is reported honestly instead of assumed.
+    """
+    _block_interrupts()
+    heartbeat_stop()
+    report: dict = {"agent": [], "stopped": [], "failed": [], "kept": [], "inference": {}}
+    agent = _terminate_agent_trees()
+    report["agent"] = agent["stopped"]
+    report["failed"].extend(agent["failed"])
+    inference = terminate_local_inference(settings)
+    report["inference"] = inference
+    report["stopped"].extend(inference["stopped"])
+    report["failed"].extend(inference["failed"])
+    release = release_owned_services(force=True)
+    report["stopped"].extend(release["stopped"])
+    report["kept"].extend(release["skipped"])
+    return report
+
+
+def shutdown_lines(report: dict) -> list[str]:
+    lines = []
+    for stopped in report.get("stopped", []):
+        lines.append("[stopped] %s" % stopped)
+    for kept in report.get("kept", []):
+        lines.append("[kept] %s" % kept)
+    inference = report.get("inference") or {}
+    if inference.get("endpoint"):
+        state = ("verified down" if inference.get("verified")
+                 else "STILL ANSWERING — check manually")
+        lines.append("[inference] local Ollama at %s: %s" % (inference["endpoint"], state))
+    for failed in report.get("failed", []):
+        lines.append("[failed] %s" % failed)
+    return lines
 
 
 def release_lines(report: dict) -> list[str]:

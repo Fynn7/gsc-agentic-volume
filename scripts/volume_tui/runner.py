@@ -8,12 +8,58 @@ surfaced verbatim; no competing lock scheme exists here.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Launchers started by this TUI. Ctrl+C terminates these trees (launcher ->
+# harness -> MCP children); the TUI never guesses a PID from disk first.
+_ACTIVE: dict[int, subprocess.Popen] = {}
+_ACTIVE_LOCK = threading.Lock()
+
+
+def _register(proc: subprocess.Popen) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE[proc.pid] = proc
+
+
+def _unregister(proc: subprocess.Popen) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE.pop(proc.pid, None)
+
+
+def stop_active(timeout: float = 10.0) -> list[int]:
+    """Terminate every launcher (and its whole tree) launched by this process."""
+    with _ACTIVE_LOCK:
+        procs = list(_ACTIVE.values())
+    stopped: list[int] = []
+    for proc in procs:
+        if proc.poll() is not None:
+            _unregister(proc)
+            continue
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=30)
+            else:
+                proc.terminate()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        _unregister(proc)
+        if proc.poll() is not None:
+            stopped.append(proc.pid)
+    return stopped
 
 
 class LaunchResult:
@@ -45,22 +91,26 @@ def launch(config_path: Path, python: str | None = None,
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1, encoding="utf-8", errors="replace")
-    assert proc.stdout is not None
-    thread = threading.Thread(target=pump, args=(proc.stdout, lines), daemon=True)
-    thread.start()
-    # Early read of run_started while the process runs.
-    import time
-    while proc.poll() is None:
-        time.sleep(0.2)
-        for raw in list(lines):
-            try:
-                payload = json.loads(raw)
-            except ValueError:
-                continue
-            if payload.get("event") == "run_started" and not result.directory:
-                result.run_id = payload.get("runId")
-                result.directory = Path(payload.get("directory")) if payload.get("directory") else None
-    thread.join(timeout=5)
+    _register(proc)
+    try:
+        assert proc.stdout is not None
+        thread = threading.Thread(target=pump, args=(proc.stdout, lines), daemon=True)
+        thread.start()
+        # Early read of run_started while the process runs.
+        import time
+        while proc.poll() is None:
+            time.sleep(0.2)
+            for raw in list(lines):
+                try:
+                    payload = json.loads(raw)
+                except ValueError:
+                    continue
+                if payload.get("event") == "run_started" and not result.directory:
+                    result.run_id = payload.get("runId")
+                    result.directory = Path(payload.get("directory")) if payload.get("directory") else None
+        thread.join(timeout=5)
+    finally:
+        _unregister(proc)
     result.exit_code = proc.returncode
     for raw in lines:
         try:
@@ -75,7 +125,7 @@ def launch(config_path: Path, python: str | None = None,
 
 
 def stop_notice() -> str:
-    return ("Stop is intentionally limited: the CLI has no verified safe-cancel API. "
-            "Closing the TUI never kills the agent; the run keeps its evidence and can be "
-            "re-opened via History. Kill a harness PID only manually after confirming "
-            "manifest.json pid belongs to this run directory.")
+    return ("Esc/menu quit never kills the agent; the run keeps its evidence and can be "
+            "re-opened via History. Ctrl+C is the hard stop: the agent tree, local Ollama "
+            "(model unloaded) and TUI-owned services are terminated together. Kill a harness "
+            "PID manually only after confirming manifest.json pid belongs to this run directory.")

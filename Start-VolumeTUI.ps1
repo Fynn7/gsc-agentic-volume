@@ -53,6 +53,6 @@ try {
   else { Write-Warning 'Renderer URL does not identify this application; check port conflicts.' }
 } catch { Write-Warning 'Renderer not reachable; it will start on the next Run and stay for reuse.' }
 
-Write-Host 'Entering Volume Agent TUI (Esc quits; quitting never stops a running agent)...'
+Write-Host 'Entering Volume Agent TUI (Esc quits; Esc never stops a running agent; Ctrl+C stops the agent, local Ollama and TUI services)...'
 & $Python -B (Join-Path $repoRoot 'scripts\volume_tui')
 exit $LASTEXITCODE

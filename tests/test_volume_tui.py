@@ -214,6 +214,22 @@ class LifecycleDelegation(unittest.TestCase):
         self.assertNotIn("reserve_directory", source)
         self.assertNotIn("RunLock", source)
 
+    def test_harness_kill_uses_tree_flag_and_survives_second_ctrl_c(self):
+        process = unittest.mock.MagicMock(pid=4321)
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return unittest.mock.MagicMock(returncode=0)
+
+        with patch.object(launcher.subprocess, "run", side_effect=fake_run), \
+             patch.object(launcher.signal, "signal") as install:
+            launcher.stop_harness(process)
+        install.assert_called_once()
+        self.assertIn("/T", calls[0])
+        self.assertIn("/F", calls[0])
+        process.wait.assert_called_once()
+
 
 class TraceEvents(unittest.TestCase):
     def _fixture_run(self, root: Path):
@@ -433,7 +449,12 @@ class SelfAcceptanceFixes(unittest.TestCase):
 
     def test_keyboard_interrupt_exits_cleanly_without_traceback(self):
         import ui as tui_ui
-        with patch.object(tui_ui, "_main", side_effect=KeyboardInterrupt):
+        with patch.object(tui_ui, "_main", side_effect=KeyboardInterrupt), \
+             patch.object(tui_ui.services_mod, "shutdown_all",
+                          return_value={"agent": [], "stopped": [], "failed": [],
+                                        "kept": [], "inference": {}}), \
+             patch.object(tui_ui.services_mod, "release_owned_services",
+                          return_value={"stopped": [], "kept": None, "skipped": []}):
             self.assertEqual(tui_ui.main(), 130)
 
     def test_service_gate_blocks_only_on_down_services(self):
@@ -561,6 +582,67 @@ class SelfAcceptanceFixes(unittest.TestCase):
                     rel = tui_services.release_owned_services()
                 self.assertEqual(killed, [])
                 self.assertTrue(any("no longer ours" in s for s in rel["skipped"]))
+
+    def test_force_release_bypasses_live_run_gate(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "services.json").write_text(json.dumps(
+                {"owner": tui_services.SESSION_ID, "heartbeat": 9999999999.0,
+                 "services": {"ollama": {"pid": 31337, "image": "ollama.exe"}}}))
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "process_alive", return_value=True), \
+                 patch.object(tui_services, "_image_of_pid", return_value="ollama.exe"), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-x", "status": "Running"}]), \
+                 patch.object(tui_services, "_live_launchers", return_value=["x.lock:pid"]):
+                killed = []
+                with patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True):
+                    rel = tui_services.release_owned_services(force=True)
+                self.assertEqual(killed, [31337])
+                self.assertIsNone(rel["kept"])
+
+    def test_ctrl_c_shutdown_stops_agent_ollama_and_owned_services(self):
+        import services as tui_services
+        with patch.object(tui_services, "_block_interrupts") as blocked, \
+             patch.object(tui_services, "heartbeat_stop"), \
+             patch.object(tui_services, "_terminate_agent_trees",
+                          return_value={"stopped": ["codex.exe pid 9"], "failed": []}), \
+             patch.object(tui_services, "terminate_local_inference",
+                          return_value={"stopped": ["ollama.exe pid 7"], "failed": [],
+                                        "endpoint": "http://127.0.0.1:11434", "verified": True}), \
+             patch.object(tui_services, "release_owned_services",
+                          return_value={"stopped": ["renderer pid 5"], "kept": None, "skipped": []}):
+            report = tui_services.shutdown_all({"mode": "Local"})
+        blocked.assert_called_once()
+        self.assertEqual(report["agent"], ["codex.exe pid 9"])
+        self.assertEqual(report["stopped"], ["ollama.exe pid 7", "renderer pid 5"])
+        self.assertEqual(report["failed"], [])
+
+    def test_local_inference_kill_is_verified_and_spares_foreign_listener(self):
+        import services as tui_services
+        killed = []
+        with patch.object(tui_services, "_pids_with_images", return_value=[7, 8]), \
+             patch.object(tui_services, "_listener_pids", return_value=[]), \
+             patch.object(tui_services, "_image_of_pid",
+                          side_effect=lambda pid: {7: "ollama.exe", 8: "notepad.exe"}.get(pid)), \
+             patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True), \
+             patch.object(tui_services, "_endpoint_up", return_value=False):
+            report = tui_services.terminate_local_inference(
+                {"mode": "Local", "endpoint": "http://127.0.0.1:11434"})
+        self.assertEqual(killed, [7])
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["failed"], [])
+
+    def test_h200_never_kills_a_remote_endpoint_provider(self):
+        import services as tui_services
+        with patch.object(tui_services, "_pids_with_images") as pids, \
+             patch.object(tui_services, "_terminate") as terminate:
+            report = tui_services.terminate_local_inference(
+                {"mode": "H200", "endpoint": "http://127.0.0.1:11434"})
+        pids.assert_not_called()
+        terminate.assert_not_called()
+        self.assertEqual(report["stopped"], [])
 
     def test_h200_never_autostarts(self):
         import services as tui_services

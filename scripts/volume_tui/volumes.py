@@ -1,17 +1,16 @@
-"""Discover volume headers already present on this machine (read-only, stdlib only).
+"""Discover volume headers from the project's fixed volume folder (read-only).
 
-The TUI no longer hard-wires one dataset: every header that the launcher can
-hand to ``prepare`` is offered. Scope is deliberately bounded to what is
-already on disk and cheap to inspect:
+The TUI does not hard-wire one dataset: every header that the launcher can hand
+to ``prepare`` inside ``volumes/`` is offered. Scope is deliberately bounded so
+a menu refresh never walks the whole project:
 
-- every supported header in the project tree, root level included
-  (``.dat``, ``.nhdr``, ``.nrrd``; prepared ``render.dat`` + ``volume.json``),
-- volume paths recorded by previous run/TUI configs that still exist,
-- the currently selected path.
+- every supported header under ``volumes/`` (``.dat``, ``.nhdr``, ``.nrrd``;
+  prepared ``render.dat`` + ``volume.json``),
+- the currently selected path,
+- the gate volume (system fallback default).
 
 Nothing is converted, imported, or written here. Identical payloads (same
-``volumeHash``) are collapsed into one entry so copies from old sessions do
-not flood the menu.
+``volumeHash``) are collapsed into one entry so copies do not flood the menu.
 """
 from __future__ import annotations
 
@@ -24,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "runtime"
 GATE = RUNTIME / "gate-volume" / "render.dat"
+VOLUME_DIR = ROOT / "volumes"
 SOURCE_SUFFIXES = (".dat", ".nhdr", ".nrrd")
 EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "node_modules",
                  ".mypy_cache", ".pytest_cache", ".ruff_cache"}
@@ -147,10 +147,12 @@ def describe(path) -> dict:
     }
 
 
-def _project_headers() -> list[Path]:
-    """Every supported header in the project tree (root level included)."""
+def _folder_headers() -> list[Path]:
+    """Every supported header inside the fixed volume folder, recursively."""
     found: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+    if not VOLUME_DIR.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(VOLUME_DIR):
         dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS]
         for name in filenames:
             path = Path(dirpath) / name
@@ -163,37 +165,13 @@ def _project_headers() -> list[Path]:
     return found
 
 
-def _configured_headers() -> list[Path]:
-    """Volume paths from configs of earlier runs/TUI launches that still exist."""
-    found: list[Path] = []
-    for pattern in ("*/config.json", "*.json", "tui-configs/*.json"):
-        try:
-            candidates = list(RUNTIME.glob(pattern))
-        except OSError:
-            continue
-        for config_path in candidates:
-            try:
-                data = json.loads(config_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            raw = data.get("volumePath")
-            if isinstance(raw, str) and raw.strip():
-                path = Path(raw.strip().strip('"')).expanduser()
-                if path.is_file():
-                    found.append(path)
-    return found
-
-
 def discover_volumes(selected=None) -> list[dict]:
-    """Return unique local volumes, current selection first, then the gate volume."""
+    """Return unique volumes from ``volumes/``, current selection first."""
     candidates: list[Path] = []
     if selected:
         candidates.append(Path(selected))
     candidates.append(GATE)
-    candidates.extend(sorted(_project_headers(), key=lambda path: str(path).lower()))
-    candidates.extend(sorted(_configured_headers(), key=lambda path: str(path).lower()))
+    candidates.extend(sorted(_folder_headers(), key=lambda path: str(path).lower()))
 
     by_key: dict[str, dict] = {}
     order: list[str] = []

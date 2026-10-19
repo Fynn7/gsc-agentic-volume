@@ -88,71 +88,78 @@ class VolumeDiscovery(unittest.TestCase):
         (gate.parent / "volume.json").write_text(json.dumps(
             {"dimensions": [4, 5, 6], "volumeHash": "same"}))
 
-        copy = runtime / "session-1" / "volume"
-        copy.mkdir(parents=True)
-        (copy / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 4 5 6\n")
-        (copy / "volume.json").write_text(json.dumps(
+        # Fixed scan root: only this folder is discovered.
+        volumes = root / "volumes"
+        copied = volumes / "session-1" / "volume"
+        copied.mkdir(parents=True)
+        (copied / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 4 5 6\n")
+        (copied / "volume.json").write_text(json.dumps(
             {"dimensions": [4, 5, 6], "volumeHash": "same"}))
 
-        other = runtime / "session-2" / "volume"
-        other.mkdir(parents=True)
-        (other / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 7 8 9\n")
-        (other / "volume.json").write_text(json.dumps(
-            {"dimensions": [7, 8, 9], "volumeHash": "other"}))
+        duplicate = volumes / "session-2" / "volume"
+        duplicate.mkdir(parents=True)
+        (duplicate / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 4 5 6\n")
+        (duplicate / "volume.json").write_text(json.dumps(
+            {"dimensions": [4, 5, 6], "volumeHash": "same"}))
 
-        experiments = root / "experiments"
-        experiments.mkdir()
-        sample = experiments / "sample.nhdr"
+        sample = volumes / "sample.nhdr"
         sample.write_text("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 8 9 10\n")
-        compressed = experiments / "compressed.dat"
+        compressed = volumes / "compressed.dat"
         compressed.write_text("ObjectFileName: x.lz4\nResolution: 2 2 2\nCompression: lz4\n")
 
-        prior = root / "prior" / "header.dat"
-        prior.parent.mkdir()
-        prior.write_text("ObjectFileName: header.raw\nResolution: 9 9 9\n")
-        prior_config = runtime / "run-3"
-        prior_config.mkdir()
-        (prior_config / "config.json").write_text(json.dumps({"volumePath": str(prior)}))
-
-        # Project-root TU Wien binary DAT (6-byte header, no sibling volume.json).
-        binary = root / "present246x246x221.dat"
+        # TU Wien binary DAT (6-byte header, no sibling volume.json).
+        binary = volumes / "present246x246x221.dat"
         binary.write_bytes(struct.pack("<3H", 246, 246, 221) + b"\x00" * 16)
-        return runtime, gate, experiments, other / "render.dat", sample, compressed, prior, binary
 
-    def test_scan_finds_all_sources_and_collapses_identical_payloads(self):
+        # Outside the fixed folder: must not be discovered any more.
+        outside = root / "experiments" / "sample.nhdr"
+        outside.parent.mkdir()
+        outside.write_text("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 1 2 3\n")
+        prior = runtime / "run-3" / "volume" / "render.dat"
+        prior.parent.mkdir(parents=True)
+        prior.write_text("ObjectFileName: header.raw\nResolution: 9 9 9\n")
+        (prior.parent / "volume.json").write_text(json.dumps(
+            {"dimensions": [9, 9, 9], "volumeHash": "prior"}))
+        prior_config = runtime / "run-3"
+        (prior_config / "config.json").write_text(json.dumps({"volumePath": str(prior)}))
+        return runtime, gate, volumes, duplicate / "render.dat", sample, compressed, binary, outside, prior
+
+    def _scan(self, root, runtime, gate, volumes, selected=None):
         import volumes as tui_volumes
+        with patch.object(tui_volumes, "ROOT", root), \
+             patch.object(tui_volumes, "RUNTIME", runtime), \
+             patch.object(tui_volumes, "GATE", gate), \
+             patch.object(tui_volumes, "VOLUME_DIR", volumes):
+            return tui_volumes.discover_volumes(selected)
+
+    def test_scan_reads_only_the_volume_folder_and_collapses_identical_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runtime, gate, experiments, other, sample, compressed, prior, binary = self._tree(root)
-            with patch.object(tui_volumes, "ROOT", root), \
-                 patch.object(tui_volumes, "RUNTIME", runtime), \
-                 patch.object(tui_volumes, "GATE", gate):
-                found = tui_volumes.discover_volumes(gate)
+            runtime, gate, volumes, duplicate, sample, compressed, binary, outside, prior = self._tree(root)
+            found = self._scan(root, runtime, gate, volumes, gate)
             paths = [Path(item["path"]) for item in found]
             self.assertEqual(paths[0], gate.resolve())
             self.assertTrue(found[0]["default"])
             self.assertEqual(len([item for item in found if item["hash"] == "same"]), 1)
-            self.assertEqual(found[[item["hash"] for item in found].index("same")]["copies"], 2)
-            self.assertIn(other.resolve(), paths)
+            self.assertEqual(found[[item["hash"] for item in found].index("same")]["copies"], 3)
+            self.assertNotIn(duplicate.resolve(), paths)  # identical payload collapses into the gate row
+            self.assertNotIn((volumes / "session-1" / "volume" / "render.dat").resolve(), paths)
             self.assertIn(sample.resolve(), paths)
-            self.assertIn(prior.resolve(), paths)
-            self.assertIn(binary.resolve(), paths)
             self.assertNotIn(compressed.resolve(), paths)
+            self.assertNotIn(outside.resolve(), paths)
+            self.assertNotIn(prior.resolve(), paths)
             nhdr = next(item for item in found if Path(item["path"]) == sample.resolve())
             self.assertEqual(nhdr["dimensions"], [8, 9, 10])
-            root_dat = next(item for item in found if Path(item["path"]) == binary.resolve())
-            self.assertEqual(root_dat["dimensions"], [246, 246, 221])
+            binary_item = next(item for item in found if Path(item["path"]) == binary.resolve())
+            self.assertEqual(binary_item["dimensions"], [246, 246, 221])
 
     def test_selection_is_listed_first_and_unsupported_is_explained(self):
         import volumes as tui_volumes
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runtime, gate, experiments, other, sample, compressed, prior, binary = self._tree(root)
-            with patch.object(tui_volumes, "ROOT", root), \
-                 patch.object(tui_volumes, "RUNTIME", runtime), \
-                 patch.object(tui_volumes, "GATE", gate):
-                found = tui_volumes.discover_volumes(other)
-            self.assertEqual(Path(found[0]["path"]), other.resolve())
+            runtime, gate, volumes, duplicate, sample, compressed, binary, outside, prior = self._tree(root)
+            found = self._scan(root, runtime, gate, volumes, duplicate)
+            self.assertEqual(Path(found[0]["path"]), duplicate.resolve())
             self.assertIn("8x9x10", tui_volumes.option_text(
                 next(item for item in found if Path(item["path"]) == sample.resolve())))
             facts = tui_volumes.describe(compressed)
@@ -642,6 +649,55 @@ class TemporaryContextInstance(unittest.TestCase):
                 rel = tui_services.release_owned_services()
             self.assertEqual(killed, [5555])
             self.assertIsNone(rel["kept"])
+
+
+class LoadingAnimation(unittest.TestCase):
+    """Post-action waits must animate instead of leaving the screen frozen."""
+
+    def setUp(self):
+        import ui as tui_ui
+        self.ui = tui_ui
+        self.labels: list[str] = []
+
+    def _spy(self, label, func, *args, **kwargs):
+        self.labels.append(label)
+        return func(*args, **kwargs)
+
+    def test_status_refresh_spins_while_checking(self):
+        with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
+             patch.object(self.ui.env_mod, "cached_check", return_value={"items": []}), \
+             patch.object(self.ui.runs_mod, "discover_runs", return_value=[]), \
+             patch.object(self.ui.services_mod, "owned_summary", return_value="none"):
+            lines = self.ui._status_lines(dict(tui_config.DEFAULTS))
+        self.assertTrue(self.labels[0].startswith("Refreshing status"))
+        self.assertEqual(len(lines), 7)
+
+    def test_history_detail_reads_spin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            item = {"directory": tmp, "runId": "run-x", "status": "Finished",
+                    "model": "m", "sessionId": None}
+            with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
+                 patch.object(self.ui, "_menu", return_value=4):
+                self.ui._history_detail(item)
+        self.assertIn("Reading run evidence (read-only)", self.labels)
+
+    def test_replay_drain_spins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
+                 patch.object(self.ui.trace_mod, "resolve_session_dir", return_value=None), \
+                 patch.object(self.ui, "_clear"), \
+                 patch.object(self.ui, "_menu", return_value=2), \
+                 patch("builtins.print"):
+                self.ui._replay_view(Path(tmp))
+        self.assertIn("Reading run events (read-only replay)", self.labels)
+
+    def test_volume_discovery_spins(self):
+        settings = dict(tui_config.DEFAULTS)
+        with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
+             patch.object(self.ui.volumes_mod, "discover_volumes", return_value=[]), \
+             patch.object(self.ui, "_menu", return_value=3):
+            self.ui._volumes(settings)
+        self.assertIn("Scanning local volumes (read-only)", self.labels)
 
 
 class MessageColors(unittest.TestCase):

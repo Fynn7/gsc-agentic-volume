@@ -154,11 +154,17 @@ def _open_path(path: str):
     _pause()
 
 
+def _status_snapshot(settings: dict) -> tuple[list[dict], list[dict]]:
+    """Blocking part of the status panel; callers animate it via run_with_spinner."""
+    return env_mod.cached_check(settings)["items"], runs_mod.discover_runs(limit=50)
+
+
 def _status_lines(settings: dict) -> list[str]:
     # Cached: a redraw must never block on HTTP timeouts; Running lags <=5s by design.
-    checks = env_mod.cached_check(settings)["items"]
+    # The snapshot still animates while a stale cache/disk scan is refreshed.
+    checks, runs = screen_mod.run_with_spinner(
+        "Refreshing status (services + run history)", _status_snapshot, settings)
     get = lambda name: next((c for c in checks if c["name"].startswith(name)), {})
-    runs = runs_mod.discover_runs(limit=50)
     running = [r for r in runs if r["status"] == "Running"]
     last = runs[0] if runs else None
     inference = get("Inference")
@@ -669,7 +675,8 @@ def _open_selected_image(shown: list[dict]):
 
 def _history():
     while True:
-        found = runs_mod.discover_runs()
+        found = screen_mod.run_with_spinner(
+            "Scanning run history (read-only)", runs_mod.discover_runs)
         lines = ["%d real run(s) found (read-only replay; never re-invokes model)." % len(found)]
         options = ["%s  %s  %s  frames=%s  %s" % (r["runId"], _color_status(r["status"]), r["model"], r["frames"], r.get("task", "?")) for r in found]
         options.append("Back")
@@ -681,7 +688,8 @@ def _history():
 
 def _history_detail(item: dict):
     run_dir = Path(item["directory"])
-    while True:
+
+    def _load_evidence():
         verification = None
         try:
             verification = json.loads((run_dir / "verification.json").read_text(encoding="utf-8"))
@@ -692,6 +700,11 @@ def _history_detail(item: dict):
             manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
+        return verification, manifest
+
+    while True:
+        verification, manifest = screen_mod.run_with_spinner(
+            "Reading run evidence (read-only)", _load_evidence)
         info = ["run=%s status=%s model=%s" % (item["runId"], item["status"], item["model"]),
                 "dir=%s" % run_dir,
                 "session=%s exit=%s state=%s" % (manifest.get("sessionId"), manifest.get("exitCode"), manifest.get("state")),
@@ -711,8 +724,11 @@ def _history_detail(item: dict):
             if not path:
                 # Fallback: newest frame PNG under runtime/<session>.
                 session_id = manifest.get("sessionId") or item.get("sessionId")
-                candidates = sorted((ROOT / "runtime" / str(session_id)).rglob("*.png")) if session_id else []
-                path = str(candidates[-1]) if candidates else None
+                if session_id:
+                    candidates = screen_mod.run_with_spinner(
+                        "Locating final frame PNG",
+                        lambda: sorted((ROOT / "runtime" / str(session_id)).rglob("*.png")))
+                    path = str(candidates[-1]) if candidates else None
             if path:
                 _open_path(path)
             else:
@@ -725,13 +741,19 @@ def _history_detail(item: dict):
 def _replay_view(run_dir: Path):
     session_dir = trace_mod.resolve_session_dir(run_dir)
     tail = trace_mod.EventTail(run_dir, session_dir)
-    shown: list[dict] = []
-    previous = -1
-    while True:  # drain incremental reader like agent_console replay
-        shown += tail.poll()
-        if len(shown) == previous:
-            break
-        previous = len(shown)
+
+    def _drain():
+        collected: list[dict] = []
+        previous = -1
+        while True:  # drain incremental reader like agent_console replay
+            collected += tail.poll()
+            if len(collected) == previous:
+                break
+            previous = len(collected)
+        return collected
+
+    shown = screen_mod.run_with_spinner(
+        "Reading run events (read-only replay)", _drain)
     detail = True
     _clear()
     print("Replay (read-only, %d events): %s" % (len(shown), run_dir.name))
@@ -774,11 +796,12 @@ def _volumes(settings: dict) -> dict:
     """Pick any locally discoverable volume; persists for subsequent runs."""
     while True:
         current = cfg.selected_volume(settings)
-        found = volumes_mod.discover_volumes(current)
+        found = screen_mod.run_with_spinner(
+            "Scanning local volumes (read-only)", volumes_mod.discover_volumes, current)
         lines = ["Current: %s" % (current or "none"),
-                 "%d distinct local volume(s) found (read-only scan; nothing converted)." % len(found),
+                 "%d distinct local volume(s) found in volumes/ (read-only scan; nothing converted)." % len(found),
                  "A selection applies to new runs and is saved in tui-settings.json."]
-        choice = _menu("Volumes (whole-project scan of every header the launcher can use)",
+        choice = _menu("Volumes (scan of the fixed volumes/ folder)",
                        lines,
                        ["Choose from %d discovered volume(s)" % len(found),
                         "Enter a path manually", "Refresh discovery", "Back"])
@@ -787,7 +810,7 @@ def _volumes(settings: dict) -> dict:
         if choice == 0:
             if not found:
                 _clear()
-                print("No local volume header found. Put a supported .dat/.nhdr/.nrrd file on disk, refresh, or enter its path.")
+                print("No local volume header found in volumes/. Put a supported .dat/.nhdr/.nrrd file there, refresh, or enter its path.")
                 _pause()
                 continue
             pick = _menu("Discovered volumes (identical payloads collapsed; current first)",
@@ -810,7 +833,8 @@ def _volumes(settings: dict) -> dict:
             raw = input("Volume header path (.dat/.nhdr/.nrrd, empty=cancel): ").strip().strip('"')
             if not raw:
                 continue
-            facts = volumes_mod.describe(raw)
+            facts = screen_mod.run_with_spinner(
+                "Inspecting volume header", volumes_mod.describe, raw)
             if not facts["ok"]:
                 print("Cannot use this volume: %s" % (facts.get("detail") or "not a readable header"))
                 print("Nothing was changed.")
@@ -897,7 +921,12 @@ def main() -> int:
     finally:
         try:
             services_mod.heartbeat_stop()
-            for line in services_mod.release_lines(services_mod.release_owned_services()):
+            if sys.stdout.isatty():
+                release = screen_mod.run_with_spinner(
+                    "Stopping TUI-owned services", services_mod.release_owned_services)
+            else:
+                release = services_mod.release_owned_services()
+            for line in services_mod.release_lines(release):
                 print(line)
         except Exception as error:
             print("Service release skipped: %s" % error)
@@ -917,7 +946,8 @@ def _main() -> int:
     if svc.get("owns"):
         services_mod.heartbeat_start()
     env_state = screen_mod.run_with_spinner(
-        "Running preflight checks", env_mod.check_environment, settings)
+        "Running preflight checks",
+        lambda: env_mod.cached_check(settings, ttl=0.0))
     if not env_state["ok"]:
         _clear()
         print("Volume Agent TUI — preflight (no model call made)")

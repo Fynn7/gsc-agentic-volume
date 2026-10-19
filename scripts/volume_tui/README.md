@@ -55,17 +55,22 @@
   MVP gate, safe-cancel of a running harness (CLI has no verified API — TUI
   shows the limit and never kills), H200 field verification.
 
-## Volume selection (any local header, not one fixed path)
+## Volume selection (fixed `volumes/` folder, not one fixed path)
 
-- The main menu has **Volumes**. It scans the whole project tree (root level
-  included, `.git`/`.venv`/`__pycache__`/`node_modules` pruned) for headers the
-  launcher can already use: prepared `render.dat` (+`volume.json`) and supported
-  source headers (`.dat`/`.nhdr`/`.nrrd`), plus `volumePath` values from earlier
-  run/TUI configs that still exist. QVis and TU Wien binary DAT dimensions are
-  read directly (binary DAT: 6-byte little-endian uint16 header).
+- All local volume payloads live in the project-level **`volumes/`** folder
+  (created on demand; gitignored). Discovery walks only that folder
+  (subfolders allowed, `.git`/`.venv`/`__pycache__`/`node_modules` pruned) and
+  offers every header the launcher can already use: prepared `render.dat`
+  (+`volume.json`) and supported source headers (`.dat`/`.nhdr`/`.nrrd`).
+  QVis and TU Wien binary DAT dimensions are read directly (binary DAT: 6-byte
+  little-endian uint16 header).
+- The currently selected path and the gate volume are added explicitly; the
+  rest of the project tree (runtime session copies, experiments, prior configs)
+  is no longer scanned. Manual entry still accepts any absolute/relative header
+  path.
 - Identical payloads (`volumeHash`) are collapsed into one row with a copy
-  count, so old session copies do not flood the menu. QVis lz4 payloads are
-  listed as unsupported by `describe` and omitted from discovery.
+  count, so copies do not flood the menu. QVis lz4 payloads are listed as
+  unsupported by `describe` and omitted from discovery.
 - Selecting a volume writes `volumePath` to `runtime/tui-settings.json` and is
   used by every new run; the run confirmation screen also offers
   **Change volume**. Existing runs keep their own `config.json`.
@@ -77,6 +82,7 @@
 ## Layout
 
 - `Start-VolumeTUI.ps1` — single entry (checks, isolated `runtime/tui/`, no model call).
+- `volumes/` — local volume payloads (gitignored); the only folder discovery scans.
 - `scripts/volume_tui/{config,env,runs,trace_events,runner,volumes,ui}.py` — control/display only.
 - `tests/test_volume_tui.py` — non-recursive (launcher `execute` mocked; no Qwen call).
 
@@ -98,6 +104,21 @@
   (saved settings + your own Ollama untouched); it is recorded as
   `ollama-tmp-<port>` and reaped on TUI exit. Needs free VRAM for one more
   model load — otherwise fix your Ollama manually.
+
+## Loading animation coverage
+
+Every operation that can block repaints a live spinner instead of freezing the
+screen (`screen.run_with_spinner`; one shared frame family with the live trace):
+
+- startup: owned service start, preflight, temporary Ollama, run launch gate;
+- menu refresh: cached inference/renderer check + run-history scan;
+- History: run discovery, evidence reads, final-PNG lookup;
+- Replay: event drain (read-only);
+- Volumes: `volumes/` folder discovery and manual header inspection;
+- Verify and H200 tunnel probe;
+- exit: release of TUI-owned services (interactive terminals only).
+
+Cached paths finish before the first frame, so routine menu redraws do not flash.
 
 ## Self-acceptance fixes (2026-10-18, no model run, evidence untouched)
 

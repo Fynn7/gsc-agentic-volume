@@ -15,6 +15,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+CONTROL_DIR = ROOT / "runtime" / "tui-control"
 
 # Launchers started by this TUI. Ctrl+C terminates these trees (launcher ->
 # harness -> MCP children); the TUI never guesses a PID from disk first.
@@ -122,6 +123,22 @@ def launch(config_path: Path, python: str | None = None,
             result.directory = Path(payload.get("directory")) if payload.get("directory") else None
     result.output_tail = "".join(lines)[-6000:]
     return result
+
+
+def request_stop(run_id: str) -> Path:
+    """Ask the launcher to stop cooperatively (writes runtime/tui-control/<runId>.stop).
+
+    The launcher polls this file while waiting on the harness and then flows
+    through the normal interrupted/failure.json path, so evidence stays
+    complete. Never kills a process directly.
+    """
+    CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+    marker = CONTROL_DIR / ("%s.stop" % run_id)
+    try:
+        marker.write_text("stop requested\n", encoding="utf-8")
+    except OSError:
+        pass
+    return marker
 
 
 def stop_notice() -> str:

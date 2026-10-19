@@ -1,10 +1,5 @@
-# Volume TUI dependencies — intentionally empty for the MVP.
-# The stdlib UI (ui.py) has zero third-party requirements so first launch
-# works offline and never touches the daily Codex bundled Python env.
-#
-# Textual evaluation (2026-10-18): `import textual` fails on both the worker
-# venv (3.11) and the Codex bundled runtime (3.12); installing it would need a
-# network pip install on first run and a separate isolated venv with pinned
-# versions. That stays PENDING until a real user accepts the install step.
-# Optional future pin (not installed by Start-VolumeTUI.ps1):
-#   textual==3.1.0; rich==13.9.4
+# Volume Agent TUI dependencies (isolated venv at runtime/tui-venv).
+# The venv is created from the Codex bundled Python with --system-site-packages
+# (inherits NumPy/Pillow) plus a pinned Textual for the IDE-style interface.
+# First launch installs automatically after prompting; re-runs are offline.
+textual==8.2.8

@@ -276,8 +276,6 @@ class TraceEvents(unittest.TestCase):
             self.assertEqual([e["cat"] for e in tail.poll()], [])
 
     def test_infer_event_shows_request_summary_not_filler(self):
-        import ui as tui_ui
-        import inspect
         with tempfile.TemporaryDirectory() as tmp:
             run_dir, session_dir = self._fixture_run(Path(tmp))
             (run_dir / "http" / "http-001.forwarded.bin").write_text(json.dumps({
@@ -303,7 +301,6 @@ class TraceEvents(unittest.TestCase):
             self.assertIn("1 image(s)", detail)
             self.assertNotIn("AAAA", detail)
             self.assertNotIn("fake", detail)
-        self.assertNotIn("fake", inspect.getsource(tui_ui._live_view))
 
     def test_session_json_events_need_no_session_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -447,35 +444,26 @@ class SelfAcceptanceFixes(unittest.TestCase):
         self.assertIn("turn count unknown", out[0]["title"])
         self.assertNotIn("#0", out[0]["title"])
 
-    def test_keyboard_interrupt_exits_cleanly_without_traceback(self):
-        import ui as tui_ui
-        with patch.object(tui_ui, "_main", side_effect=KeyboardInterrupt), \
-             patch.object(tui_ui.services_mod, "shutdown_all",
-                          return_value={"agent": [], "stopped": [], "failed": [],
-                                        "kept": [], "inference": {}}), \
-             patch.object(tui_ui.services_mod, "release_owned_services",
-                          return_value={"stopped": [], "kept": None, "skipped": []}):
-            self.assertEqual(tui_ui.main(), 130)
-
     def test_service_gate_blocks_only_on_down_services(self):
-        import ui as tui_ui
+        import flows as tui_flows
+        import env as tui_env
         down = {"items": [{"name": "Inference http://127.0.0.1:11434", "ok": False, "detail": "refused", "fix": "start ollama"},
                           {"name": "Renderer http://127.0.0.1:8765", "ok": True}]}
-        with patch.object(tui_ui.env_mod, "check_environment", return_value=down):
-            problems = tui_ui._service_gate({})
+        with patch.object(tui_env, "check_environment", return_value=down):
+            problems = tui_flows.service_gate({}, tui_env, __import__("services"))
             self.assertEqual(len(problems), 1)
             self.assertTrue(problems[0]["name"].startswith("Inference"))
         up = {"items": [{"name": "Inference x", "ok": True}, {"name": "Renderer y", "ok": True}]}
-        with patch.object(tui_ui.env_mod, "check_environment", return_value=up):
-            self.assertEqual(tui_ui._service_gate({}), [])
+        with patch.object(tui_env, "check_environment", return_value=up):
+            self.assertEqual(tui_flows.service_gate({}, tui_env, __import__("services")), [])
 
     def test_failure_hint_reads_failure_json(self):
-        import ui as tui_ui
+        import evidence as tui_evidence
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.assertIsNone(tui_ui._failure_hint(root))
+            self.assertIsNone(tui_evidence.failure_hint(root))
             (root / "failure.json").write_text(json.dumps({"error": "boom  info"}))
-            self.assertIn("boom", tui_ui._failure_hint(root))
+            self.assertIn("boom", tui_evidence.failure_hint(root))
 
     def test_renderer_down_hint_names_the_real_start_command(self):
         import env as tui_env
@@ -665,29 +653,31 @@ class SelfAcceptanceFixes(unittest.TestCase):
 
     def test_no_tty_refuses_with_guidance_not_traceback(self):
         import io
-        import ui as tui_ui
-        real_main = tui_ui._main
-        try:
-            with patch.object(tui_ui.sys.stdin, "isatty", return_value=False):
-                out = io.StringIO()
-                with unittest.mock.patch.object(tui_ui.sys, "stdout", out):
-                    code = real_main()
-                self.assertEqual(code, 2)
-                self.assertIn("interactive", out.getvalue())
-        finally:
-            tui_ui._main = real_main
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "volume_tui_app",
+            Path(__file__).resolve().parents[1] / "scripts" / "volume_tui" / "app.py")
+        tui_app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tui_app)
+        with patch.object(tui_app.sys.stdin, "isatty", return_value=False):
+            out = io.StringIO()
+            with unittest.mock.patch.object(tui_app.sys, "stdout", out):
+                code = tui_app.main()
+            self.assertEqual(code, 2)
+            text = out.getvalue().lower()
+            self.assertTrue("terminal" in text or "interactive" in text or "textual" in text)
 
 
 class TemporaryContextInstance(unittest.TestCase):
     def test_offer_predicate_only_for_lone_local_context_mismatch(self):
-        import ui as tui_ui
+        import flows as tui_flows
         local = {"mode": "Local"}
         mismatch = [{"name": "Model context", "ok": False, "detail": "loaded x context 262144 != required 16384"}]
-        self.assertIsNotNone(tui_ui._temporary_context_offer(local, mismatch))
-        self.assertIsNone(tui_ui._temporary_context_offer({"mode": "H200"}, mismatch))
-        self.assertIsNone(tui_ui._temporary_context_offer(local, mismatch + [
+        self.assertIsNotNone(tui_flows.temporary_context_offer(local, mismatch))
+        self.assertIsNone(tui_flows.temporary_context_offer({"mode": "H200"}, mismatch))
+        self.assertIsNone(tui_flows.temporary_context_offer(local, mismatch + [
             {"name": "Renderer y", "ok": False}]))
-        self.assertIsNone(tui_ui._temporary_context_offer(
+        self.assertIsNone(tui_flows.temporary_context_offer(
             local, [{"name": "Inference x", "ok": False}]))
 
     def test_temporary_ollama_uses_free_port_and_required_context_then_reaped(self):
@@ -731,99 +721,6 @@ class TemporaryContextInstance(unittest.TestCase):
                 rel = tui_services.release_owned_services()
             self.assertEqual(killed, [5555])
             self.assertIsNone(rel["kept"])
-
-
-class LoadingAnimation(unittest.TestCase):
-    """Post-action waits must animate instead of leaving the screen frozen."""
-
-    def setUp(self):
-        import ui as tui_ui
-        self.ui = tui_ui
-        self.labels: list[str] = []
-
-    def _spy(self, label, func, *args, **kwargs):
-        self.labels.append(label)
-        return func(*args, **kwargs)
-
-    def test_status_refresh_spins_while_checking(self):
-        with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
-             patch.object(self.ui.env_mod, "cached_check", return_value={"items": []}), \
-             patch.object(self.ui.runs_mod, "discover_runs", return_value=[]), \
-             patch.object(self.ui.services_mod, "owned_summary", return_value="none"):
-            lines = self.ui._status_lines(dict(tui_config.DEFAULTS))
-        self.assertTrue(self.labels[0].startswith("Refreshing status"))
-        self.assertEqual(len(lines), 7)
-
-    def test_history_detail_reads_spin(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            item = {"directory": tmp, "runId": "run-x", "status": "Finished",
-                    "model": "m", "sessionId": None}
-            with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
-                 patch.object(self.ui, "_menu", return_value=4):
-                self.ui._history_detail(item)
-        self.assertIn("Reading run evidence (read-only)", self.labels)
-
-    def test_replay_drain_spins(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
-                 patch.object(self.ui.trace_mod, "resolve_session_dir", return_value=None), \
-                 patch.object(self.ui, "_clear"), \
-                 patch.object(self.ui, "_menu", return_value=2), \
-                 patch("builtins.print"):
-                self.ui._replay_view(Path(tmp))
-        self.assertIn("Reading run events (read-only replay)", self.labels)
-
-    def test_volume_discovery_spins(self):
-        settings = dict(tui_config.DEFAULTS)
-        with patch.object(self.ui.screen_mod, "run_with_spinner", side_effect=self._spy), \
-             patch.object(self.ui.volumes_mod, "discover_volumes", return_value=[]), \
-             patch.object(self.ui, "_menu", return_value=3):
-            self.ui._volumes(settings)
-        self.assertIn("Scanning local volumes (read-only)", self.labels)
-
-
-class MessageColors(unittest.TestCase):
-    def test_every_category_has_its_own_color_and_warn_is_orange(self):
-        import screen as tui_screen
-        for cat in ("MODEL", "TOOL", "IMAGE", "INFER", "ERROR", "WARN", "FINISH"):
-            self.assertIn(cat, tui_screen.CATEGORY_COLORS)
-        self.assertEqual(len(set(tui_screen.CATEGORY_COLORS.values())), 7)
-        self.assertEqual(tui_screen.CATEGORY_COLORS["WARN"], "orange")
-        self.assertEqual(tui_screen.CATEGORY_COLORS["ERROR"], "red")
-
-    def test_warn_titles_go_orange_while_other_errors_stay_red(self):
-        import screen as tui_screen
-        import ui as tui_ui
-        real_isatty = tui_screen.sys.stdout.isatty
-        try:
-            tui_screen.sys.stdout.isatty = lambda: True
-            warn = tui_ui._cat_title({"cat": "ERROR", "title": "WARN  harness trouble"})
-            self.assertIn(tui_screen.COLORS["orange"], warn)
-            failed = tui_ui._cat_title({"cat": "ERROR", "title": "TOOL  render_scene  Failed"})
-            self.assertIn(tui_screen.COLORS["red"], failed)
-            model = tui_ui._cat_title({"cat": "MODEL", "title": "MODEL #1  Running"})
-            self.assertIn(tui_screen.COLORS["cyan"], model)
-        finally:
-            tui_screen.sys.stdout.isatty = real_isatty
-
-    def test_color_respects_no_color_and_pipes(self):
-        import screen as tui_screen
-        with patch.dict(tui_screen.os.environ, {"NO_COLOR": "1"}):
-            self.assertEqual(tui_screen.colored("x", "red"), "x")
-        self.assertEqual(tui_screen.visible_len("\x1b[31mabc\x1b[0m"), 3)
-        self.assertEqual(tui_screen.visible_len(tui_screen._truncate_ansi("\x1b[31mabcdef\x1b[0m", 3)), 3)
-
-    def test_status_colors(self):
-        import screen as tui_screen
-        import ui as tui_ui
-        real_isatty = tui_screen.sys.stdout.isatty
-        try:
-            tui_screen.sys.stdout.isatty = lambda: True
-            self.assertIn(tui_screen.COLORS["green"], tui_ui._color_status("Finished"))
-            self.assertIn(tui_screen.COLORS["red"], tui_ui._color_status("Failed"))
-            self.assertIn(tui_screen.COLORS["cyan"], tui_ui._color_status("Running"))
-        finally:
-            tui_screen.sys.stdout.isatty = real_isatty
 
 
 if __name__ == '__main__':

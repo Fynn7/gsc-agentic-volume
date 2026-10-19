@@ -175,3 +175,111 @@ def verify_summary(report: dict | None) -> list[str]:
     if final.get("image"):
         lines.append("final rev=%s %s" % (final.get("revision"), final.get("image")))
     return lines
+
+
+def find_run(run_id: str, _fresh: bool = True) -> dict | None:
+    """Lookup one run by runId (read-only)."""
+    for entry in discover_runs(_fresh=_fresh):
+        if entry.get("runId") == run_id:
+            return entry
+    return None
+
+
+def run_config_text(run_dir: str | Path) -> str:
+    """Pretty config.json for diff/detail views; empty when unreadable."""
+    try:
+        data = _read_json(Path(run_dir) / "config.json")
+    except OSError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
+def task_text_of(run_dir: str | Path) -> str:
+    try:
+        data = _read_json(Path(run_dir) / "config.json") or {}
+    except OSError:
+        return ""
+    task = data.get("task")
+    return task if isinstance(task, str) else ""
+
+
+def config_diff(left_dir: str | Path, right_dir: str | Path) -> list[str]:
+    """Unified diff of the two runs' config.json (read-only, no model call)."""
+    import difflib
+    left = run_config_text(left_dir).splitlines()
+    right = run_config_text(right_dir).splitlines()
+    if not left and not right:
+        return ["No config.json in either run."]
+    diff = list(difflib.unified_diff(left, right, fromfile="left config.json",
+                                     tofile="right config.json", lineterm=""))
+    return diff or ["Configs are identical."]
+
+
+def final_image_of(entry: dict) -> str | None:
+    """Best final PNG path: verification final, else newest frame PNG under runtime/<session>."""
+    verification = entry.get("verification") or {}
+    final = verification.get("final") if isinstance(verification, dict) else None
+    if isinstance(final, dict) and final.get("image"):
+        return str(final["image"])
+    session_id = entry.get("sessionId")
+    if session_id:
+        try:
+            candidates = sorted((ROOT / "runtime" / str(session_id)).rglob("*.png"))
+            if candidates:
+                return str(candidates[-1])
+        except OSError:
+            pass
+    # Fallback inside the run dir itself.
+    try:
+        candidates = sorted(Path(str(entry.get("directory", ""))).rglob("frame-*/image.png"))
+        if candidates:
+            return str(candidates[-1])
+    except OSError:
+        pass
+    return None
+
+
+def frame_images(run_dir: str | Path, limit: int = 60) -> list[dict]:
+    """Proven frame PNGs from session.json events (rev + path, newest last)."""
+    try:
+        data = _read_json(Path(run_dir) / "session.json") or {}
+    except OSError:
+        return []
+    events = data.get("events")
+    if not isinstance(events, list):
+        return []
+    out: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("kind") not in ("initial_render", "render"):
+            continue
+        result = event.get("result") or {}
+        image = result.get("image")
+        scene = result.get("scene") or {}
+        if image:
+            out.append({"revision": scene.get("revision"), "image": str(image),
+                        "nonblack": result.get("nonblackPixels")})
+    return out[-limit:] if limit else out
+
+
+def summary_numbers(entry: dict) -> dict:
+    """Compact numbers for dashboard/compare (status/frames/seconds/model/volume)."""
+    manifest = entry.get("manifest") or {}
+    run = entry.get("run") or {}
+    verification = entry.get("verification") or {}
+    seconds = manifest.get("seconds") or manifest.get("totalSeconds")
+    return {
+        "runId": entry.get("runId", "?"),
+        "status": entry.get("status", "Unknown"),
+        "model": entry.get("model", "?"),
+        "frames": entry.get("frames"),
+        "seconds": seconds,
+        "exitCode": manifest.get("exitCode"),
+        "task": entry.get("task", "?"),
+        "actualFrames": (verification or {}).get("actualFrames"),
+        "agentRenders": (verification or {}).get("agentRenders"),
+        "volume": ((_read_json(Path(str(entry.get("directory", ""))) / "config.json") or {}).get("volumePath", "?")),
+    }

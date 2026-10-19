@@ -29,6 +29,15 @@ from run_lifecycle import (ConfigError, ReservationError, RunConflictError, RunL
 
 # One lock per logical task, shared by independent launcher processes.
 LOCK_DIRECTORY = ROOT / 'runtime' / 'locks'
+CONTROL_DIRECTORY = ROOT / 'runtime' / 'tui-control'
+
+
+def stop_requested(run_id):
+    """Cooperative stop flag written by the TUI Stop button (read-only evidence otherwise)."""
+    try:
+        return (CONTROL_DIRECTORY / ('%s.stop' % run_id)).is_file()
+    except OSError:
+        return False
 PROVENANCE_SOURCES = [ROOT / 'src/app.py', ROOT / 'src/renderer.py', ROOT / 'src/volume.py',
                       ROOT / 'src/external_tools.py', ROOT / 'scripts/renderer_mcp.py',
                       ROOT / 'scripts/run_local_agent.py', ROOT / 'scripts/run_lifecycle.py']
@@ -274,24 +283,43 @@ def execute(context, show_images=False, open_images=False):
         for key, value in overrides.items(): command += ['-c', key + '=' + json.dumps(value)]
     else: raise ValueError('Only the validated Codex route is implemented; alternate harnesses require a real compatibility diagnosis')
     manifest = {'harness':harness,'command':command,'runStarted':run_started,'started':time.time(),'sessionId':session['id'],'rendererService':identity,'taskSuccess':'unverified','protocolTranslation':False,'runId':context.run_id,'resultDirectory':str(directory),'resultBase':context.record['resultBase'],'configSource':str(context.source),'configSha256':context.record['configSha256'],'mode':'new-experiment','inferenceOverrides':{k:config.get(k) for k in ['temperature','think','maxOutputTokens']}}
-    manifest['harnessVersion']=subprocess.check_output([executable,'--version'],env=env,text=True,creationflags=subprocess.CREATE_NO_WINDOW).strip()
+    manifest['harnessVersion']=subprocess.check_output([executable,'--version'],env=env,text=True,creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0).strip()
     manifest['sourceHashes']={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in PROVENANCE_SOURCES}
     write_json(directory/'manifest.json', manifest)
     trace.start()
     try:
         with (directory/'harness.jsonl').open('wb') as stdout, (directory/'harness-stderr.log').open('wb') as stderr:
-            process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW)
+            process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             manifest['pid']=process.pid
             context.lock.update(harnessPid=process.pid, phase='harness-running')
-            try: manifest['exitCode']=process.wait(timeout=config['taskTimeoutSeconds'])
-            except subprocess.TimeoutExpired:
-                manifest['timedOut']=True
-                stop_harness(process)
-                manifest['exitCode']=process.returncode
+            # Cooperative stop: the TUI Stop button writes runtime/tui-control/<runId>.stop.
+            # Poll in short slices so a stop request terminates the harness tree and still
+            # flows through the normal interrupted/failure.json path. No stop file means
+            # the legacy timeout/KeyboardInterrupt behavior is unchanged.
+            try:
+                deadline = time.time() + float(config['taskTimeoutSeconds'])
+                while True:
+                    try:
+                        manifest['exitCode']=process.wait(timeout=0.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if stop_requested(context.run_id):
+                            manifest['interrupted']=True
+                            manifest['stopReason']='tui-stop-request'
+                            stop_harness(process)
+                            manifest['exitCode']=process.returncode
+                            raise KeyboardInterrupt('stop requested via runtime/tui-control/%s.stop' % context.run_id)
+                        if time.time() >= deadline:
+                            manifest['timedOut']=True
+                            stop_harness(process)
+                            manifest['exitCode']=process.returncode
+                            break
             except KeyboardInterrupt:
-                manifest['interrupted']=True
-                stop_harness(process)
-                manifest['exitCode']=process.returncode
+                # Cooperative TUI stop already recorded above; hard Ctrl+C lands here too.
+                if not manifest.get('interrupted'):
+                    manifest['interrupted']=True
+                    stop_harness(process)
+                    manifest['exitCode']=process.returncode
                 raise
     finally:
         stop.set(); telemetry.join(10); server.shutdown(); server.server_close()

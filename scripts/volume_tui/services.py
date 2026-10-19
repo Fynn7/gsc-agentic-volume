@@ -740,3 +740,35 @@ def release_lines(report: dict) -> list[str]:
     if report.get("kept"):
         lines.append("[kept] %s" % report["kept"])
     return lines
+
+
+def service_logs(limit_lines: int = 40) -> list[tuple[str, list[str]]]:
+    """Tail of owned-service stdout/stderr logs (read-only, newest lines)."""
+    out: list[tuple[str, list[str]]] = []
+    try:
+        files = sorted(_logdir().glob("*.log"))
+    except OSError:
+        return out
+    for path in files[-8:]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lines = text.splitlines()[-limit_lines:]
+        out.append((path.name, lines))
+    return out
+
+
+def owned_services() -> list[dict]:
+    """Owned services with liveness for the Services workspace."""
+    record = _read_record()
+    services = record.get("services") or {}
+    out = []
+    for kind, entry in services.items():
+        pid = entry.get("pid")
+        alive = isinstance(pid, int) and process_alive(pid) and _image_of_pid(pid) == entry.get("image")
+        out.append({"kind": kind, "pid": pid, "image": entry.get("image"),
+                    "alive": bool(alive), "owned": record.get("owner") == SESSION_ID,
+                    "endpoint": entry.get("endpoint") or entry.get("service") or "",
+                    "temporary": bool(entry.get("temporary"))})
+    return out

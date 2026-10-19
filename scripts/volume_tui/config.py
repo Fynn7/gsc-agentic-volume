@@ -31,7 +31,45 @@ DEFAULTS = {"mode": "Local", "model": "qwen3.6:35b",
             "endpoint": "http://127.0.0.1:11434",
             "h200Endpoint": "http://127.0.0.1:11435",
             "rendererService": "http://127.0.0.1:8765",
-            "volumePath": ""}
+            "volumePath": "",
+            "contextSize": 16384,
+            "renderBudget": 4,
+            "temperature": 0,
+            "think": False,
+            "timeoutSeconds": 300,
+            "taskTimeoutSeconds": 900,
+            "maxOutputTokens": 1200}
+
+
+def _coerce_settings(stored: dict) -> dict:
+    """Coerce persisted settings to usable types; invalid values fall back to defaults."""
+    out = dict(DEFAULTS)
+    for key in DEFAULTS:
+        if key not in stored:
+            continue
+        value = stored[key]
+        default = DEFAULTS[key]
+        try:
+            if isinstance(default, bool):
+                if isinstance(value, str):
+                    lowered = value.strip().lower()
+                    if lowered in ("1", "true", "yes", "on"):
+                        out[key] = True
+                    elif lowered in ("0", "false", "no", "off"):
+                        out[key] = False
+                elif isinstance(value, (int, float)):
+                    out[key] = bool(value)
+                elif isinstance(value, bool):
+                    out[key] = value
+            elif isinstance(default, int) and not isinstance(default, bool):
+                out[key] = int(value)
+            elif isinstance(default, float):
+                out[key] = float(value)
+            else:
+                out[key] = value
+        except (TypeError, ValueError):
+            out[key] = default
+    return out
 
 
 def load_settings() -> dict:
@@ -39,10 +77,42 @@ def load_settings() -> dict:
     try:
         stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(stored, dict):
-            merged.update({k: stored[k] for k in DEFAULTS if k in stored})
+            merged = _coerce_settings(stored)
     except (OSError, ValueError):
         pass
     return merged
+
+
+def validate_settings(settings: dict) -> list[str]:
+    """Human-readable problems for the Settings form; empty means runnable."""
+    problems: list[str] = []
+    if settings.get("mode") not in ("Local", "H200"):
+        problems.append("mode must be Local or H200")
+    if not str(settings.get("model") or "").strip():
+        problems.append("model must not be empty")
+    for key in ("endpoint", "h200Endpoint", "rendererService"):
+        value = str(settings.get(key) or "").strip()
+        if not value.startswith("http://127.0.0.1:") and not value.startswith("http://localhost:"):
+            problems.append("%s must be a loopback URL" % key)
+    try:
+        budget = int(settings.get("renderBudget", 0))
+        if not 1 <= budget <= 30:
+            problems.append("renderBudget must be between 1 and 30")
+    except (TypeError, ValueError):
+        problems.append("renderBudget must be an integer 1..30")
+    for key in ("contextSize", "timeoutSeconds", "taskTimeoutSeconds", "maxOutputTokens"):
+        try:
+            if int(settings.get(key, 0)) < 1:
+                problems.append("%s must be >= 1" % key)
+        except (TypeError, ValueError):
+            problems.append("%s must be a number" % key)
+    try:
+        temp = float(settings.get("temperature", 0))
+        if not 0 <= temp <= 2:
+            problems.append("temperature is usually 0..2")
+    except (TypeError, ValueError):
+        problems.append("temperature must be a number")
+    return problems
 
 
 def save_settings(settings: dict) -> None:
@@ -75,6 +145,10 @@ def build_effective_config(task_kind: str, custom_text: str, settings: dict) -> 
     config["model"] = settings["model"]
     config["endpoint"] = active_endpoint(settings)
     config["rendererService"] = settings["rendererService"]
+    for key in ("contextSize", "renderBudget", "temperature", "think",
+                "timeoutSeconds", "taskTimeoutSeconds", "maxOutputTokens"):
+        if key in settings:
+            config[key] = settings[key]
     volume = selected_volume(settings)
     config["volumePath"] = str(volume) if volume else config.get("volumePath")
     if task_kind == "task-a":

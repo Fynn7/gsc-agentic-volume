@@ -221,4 +221,87 @@ def option_text(item: dict) -> str:
     return text
 
 
-__all__ = ["describe", "discover_volumes", "option_text"]
+def prepared_render_raw(header: Path) -> Path | None:
+    """render.raw beside a prepared header (render.dat + volume.json), else None."""
+    candidate = Path(header)
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        pass
+    if candidate.name.lower() == "render.dat":
+        raw = candidate.with_name("render.raw")
+        volume_json = candidate.with_name("volume.json")
+        if raw.is_file() and volume_json.is_file():
+            return raw
+        return None
+    return None
+
+
+def slice_preview_path(header: str | Path, axis: str, index: int) -> dict:
+    """Read-only grayscale slice preview cached under runtime/tui/slices.
+
+    Only works for prepared volumes (render.dat beside render.raw/volume.json);
+    never converts, never consumes agent budget, never touches run evidence.
+    Returns {"ok", "image", "detail", ...}.
+    """
+    from pathlib import Path as _Path
+    axis = str(axis).lower()
+    if axis not in ("x", "y", "z"):
+        return {"ok": False, "detail": "axis must be x, y or z"}
+    header_path = _Path(header)
+    raw = prepared_render_raw(header_path)
+    if raw is None:
+        return {"ok": False, "detail": "slice preview needs a prepared volume (render.dat + render.raw + volume.json)"}
+    try:
+        import json as _json
+        meta = _json.loads(raw.with_name("volume.json").read_text(encoding="utf-8"))
+        dims = meta.get("dimensions")
+        if not (isinstance(dims, list) and len(dims) == 3):
+            return {"ok": False, "detail": "volume.json has no 3D dimensions"}
+        dims = [int(v) for v in dims]
+    except (OSError, ValueError, TypeError) as error:
+        return {"ok": False, "detail": "cannot read volume.json: %s" % error}
+    ai = "xyz".index(axis)
+    if not 0 <= int(index) < dims[ai]:
+        return {"ok": False, "detail": "index %s out of range for %s (size %d)" % (index, axis, dims[ai])}
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return {"ok": False, "detail": "index must be an integer"}
+    try:
+        cache = ROOT / "runtime" / "tui" / "slices"
+        cache.mkdir(parents=True, exist_ok=True)
+        import hashlib as _hashlib
+        key = _hashlib.sha1(str(raw).encode()).hexdigest()[:12]
+        out = cache / ("slice-%s-%s-%d.png" % (key, axis, index))
+        if out.is_file():
+            return {"ok": True, "image": str(out), "axis": axis, "index": index,
+                    "dimensions": dims, "cached": True}
+        from PIL import Image as _Image
+        import numpy as _np
+        raw_bytes = raw.read_bytes()
+        expected = dims[0] * dims[1] * dims[2]
+        if len(raw_bytes) < expected:
+            return {"ok": False, "detail": "render.raw too small (%d < %d)" % (len(raw_bytes), expected)}
+        kind = meta.get("canonicalType") or "uint8"
+        dtype = "<u2" if kind == "uint16" else "<u1"
+        arr = _np.frombuffer(raw_bytes[:expected * (2 if dtype == "<u2" else 1)], dtype=dtype)
+        try:
+            arr = arr.reshape((dims[2], dims[1], dims[0]))
+        except ValueError as error:
+            return {"ok": False, "detail": "reshape failed: %s" % error}
+        pixels = [lambda: arr[:, :, index], lambda: arr[:, index, :], lambda: arr[index, :, :]][ai]()
+        if dtype == "<u2":
+            lo, hi = (int(pixels.min()), int(pixels.max()))
+            span = max(1, hi - lo)
+            pixels = ((pixels.astype("float32") - lo) * 255.0 / span).astype("uint8")
+        else:
+            pixels = pixels.astype("uint8")
+        _Image.fromarray(pixels).save(out)
+        return {"ok": True, "image": str(out), "axis": axis, "index": index,
+                "dimensions": dims, "cached": False}
+    except Exception as error:
+        return {"ok": False, "detail": "slice failed: %s" % error}
+
+
+__all__ = ["describe", "discover_volumes", "option_text", "prepared_render_raw", "slice_preview_path"]

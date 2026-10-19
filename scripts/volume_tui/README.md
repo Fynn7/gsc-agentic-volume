@@ -55,12 +55,29 @@
   MVP gate, safe-cancel of a running harness (CLI has no verified API — TUI
   shows the limit and never kills), H200 field verification.
 
-## Layout
+## Volume selection (any local header, not one fixed path)
+
+- The main menu has **Volumes**. It scans the whole project tree (root level
+  included, `.git`/`.venv`/`__pycache__`/`node_modules` pruned) for headers the
+  launcher can already use: prepared `render.dat` (+`volume.json`) and supported
+  source headers (`.dat`/`.nhdr`/`.nrrd`), plus `volumePath` values from earlier
+  run/TUI configs that still exist. QVis and TU Wien binary DAT dimensions are
+  read directly (binary DAT: 6-byte little-endian uint16 header).
+- Identical payloads (`volumeHash`) are collapsed into one row with a copy
+  count, so old session copies do not flood the menu. QVis lz4 payloads are
+  listed as unsupported by `describe` and omitted from discovery.
+- Selecting a volume writes `volumePath` to `runtime/tui-settings.json` and is
+  used by every new run; the run confirmation screen also offers
+  **Change volume**. Existing runs keep their own `config.json`.
+- Fallback remains `runtime/gate-volume/render.dat` when no selection exists.
+  Preflight now checks the selected volume instead of a hard-coded default.
+- Manual entry accepts any absolute/relative header path (the launcher still
+  validates the payload; nothing is converted by the TUI).
 
 ## Layout
 
 - `Start-VolumeTUI.ps1` — single entry (checks, isolated `runtime/tui/`, no model call).
-- `scripts/volume_tui/{config,env,runs,trace_events,runner,ui}.py` — control/display only.
+- `scripts/volume_tui/{config,env,runs,trace_events,runner,volumes,ui}.py` — control/display only.
 - `tests/test_volume_tui.py` — non-recursive (launcher `execute` mocked; no Qwen call).
 
 ## Service lifecycle (auto-start on entry, auto-stop on exit)

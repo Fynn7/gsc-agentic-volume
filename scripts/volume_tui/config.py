@@ -30,7 +30,8 @@ BASES = {"task-a": "runtime/local-vlm/cli-task-a",
 DEFAULTS = {"mode": "Local", "model": "qwen3.6:35b",
             "endpoint": "http://127.0.0.1:11434",
             "h200Endpoint": "http://127.0.0.1:11435",
-            "rendererService": "http://127.0.0.1:8765"}
+            "rendererService": "http://127.0.0.1:8765",
+            "volumePath": ""}
 
 
 def load_settings() -> dict:
@@ -53,6 +54,16 @@ def active_endpoint(settings: dict) -> str:
     return settings["h200Endpoint"] if settings.get("mode") == "H200" else settings["endpoint"]
 
 
+def selected_volume(settings: dict) -> Path | None:
+    """Existing volume chosen in the TUI, else the audited gate volume, else None."""
+    raw = str((settings or {}).get("volumePath") or "").strip().strip('"')
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_file():
+            return candidate.resolve()
+    return GATE_VOLUME.resolve() if GATE_VOLUME.is_file() else None
+
+
 def example_config() -> dict:
     return json.loads(EXAMPLE.read_text(encoding="utf-8"))
 
@@ -64,7 +75,7 @@ def build_effective_config(task_kind: str, custom_text: str, settings: dict) -> 
     config["model"] = settings["model"]
     config["endpoint"] = active_endpoint(settings)
     config["rendererService"] = settings["rendererService"]
-    volume = GATE_VOLUME.resolve() if GATE_VOLUME.is_file() else None
+    volume = selected_volume(settings)
     config["volumePath"] = str(volume) if volume else config.get("volumePath")
     if task_kind == "task-a":
         config["task"] = TASK_A

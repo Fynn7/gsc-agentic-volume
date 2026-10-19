@@ -29,6 +29,7 @@ import runner as runner_mod
 import screen as screen_mod
 import services as services_mod
 import trace_events as trace_mod
+import volumes as volumes_mod
 
 SHORTCUTS = "Up/Down select  Enter open  Esc back  i image  d details  o folder  q quit"
 # Shared loading tick: one animation family everywhere (menu/live/startup/verify).
@@ -162,8 +163,14 @@ def _status_lines(settings: dict) -> list[str]:
     last = runs[0] if runs else None
     inference = get("Inference")
     renderer = get("Renderer")
+    volume = cfg.selected_volume(settings)
+    try:
+        volume_text = volume.relative_to(ROOT).as_posix() if volume else "none (choose Volumes)"
+    except ValueError:
+        volume_text = str(volume) if volume else "none (choose Volumes)"
     return [
         "Mode: %s   Model: %s" % (settings.get("mode"), settings.get("model")),
+        "Volume: %s" % volume_text,
         screen_mod.colored("Inference: %s" % ("OK" if inference.get("ok") else "DOWN: %s" % inference.get("detail", "")[:80]),
                            "green" if inference.get("ok") else "red"),
         screen_mod.colored("Renderer:  %s" % ("OK" if renderer.get("ok") else "DOWN: %s" % renderer.get("detail", "")[:80]),
@@ -279,19 +286,27 @@ def _confirm_and_run(task_kind: str, task_label: str, settings: dict):
             _pause()
             return
     assert effective is not None
-    _clear()
-    print("Confirm run (one confirmation creates exactly one independent Run)\n" + "=" * 70)
-    print("Task:    %s" % task_label)
-    print("Model:   %s" % effective["model"])
-    print("Volume:  %s" % effective["volumePath"])
-    print("Budget:  %s renders" % effective["renderBudget"])
-    print("Mode:    %s (%s)" % (settings["mode"], effective["endpoint"]))
-    print("Saves:   new run under %s (original config never overwritten)" % effective["resultDirectory"])
-    print("Prompt:  %s" % effective["task"][:300])
-    print("-" * 70 + "\n" + SHORTCUTS)
-    choice = _menu("Start this run?", [], ["Confirm and run", "Cancel"])
-    if choice != 0:
-        return
+    while True:
+        _clear()
+        print("Confirm run (one confirmation creates exactly one independent Run)\n" + "=" * 70)
+        print("Task:    %s" % task_label)
+        print("Model:   %s" % effective["model"])
+        print("Volume:  %s" % effective["volumePath"])
+        print("Budget:  %s renders" % effective["renderBudget"])
+        print("Mode:    %s (%s)" % (settings["mode"], effective["endpoint"]))
+        print("Saves:   new run under %s (original config never overwritten)" % effective["resultDirectory"])
+        print("Prompt:  %s" % effective["task"][:300])
+        print("-" * 70 + "\n" + SHORTCUTS)
+        choice = _menu("Start this run?", [], ["Confirm and run", "Change volume", "Cancel"])
+        if choice == 1:
+            settings = _volumes(settings)
+            chosen = cfg.selected_volume(settings)
+            if chosen is not None:
+                effective["volumePath"] = str(chosen)
+            continue
+        if choice != 0:
+            return
+        break
     problems = _service_gate(settings)
     if problems:
         remediable = _temporary_context_offer(settings, problems)
@@ -755,9 +770,64 @@ def _verify_view(run_dir: str):
     _pause()
 
 
+def _volumes(settings: dict) -> dict:
+    """Pick any locally discoverable volume; persists for subsequent runs."""
+    while True:
+        current = cfg.selected_volume(settings)
+        found = volumes_mod.discover_volumes(current)
+        lines = ["Current: %s" % (current or "none"),
+                 "%d distinct local volume(s) found (read-only scan; nothing converted)." % len(found),
+                 "A selection applies to new runs and is saved in tui-settings.json."]
+        choice = _menu("Volumes (whole-project scan of every header the launcher can use)",
+                       lines,
+                       ["Choose from %d discovered volume(s)" % len(found),
+                        "Enter a path manually", "Refresh discovery", "Back"])
+        if choice is None or choice == 3:
+            return settings
+        if choice == 0:
+            if not found:
+                _clear()
+                print("No local volume header found. Put a supported .dat/.nhdr/.nrrd file on disk, refresh, or enter its path.")
+                _pause()
+                continue
+            pick = _menu("Discovered volumes (identical payloads collapsed; current first)",
+                         ["Current: %s" % (current or "none")],
+                         [volumes_mod.option_text(item) for item in found] + ["Cancel"])
+            if pick is None or pick >= len(found):
+                continue
+            item = found[pick]
+            settings["volumePath"] = item["path"]
+            cfg.save_settings(settings)
+            _clear()
+            print("Volume selected: %s" % item["path"])
+            if item.get("dimensions"):
+                print("Dimensions: %s" % " x ".join(str(v) for v in item["dimensions"]))
+            print("Applies to the next run; existing runs keep their own config.")
+            _pause()
+        elif choice == 1:
+            _clear()
+            print("Current: %s" % (current or "none"))
+            raw = input("Volume header path (.dat/.nhdr/.nrrd, empty=cancel): ").strip().strip('"')
+            if not raw:
+                continue
+            facts = volumes_mod.describe(raw)
+            if not facts["ok"]:
+                print("Cannot use this volume: %s" % (facts.get("detail") or "not a readable header"))
+                print("Nothing was changed.")
+                _pause()
+                continue
+            settings["volumePath"] = facts["path"]
+            cfg.save_settings(settings)
+            dims = " x ".join(str(v) for v in facts["dimensions"]) if facts.get("dimensions") else "unknown"
+            print("Volume selected: %s (dims %s)" % (facts["path"], dims))
+            _pause()
+
+
 def _settings(settings: dict) -> dict:
     while True:
+        volume = cfg.selected_volume(settings)
         lines = ["mode=%s model=%s" % (settings["mode"], settings["model"]),
+                 "volume=%s" % (volume or "none (change it in the Volumes menu)"),
                  "local endpoint=%s" % settings["endpoint"],
                  "h200 endpoint=%s (tunnel; never auto-guessed)" % settings["h200Endpoint"],
                  "renderer=%s" % settings["rendererService"],
@@ -860,8 +930,8 @@ def _main() -> int:
         lines = _status_lines(settings)
         choice = _menu("Volume Agent TUI  (control layer; Codex CLI owns all runs)",
                        lines, ["Run Task A", "Run Task B", "Custom Task", "History",
-                               "Settings", "Exit"])
-        if choice is None or choice == 5:
+                               "Volumes", "Settings", "Exit"])
+        if choice is None or choice == 6:
             # Closing the TUI never terminates a running agent.
             still = [r for r in runs_mod.discover_runs(limit=50) if r["status"] == "Running"]
             _clear()
@@ -878,6 +948,8 @@ def _main() -> int:
         elif choice == 3:
             _history()
         elif choice == 4:
+            settings = _volumes(settings)
+        elif choice == 5:
             settings = _settings(settings)
 
 

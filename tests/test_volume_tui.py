@@ -4,6 +4,7 @@ Launcher `execute` is mocked; HTTP/verify paths use temp dirs and fixture runs.
 """
 import io
 import json
+import struct
 import sys
 import tempfile
 import unittest
@@ -54,10 +55,125 @@ class TaskConfig(unittest.TestCase):
                 settings = tui_config.load_settings()
                 self.assertEqual(settings["model"], "qwen3.6:35b")
                 settings["mode"] = "H200"
+                settings["volumePath"] = str(target.parent / "chosen.dat")
                 tui_config.save_settings(settings)
                 reloaded = tui_config.load_settings()
                 self.assertEqual(reloaded["mode"], "H200")
+                self.assertEqual(reloaded["volumePath"], settings["volumePath"])
                 self.assertEqual(tui_config.active_endpoint(reloaded), reloaded["h200Endpoint"])
+
+    def test_selected_volume_drives_new_configs_with_gate_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gate = root / "gate" / "render.dat"
+            gate.parent.mkdir()
+            gate.write_text("ObjectFileName: render.raw\nResolution: 4 4 4\n")
+            chosen = root / "chosen.dat"
+            chosen.write_text("ObjectFileName: chosen.raw\nResolution: 8 8 8\n")
+            with patch.object(tui_config, "GATE_VOLUME", gate):
+                settings = dict(tui_config.DEFAULTS, volumePath=str(chosen))
+                built = tui_config.build_effective_config("task-a", "", settings)
+                self.assertEqual(Path(built["volumePath"]), chosen.resolve())
+                settings["volumePath"] = ""
+                built = tui_config.build_effective_config("task-a", "", settings)
+                self.assertEqual(Path(built["volumePath"]), gate.resolve())
+
+
+class VolumeDiscovery(unittest.TestCase):
+    def _tree(self, root: Path):
+        runtime = root / "runtime"
+        gate = runtime / "gate-volume" / "render.dat"
+        gate.parent.mkdir(parents=True)
+        gate.write_text("ObjectFileName: render.raw\nResolution: 4 5 6\nFormat: uchar\n")
+        (gate.parent / "volume.json").write_text(json.dumps(
+            {"dimensions": [4, 5, 6], "volumeHash": "same"}))
+
+        copy = runtime / "session-1" / "volume"
+        copy.mkdir(parents=True)
+        (copy / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 4 5 6\n")
+        (copy / "volume.json").write_text(json.dumps(
+            {"dimensions": [4, 5, 6], "volumeHash": "same"}))
+
+        other = runtime / "session-2" / "volume"
+        other.mkdir(parents=True)
+        (other / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 7 8 9\n")
+        (other / "volume.json").write_text(json.dumps(
+            {"dimensions": [7, 8, 9], "volumeHash": "other"}))
+
+        experiments = root / "experiments"
+        experiments.mkdir()
+        sample = experiments / "sample.nhdr"
+        sample.write_text("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 8 9 10\n")
+        compressed = experiments / "compressed.dat"
+        compressed.write_text("ObjectFileName: x.lz4\nResolution: 2 2 2\nCompression: lz4\n")
+
+        prior = root / "prior" / "header.dat"
+        prior.parent.mkdir()
+        prior.write_text("ObjectFileName: header.raw\nResolution: 9 9 9\n")
+        prior_config = runtime / "run-3"
+        prior_config.mkdir()
+        (prior_config / "config.json").write_text(json.dumps({"volumePath": str(prior)}))
+
+        # Project-root TU Wien binary DAT (6-byte header, no sibling volume.json).
+        binary = root / "present246x246x221.dat"
+        binary.write_bytes(struct.pack("<3H", 246, 246, 221) + b"\x00" * 16)
+        return runtime, gate, experiments, other / "render.dat", sample, compressed, prior, binary
+
+    def test_scan_finds_all_sources_and_collapses_identical_payloads(self):
+        import volumes as tui_volumes
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, gate, experiments, other, sample, compressed, prior, binary = self._tree(root)
+            with patch.object(tui_volumes, "ROOT", root), \
+                 patch.object(tui_volumes, "RUNTIME", runtime), \
+                 patch.object(tui_volumes, "GATE", gate):
+                found = tui_volumes.discover_volumes(gate)
+            paths = [Path(item["path"]) for item in found]
+            self.assertEqual(paths[0], gate.resolve())
+            self.assertTrue(found[0]["default"])
+            self.assertEqual(len([item for item in found if item["hash"] == "same"]), 1)
+            self.assertEqual(found[[item["hash"] for item in found].index("same")]["copies"], 2)
+            self.assertIn(other.resolve(), paths)
+            self.assertIn(sample.resolve(), paths)
+            self.assertIn(prior.resolve(), paths)
+            self.assertIn(binary.resolve(), paths)
+            self.assertNotIn(compressed.resolve(), paths)
+            nhdr = next(item for item in found if Path(item["path"]) == sample.resolve())
+            self.assertEqual(nhdr["dimensions"], [8, 9, 10])
+            root_dat = next(item for item in found if Path(item["path"]) == binary.resolve())
+            self.assertEqual(root_dat["dimensions"], [246, 246, 221])
+
+    def test_selection_is_listed_first_and_unsupported_is_explained(self):
+        import volumes as tui_volumes
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, gate, experiments, other, sample, compressed, prior, binary = self._tree(root)
+            with patch.object(tui_volumes, "ROOT", root), \
+                 patch.object(tui_volumes, "RUNTIME", runtime), \
+                 patch.object(tui_volumes, "GATE", gate):
+                found = tui_volumes.discover_volumes(other)
+            self.assertEqual(Path(found[0]["path"]), other.resolve())
+            self.assertIn("8x9x10", tui_volumes.option_text(
+                next(item for item in found if Path(item["path"]) == sample.resolve())))
+            facts = tui_volumes.describe(compressed)
+            self.assertFalse(facts["ok"])
+            self.assertIn("lz4", facts["detail"])
+
+    def test_preflight_checks_the_selected_volume(self):
+        import env as tui_env
+        with tempfile.TemporaryDirectory() as tmp:
+            chosen = Path(tmp) / "chosen.dat"
+            chosen.write_text("ObjectFileName: chosen.raw\nResolution: 4 4 4\n")
+            settings = {"mode": "Local", "endpoint": "http://127.0.0.1:1",
+                        "h200Endpoint": "http://127.0.0.1:2",
+                        "rendererService": "http://127.0.0.1:3",
+                        "model": "qwen3.6:35b", "volumePath": str(chosen)}
+            with patch.object(tui_config, "GATE_VOLUME", Path(tmp) / "missing.dat"), \
+                 patch.object(tui_env, "_http_json", side_effect=OSError("refused")):
+                items = tui_env.check_environment(settings)["items"]
+            volume = next(item for item in items if item["name"] == "Volume")
+            self.assertTrue(volume["ok"])
+            self.assertEqual(Path(volume["detail"]), chosen.resolve())
 
 
 class LifecycleDelegation(unittest.TestCase):

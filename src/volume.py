@@ -1,10 +1,4 @@
 """Numeric import capability. No Dataset Card and no semantic labels."""
-from volume_context.convert import convert_to_canonical, renderer_uint8
-from volume_context.hashing import sha256_file
-from volume_context.stats import compute_statistics
-from volume_context.budgets import Budgets
-from volume_context.readers.common import numpy_dtype
-from volume_context.readers import read_source_header
 import sys
 import json
 import dataclasses
@@ -12,6 +6,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
+from volume_context.convert import convert_to_canonical, renderer_uint8
+from volume_context.hashing import sha256_file
+from volume_context.stats import compute_statistics
+from volume_context.budgets import Budgets
+from volume_context.readers.common import numpy_dtype
+from volume_context.readers import read_source_header
 
 
 def prepare(source, directory):

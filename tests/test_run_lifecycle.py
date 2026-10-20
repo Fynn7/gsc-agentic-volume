@@ -280,7 +280,11 @@ class LauncherIntegration(unittest.TestCase):
         context = launcher.prepare_run(config, config_path, raw)
         try:
             self.assertTrue(context.directory.is_dir())
-            self.assertEqual(context.directory.parent, Path(config['resultDirectory']))
+            # The launcher resolves the configured directory; on Windows the
+            # temp dir may be spelled with an 8.3 short name (RUNNER~1), so
+            # compare the directories, not their spelling.
+            self.assertEqual(context.directory.parent.resolve(),
+                             Path(config['resultDirectory']).resolve())
             self.assertEqual(json.loads((context.directory / 'run.json').read_text())['status'], 'running')
             self.assertEqual(json.loads((context.directory / 'run.json').read_text())['mode'], 'new-experiment')
             self.assertEqual(json.loads((context.directory / 'run.json').read_text())['originalResultDirectory'],
@@ -359,8 +363,10 @@ class LauncherIntegration(unittest.TestCase):
         self.assertEqual(len(created), 1)
         record = json.loads((created[0] / 'run.json').read_text())
         self.assertTrue(record['resultBaseAdjusted'])
-        self.assertEqual(record['configuredResultDirectory'], str(old))
-        self.assertEqual(record['resultBase'], str(old.parent))
+        # Recorded resolved, so compare the directories (Windows may spell the
+        # temp dir with an 8.3 short name).
+        self.assertEqual(Path(record['configuredResultDirectory']).resolve(), old.resolve())
+        self.assertEqual(Path(record['resultBase']).resolve(), old.parent.resolve())
 
     # -- duplicate / concurrent launches ------------------------------------
     def test_a_live_duplicate_launch_is_refused_without_a_new_directory(self):

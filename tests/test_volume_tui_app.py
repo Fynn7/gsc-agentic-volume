@@ -822,6 +822,68 @@ class LiveFrameAndLabels(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class ModalEscape(unittest.TestCase):
+    """Esc must close every modal the TUI opens (help, palette, confirm)."""
+
+    def test_escape_closes_the_help_screen(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                await pilot.press("f1")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui_app.HelpScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, tui_app.DismissibleModal)
+                # Esc closes the overlay, it never quits the TUI.
+                self.assertTrue(app.is_running)
+        asyncio.run(_run())
+
+    def test_escape_closes_the_command_palette(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app.action_commands()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui_app.CommandScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, tui_app.DismissibleModal)
+                self.assertTrue(app.is_running)
+        asyncio.run(_run())
+
+    def test_escape_cancels_the_confirm_dialog(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            ran = []
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app.push_screen(tui_app.ConfirmScreen(
+                    "Stop the run?", on_yes=lambda: ran.append("yes")))
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui_app.ConfirmScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, tui_app.DismissibleModal)
+                # Esc is a cancel, never the Yes action.
+                self.assertEqual(ran, [])
+        asyncio.run(_run())
+
+    def test_every_modal_has_the_escape_binding(self):
+        for screen in (tui_app.HelpScreen, tui_app.CommandScreen, tui_app.ConfirmScreen):
+            keys = [binding.key for binding in screen.BINDINGS]
+            self.assertIn("escape", keys, screen.__name__)
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
 class QuitLeavesNothingBehind(unittest.TestCase):
     """Quitting the TUI must stop the agent run and the owned services."""
 

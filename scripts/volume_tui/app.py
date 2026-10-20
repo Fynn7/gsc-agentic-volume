@@ -108,7 +108,20 @@ TASK_PRESETS = ["task-a", "task-b", "custom"]
 LIVE_PREVIEW_MAX_ROWS = 48
 
 
-class HelpScreen(ModalScreen if _TEXTUAL else object):
+class DismissibleModal(ModalScreen if _TEXTUAL else object):
+    """Modal screen that closes with Esc.
+
+    Textual's ModalScreen ships no escape binding of its own (only the
+    built-in command palette has one), so the help screen and the command
+    palette ignored Esc even though both advertise it. The binding lives on
+    the screen, so it wins over the app bindings while the modal is up.
+    """
+
+    if _TEXTUAL:
+        BINDINGS = [Binding("escape", "dismiss", "Close", show=False)]
+
+
+class HelpScreen(DismissibleModal):
     def compose(self):
         yield Static(
             "Volume Agent TUI — what every button does\n"
@@ -200,7 +213,7 @@ class FramePreview(Static if _TEXTUAL else object):
             refresh()
 
 
-class ConfirmScreen(ModalScreen if _TEXTUAL else object):
+class ConfirmScreen(DismissibleModal):
     def __init__(self, message: str, on_yes=None):
         super().__init__()
         self._message = message
@@ -208,9 +221,14 @@ class ConfirmScreen(ModalScreen if _TEXTUAL else object):
 
     def compose(self):
         yield Static(self._message, id="confirm-message")
+        yield Static("Esc = No (cancel)", id="confirm-hint")
         with Horizontal():
             yield Button("Yes", id="confirm-yes", variant="error")
             yield Button("No", id="confirm-no", variant="primary")
+
+    async def action_dismiss(self, result=None) -> None:
+        """Esc cancels: the same as clicking No, never the Yes action."""
+        await super().action_dismiss(False)
 
     async def on_button_pressed(self, event):
         if event.button.id == "confirm-yes" and self._on_yes:
@@ -220,7 +238,7 @@ class ConfirmScreen(ModalScreen if _TEXTUAL else object):
         self.dismiss(result=(event.button.id == "confirm-yes"))
 
 
-class CommandScreen(ModalScreen if _TEXTUAL else object):
+class CommandScreen(DismissibleModal):
     # (label, action id) — the id is stable, the label spells out the effect.
     COMMANDS = [
         ("Go: Dashboard", "go-dashboard"),
@@ -267,6 +285,7 @@ if _TEXTUAL:
         .field-label { width: 24; content-align: right middle; padding-right: 1; }
         .narrow { width: 18; }
         #status-bar { height: 3; border: solid green; }
+        #confirm-hint { height: auto; color: $text-muted; }
         #newrun-prompt { height: 8; }
         #newrun-preflight { height: auto; min-height: 3; }
         .scroll-hint { color: gray; }

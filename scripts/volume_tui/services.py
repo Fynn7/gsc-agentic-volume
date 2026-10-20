@@ -633,23 +633,30 @@ def owned_summary() -> str:
 def service_status(settings: dict | None = None) -> dict:
     """Read-only state of the local inference and renderer endpoints.
 
-    The Dashboard shows it. It never starts, stops or changes a service, and
-    it never asks the model anything.
+    The Dashboard shows it. It never starts, stops or changes a service, it
+    never asks the model anything, and it only probes loopback addresses —
+    the TUI never dials out.
     """
     settings = settings or config_mod.load_settings()
     status = {"inference": "n/a", "renderer": "n/a", "owned": owned_summary()}
     endpoint = str((settings.get("h200Endpoint") if settings.get("mode") == "H200"
                     else settings.get("endpoint")) or "")
     if endpoint:
-        status["inference"] = "up" if _endpoint_up(endpoint) else "down"
+        if _loopback(endpoint) is None:
+            status["inference"] = "remote (not probed)"
+        else:
+            status["inference"] = "up" if _endpoint_up(endpoint) else "down"
     service = str(settings.get("rendererService") or "")
     if service:
-        try:
-            identity = _http_get(service.rstrip("/") + "/api/service", 1.5)
-            status["renderer"] = ("up" if identity.get("service") == "gav-native-renderer"
-                                  else "foreign service")
-        except Exception:
-            status["renderer"] = "down"
+        if _loopback(service) is None:
+            status["renderer"] = "remote (not probed)"
+        else:
+            try:
+                identity = _http_get(service.rstrip("/") + "/api/service", 1.5)
+                status["renderer"] = ("up" if identity.get("service") == "gav-native-renderer"
+                                      else "foreign service")
+            except Exception:
+                status["renderer"] = "down"
     return status
 
 
@@ -813,7 +820,8 @@ def _inference_state(settings: dict | None = None, owned: bool = False) -> dict:
     return report
 
 
-def shutdown_all(settings: dict | None = None, hard: bool = False) -> dict:
+def shutdown_all(settings: dict | None = None, hard: bool = False,
+                 cache: bool = True) -> dict:
     """Leave no process behind: agent run -> local Ollama -> owned services.
 
     The live runs are asked to stop first (cooperative stop, so the launcher
@@ -826,7 +834,9 @@ def shutdown_all(settings: dict | None = None, hard: bool = False) -> dict:
     this TUI started and reports anything foreign that stays alive.
 
     The result is cached: the quit path and the safety net in `main()` must
-    not stop the same process twice.
+    not stop the same process twice. `cache=False` is for the Services tab,
+    which stops the same tree on purpose and must not freeze the report the
+    later quit path reads.
     """
     global _SHUTDOWN_REPORT
     if _SHUTDOWN_REPORT is not None:
@@ -866,7 +876,8 @@ def shutdown_all(settings: dict | None = None, hard: bool = False) -> dict:
         if inference.get("endpoint") and not inference.get("verified") and not inference.get("owned"):
             report["kept"].append("local Ollama at %s still runs (not started by this TUI, "
                                   "left alone)" % inference["endpoint"])
-    _SHUTDOWN_REPORT = report
+    if cache:
+        _SHUTDOWN_REPORT = report
     return report
 
 

@@ -66,9 +66,11 @@ explained in the F1 help screen — stated once, never repeated on screen.
   never converts, never consumes budget, never touches run evidence).
 - **Services**: owned-service table (liveness re-verified), Start missing
   services, Stop owned services, Restart owned, Stop all services (confirmed;
-  unloads local model), Refresh status, owned log tails. Foreign processes are
-  never touched; release refuses while a run/launcher is live (except forced
-  Ctrl+C path).
+  stops the agent run, the local Ollama and the owned services — the model
+  unloads from VRAM), Refresh status, owned log tails. Foreign processes are
+  never touched; releasing the owned services refuses while a run/launcher is
+  live (the forced paths — Ctrl+C and "Stop all services" — stop the agent
+  tree first).
 - **Settings**: mode/model/endpoints, contextSize, renderBudget, temperature,
   think, timeouts, maxOutputTokens. Validated, saved to
   `runtime/tui-settings.json`, H200 probe honest (never silent fallback).

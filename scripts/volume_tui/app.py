@@ -103,6 +103,25 @@ HINT_TEXT = ("F1 = what every button does | Ctrl+Up/Down = scroll window | "
              "wheel scrolls outside text boxes")
 TASK_PRESETS = ["task-a", "task-b", "custom"]
 
+# Settings form fields: (label, widget id, setting key). One list, used by the
+# form, by "Save settings" and by "Reset to defaults", so they cannot drift.
+SETTINGS_ROWS = (
+    ("Mode", "set-mode", "mode"),
+    ("Model", "set-model", "model"),
+    ("Local endpoint", "set-endpoint", "endpoint"),
+    ("H200 endpoint", "set-h200", "h200Endpoint"),
+    ("Renderer", "set-renderer", "rendererService"),
+    ("Context size", "set-context", "contextSize"),
+    ("Render budget", "set-budget", "renderBudget"),
+    ("Temperature", "set-temp", "temperature"),
+    ("Timeout (s)", "set-timeout", "timeoutSeconds"),
+    ("Task timeout (s)", "set-tasktimeout", "taskTimeoutSeconds"),
+    ("Max output tokens", "set-maxtokens", "maxOutputTokens"),
+)
+SETTINGS_INT_KEYS = ("contextSize", "renderBudget", "timeoutSeconds",
+                     "taskTimeoutSeconds", "maxOutputTokens")
+SETTINGS_FLOAT_KEYS = ("temperature",)
+
 # Preview budget: the frame is fitted into this many text rows, so the whole
 # image is visible at once (never a cut-off corner).
 LIVE_PREVIEW_MAX_ROWS = 48
@@ -289,32 +308,27 @@ class CommandScreen(DismissibleModal):
         self.dismiss(result=event.button.id)
 
 
-def start_owned_services(settings: dict) -> list[str]:
+def start_owned_services(settings: dict) -> None:
     """Start the missing owned services and keep the ownership record fresh.
 
     The heartbeat is what tells another TUI session that these services still
     belong to a live session, so it must keep running while we own them.
-    Returns the report lines for the console.
     """
     if services_mod is None:
-        return []
+        return
     print("Starting owned background services (Local loopback only)...")
-    import time as _time
-    started_at = _time.monotonic()
-    lines: list[str] = []
+    started_at = time.monotonic()
     try:
         report = services_mod.ensure_services(settings)
-        lines = list(services_mod.report_lines(report))
-        for line in lines:
+        for line in services_mod.report_lines(report):
             print(line)
-        print("Service check done in %.1fs." % (_time.monotonic() - started_at))
+        print("Service check done in %.1fs." % (time.monotonic() - started_at))
     except Exception as error:
         print("Service auto-start skipped: %s" % error)
     try:
         services_mod.heartbeat_start()
     except Exception:
         pass
-    return lines
 
 
 if _TEXTUAL:
@@ -620,21 +634,10 @@ if _TEXTUAL:
                         with Vertical(classes="panel"):
                             yield Static(HINT_TEXT, classes="scroll-hint")
                             yield Label("Settings (saved to runtime/tui-settings.json on Save)")
-                        for label, wid, value in (
-                            ("Mode", "set-mode", str(self.settings.get("mode", "Local"))),
-                            ("Model", "set-model", str(self.settings.get("model", ""))),
-                            ("Local endpoint", "set-endpoint", str(self.settings.get("endpoint", ""))),
-                            ("H200 endpoint", "set-h200", str(self.settings.get("h200Endpoint", ""))),
-                            ("Renderer", "set-renderer", str(self.settings.get("rendererService", ""))),
-                            ("Context size", "set-context", str(self.settings.get("contextSize", ""))),
-                            ("Render budget", "set-budget", str(self.settings.get("renderBudget", ""))),
-                            ("Temperature", "set-temp", str(self.settings.get("temperature", ""))),
-                            ("Timeout (s)", "set-timeout", str(self.settings.get("timeoutSeconds", ""))),
-                            ("Task timeout (s)", "set-tasktimeout", str(self.settings.get("taskTimeoutSeconds", ""))),
-                            ("Max output tokens", "set-maxtokens", str(self.settings.get("maxOutputTokens", "")))):
+                        for label, wid, key in SETTINGS_ROWS:
                             with Horizontal(classes="row"):
                                 yield Label(label, classes="field-label")
-                                yield Input(value, id=wid)
+                                yield Input(str(self.settings.get(key, "")), id=wid)
                         with Horizontal(classes="row"):
                             yield Label("Think", classes="field-label")
                             yield Select([("off", "false"), ("on", "true")],
@@ -1004,8 +1007,10 @@ if _TEXTUAL:
                 self._open_live_folder()
             elif result == "cmd-live-detach":
                 self._detach_live()
-            elif result in ("cmd-runs-refresh", "cmd-services-refresh"):
-                self._run_guarded("Refreshing", self._load_dashboard)
+            elif result == "cmd-runs-refresh":
+                self._run_guarded("Refreshing runs", self._refresh_runs)
+            elif result == "cmd-services-refresh":
+                self._run_guarded("Refreshing services", self._refresh_services)
             elif result == "cmd-help":
                 self.action_help()
             elif result == "cmd-quit":
@@ -1254,9 +1259,10 @@ if _TEXTUAL:
                                   lambda: self._release_services(False), button)
             elif bid == "btn-svc-stopall":
                 self.push_screen(ConfirmScreen(
-                    "Stop ALL local inference + owned services? Model unloads from VRAM.",
+                    "Stop the agent run, the local Ollama and the owned services?\n"
+                    "The model unloads from VRAM; the run's evidence stays on disk.",
                     on_yes=lambda: self._run_guarded(
-                        "Stopping all services", lambda: self._release_services(True))))
+                        "Stopping everything", self._stop_everything_owned)))
             elif bid == "btn-svc-restart":
                 self._run_guarded("Restarting services", self._restart_services, button)
             elif bid == "btn-settings-save":
@@ -1453,10 +1459,7 @@ if _TEXTUAL:
         def _start_run(self):
             """Preflight and launch. The caller already holds the start lock."""
             self._start_locked = True
-            try:
-                self.query_one("#btn-start-run", Button).loading = True
-            except Exception:
-                pass
+            self.call_from_thread(self._set_start_loading, True)
             self._busy_inc()
             self._launcher_result = {"settled": False}
             try:
@@ -1465,6 +1468,13 @@ if _TEXTUAL:
                 self.call_from_thread(self._set_text, "newrun-preflight",
                                       "Start failed: %s" % error)
                 self.call_from_thread(self._settle_launch)
+
+        def _set_start_loading(self, loading: bool) -> None:
+            """The Start button spinner is widget state: only the UI thread."""
+            try:
+                self.query_one("#btn-start-run", Button).loading = loading
+            except Exception:
+                pass
 
         def _start_run_body(self):
             try:
@@ -1516,10 +1526,7 @@ if _TEXTUAL:
                 return
             self._launcher_result["settled"] = True
             self._start_locked = False
-            try:
-                self.query_one("#btn-start-run", Button).loading = False
-            except Exception:
-                pass
+            self._set_start_loading(False)
             self._busy_dec()
 
         def _launch_blocking(self, config_path: str):
@@ -1677,6 +1684,12 @@ if _TEXTUAL:
                 self.call_from_thread(self._set_text, "live-head", "; ".join(services_mod.report_lines(report)[:4]) or "services OK")
             except Exception as error:
                 pass
+            try:
+                # Keep the ownership record fresh: another TUI session may
+                # only adopt our services once this heartbeat went stale.
+                services_mod.heartbeat_start()
+            except Exception:
+                pass
             self._refresh_services()
 
         def _release_services(self, force: bool):
@@ -1689,6 +1702,22 @@ if _TEXTUAL:
             except Exception:
                 pass
 
+        def _stop_everything_owned(self):
+            """Stop the agent tree, the local Ollama and the owned services.
+
+            Same order as the quit path (run -> agent tree -> owned services),
+            but without the cached report, so the later quit still cleans up
+            whatever was started meanwhile.
+            """
+            try:
+                report = services_mod.shutdown_all(self.settings, hard=False, cache=False)
+                self.call_from_thread(
+                    self._set_text, "live-head",
+                    "; ".join(services_mod.shutdown_lines(report)[:4]) or "stopped")
+            except Exception:
+                pass
+            self._refresh_services()
+
         def _restart_services(self):
             try:
                 services_mod.release_owned_services(force=True)
@@ -1699,19 +1728,16 @@ if _TEXTUAL:
         # -- settings ----------------------------------------------------------
         def _save_settings(self):
             try:
-                for key, widget in (("mode", "set-mode"), ("model", "set-model"),
-                                    ("endpoint", "set-endpoint"), ("h200Endpoint", "set-h200"),
-                                    ("rendererService", "set-renderer")):
-                    self.settings[key] = self.query_one("#" + widget, Input).value.strip()
-                for key, widget in (("contextSize", "set-context"), ("renderBudget", "set-budget"),
-                                    ("timeoutSeconds", "set-timeout"), ("taskTimeoutSeconds", "set-tasktimeout"),
-                                    ("maxOutputTokens", "set-maxtokens")):
+                for _label, widget, key in SETTINGS_ROWS:
                     raw = self.query_one("#" + widget, Input).value.strip()
-                    if raw:
-                        self.settings[key] = int(raw)
-                raw_temp = self.query_one("#set-temp", Input).value.strip()
-                if raw_temp:
-                    self.settings["temperature"] = float(raw_temp)
+                    if key in SETTINGS_INT_KEYS:
+                        if raw:
+                            self.settings[key] = int(raw)
+                    elif key in SETTINGS_FLOAT_KEYS:
+                        if raw:
+                            self.settings[key] = float(raw)
+                    else:
+                        self.settings[key] = raw
                 try:
                     self.settings["think"] = str(
                         self.query_one("#set-think", Select).value) == "true"
@@ -1734,19 +1760,12 @@ if _TEXTUAL:
 
             The button label, its tooltip and the F1 help all promise that
             nothing is written here, so the file is only written by
-            "Save settings".
+            "Save settings". The settings in use stay untouched until then —
+            the next run must not silently use the defaults.
             """
             defaults = dict(cfg.DEFAULTS)
-            self.settings = dict(defaults)
-            for key, widget in (("mode", "set-mode"), ("model", "set-model"),
-                                ("endpoint", "set-endpoint"), ("h200Endpoint", "set-h200"),
-                                ("rendererService", "set-renderer")):
+            for _label, widget, key in SETTINGS_ROWS:
                 self._set_input(widget, str(defaults.get(key, "")))
-            for key, widget in (("contextSize", "set-context"), ("renderBudget", "set-budget"),
-                                ("timeoutSeconds", "set-timeout"), ("taskTimeoutSeconds", "set-tasktimeout"),
-                                ("maxOutputTokens", "set-maxtokens")):
-                self._set_input(widget, str(defaults.get(key, "")))
-            self._set_input("set-temp", str(defaults.get("temperature", "")))
             try:
                 self.query_one("#set-think", Select).value = (
                     "true" if defaults.get("think") else "false")
@@ -1782,9 +1801,12 @@ if _TEXTUAL:
             print("Run .\\Start-VolumeTUI.ps1 in Windows Terminal or PowerShell.")
             return 2
         settings = cfg.load_settings()
-        start_owned_services(settings)
         _install_termination_handlers()
         try:
+            # Inside the try: a Ctrl+C during the service auto-start must
+            # still run the shutdown below, or the services it just started
+            # would survive.
+            start_owned_services(settings)
             app = VolumeAgentApp()
             app.run()
             return 0

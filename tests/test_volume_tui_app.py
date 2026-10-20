@@ -945,14 +945,18 @@ class ReviewFixes(unittest.TestCase):
             app = tui_app.VolumeAgentApp()
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause()
+                # Let the mount-time dashboard load finish first.
+                for _ in range(20):
+                    await pilot.pause()
                 with patch.object(tui_app.services_mod, "service_status",
                                   return_value={"inference": "up", "renderer": "down",
                                                 "owned": "TUI-owned (ollama)"}):
+                    app.query_one("#status-bar", tui_app.Static).update("")
                     app.run_worker(app._load_dashboard, thread=True)
                     for _ in range(100):
                         await pilot.pause()
                         text = str(app.query_one("#status-bar").render())
-                        if "Inference" in text:
+                        if "Renderer down" in text:
                             break
                 text = str(app.query_one("#status-bar").render())
                 self.assertIn("Mode", text)
@@ -974,6 +978,80 @@ class ReviewFixes(unittest.TestCase):
                 select = app.query_one("#set-think", tui_app.Select)
                 self.assertEqual(str(select.value), "false")
         asyncio.run(_run())
+
+    def test_reset_to_defaults_keeps_the_settings_in_use(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            app.settings["model"] = "model-in-use"
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._reset_settings()
+                await pilot.pause()
+                # The form shows the defaults, the run keeps the settings it
+                # has until "Save settings" writes the new ones.
+                self.assertEqual(app.query_one("#set-model", tui_app.Input).value,
+                                 str(tui_app.cfg.DEFAULTS["model"]))
+                self.assertEqual(app.settings["model"], "model-in-use")
+        asyncio.run(_run())
+
+    def test_palette_refresh_commands_refresh_their_own_tab(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                calls = []
+                with patch.object(app, "_refresh_runs", side_effect=lambda: calls.append("runs")), \
+                     patch.object(app, "_refresh_services",
+                                  side_effect=lambda: calls.append("services")):
+                    app._command_chosen("cmd-runs-refresh")
+                    app._command_chosen("cmd-services-refresh")
+                    for _ in range(100):
+                        await pilot.pause()
+                        if len(calls) >= 2:
+                            break
+                self.assertIn("runs", calls)
+                self.assertIn("services", calls)
+        asyncio.run(_run())
+
+    def test_stop_all_services_stops_the_agent_tree(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with patch.object(tui_app.services_mod, "shutdown_all",
+                                  return_value={"stopped": [], "kept": [], "failed": [],
+                                                "agent": [], "requested": [], "remaining": [],
+                                                "inference": {}}) as shutdown:
+                    app._stop_everything_owned()
+                # The button promises the agent tree, the local Ollama and the
+                # owned services — and it must not freeze the quit path.
+                self.assertTrue(shutdown.called)
+                self.assertFalse(shutdown.call_args.kwargs.get("cache", True))
+        asyncio.run(_run())
+
+    def test_shutdown_cache_is_not_poisoned_by_the_services_tab(self):
+        import services as tui_services
+        with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+             patch.object(tui_services, "_block_interrupts"), \
+             patch.object(tui_services, "heartbeat_stop"), \
+             patch.object(tui_services, "request_run_stops", return_value=[]), \
+             patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
+             patch.object(tui_services, "_terminate_agent_trees",
+                          return_value={"stopped": [], "failed": []}), \
+             patch.object(tui_services, "_inference_state",
+                          return_value={"endpoint": None, "verified": None, "owned": False}), \
+             patch.object(tui_services, "release_owned_services",
+                          return_value={"stopped": [], "kept": None, "skipped": []}), \
+             patch.object(tui_services, "_owns_ollama", return_value=False):
+            tui_services.shutdown_all({"mode": "Local"}, hard=False, cache=False)
+            # The quit path must still run its own shutdown afterwards.
+            self.assertIsNone(tui_services._SHUTDOWN_REPORT)
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")

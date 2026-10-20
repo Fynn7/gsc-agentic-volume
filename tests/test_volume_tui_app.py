@@ -179,6 +179,39 @@ class ImagingTelemetry(unittest.TestCase):
             self.assertIn("GPU", tui_telemetry.resource_line(Path(tmp)))
 
 
+class FrameFitting(unittest.TestCase):
+    """The preview must show the whole frame: fitted, never cropped."""
+
+    def test_fit_box_keeps_aspect_ratio(self):
+        self.assertEqual(tui_imaging.fit_box(512, 512, 100, 40), (40, 40))
+        self.assertEqual(tui_imaging.fit_box(512, 256, 100, 40), (80, 40))
+        self.assertEqual(tui_imaging.fit_box(256, 512, 100, 40), (20, 40))
+
+    def test_render_frame_uses_the_whole_cell_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from PIL import Image
+            path = Path(tmp) / "frame.png"
+            Image.new("RGB", (512, 512), (10, 20, 30)).save(path)
+            rendered = tui_imaging.render_frame(path, width=40, height=20)
+            lines = rendered.plain.splitlines()
+            self.assertEqual(len(lines), 20)
+            self.assertEqual(len(lines[0]), 40)
+
+    def test_render_frame_keeps_shape_of_a_wide_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from PIL import Image
+            path = Path(tmp) / "frame.png"
+            Image.new("RGB", (400, 100), (10, 20, 30)).save(path)
+            rendered = tui_imaging.render_frame(path, width=40, height=20)
+            lines = rendered.plain.splitlines()
+            self.assertEqual(len(lines), 20)
+            self.assertEqual(len(lines[0]), 40)
+            # A 4:1 frame in a 40x20 cell box keeps its ratio: the picture is
+            # 40 columns wide and 5 rows tall, the rest is black padding.
+            painted = sum(1 for line in lines if line.strip("\u2580 "))
+            self.assertLessEqual(painted, 6)
+
+
 class NewRunFlow(unittest.TestCase):
     def test_build_new_run_blocks_bad_settings(self):
         settings = dict(tui_config.DEFAULTS, renderBudget=99)
@@ -597,6 +630,102 @@ class TextualAppSmoke(unittest.TestCase):
                     self.assertEqual(app.live_run_id, "run-demo")
                     self.assertFalse(app.live_frozen)
         asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class LiveFrameAndLabels(unittest.TestCase):
+    """The Live view must show the whole frame and say what every button does."""
+
+    def test_preview_shows_the_whole_frame(self):
+        import asyncio
+        from PIL import Image
+        from textual.widgets import TabbedContent
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                frame_dir = root / "session" / "frame-1"
+                frame_dir.mkdir(parents=True)
+                png = frame_dir / "image.png"
+                Image.new("RGB", (256, 256), (200, 200, 200)).save(png)
+                run_dir = root / "run"
+                run_dir.mkdir()
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    app.query_one("#workspaces", TabbedContent).active = "tab-live"
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    app.live_events = [{"cat": "IMAGE", "title": "IMAGE Frame 1",
+                                        "detail": "rev=1", "image": str(png), "revision": 1}]
+                    app._render_live()
+                    await pilot.pause()
+                    await pilot.pause()
+                    widget = app.query_one("#live-image")
+                    lines = widget.content.plain.splitlines()
+                    # Every row of the picture is on screen (nothing clipped) ...
+                    self.assertEqual(widget.size.height, len(lines))
+                    # ... and no row is folded in half (nothing cropped).
+                    self.assertEqual(widget.size.width, len(lines[0]))
+                    # The PNG path is on screen, so the file can be found.
+                    shown = str(app.query_one("#live-image-path").render())
+                    self.assertIn(str(png), shown)
+        asyncio.run(_run())
+
+    def test_open_folder_targets_the_folder_that_holds_the_png(self):
+        import asyncio
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                frame_dir = root / "session" / "frame-1"
+                frame_dir.mkdir(parents=True)
+                png = frame_dir / "image.png"
+                png.write_bytes(b"not-a-real-png")
+                run_dir = root / "run"
+                run_dir.mkdir()
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    app.live_image_path = str(png)
+                    # The frames live beside the run, not inside the run folder.
+                    self.assertEqual(app._live_frames_folder(), root / "session")
+                    self.assertNotEqual(app._live_frames_folder(), run_dir)
+        asyncio.run(_run())
+
+    def test_every_live_button_says_what_it_does(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                expected = {
+                    "btn-live-stop": "Stop run",
+                    "btn-live-verify": "Verify evidence",
+                    "btn-live-open-png": "View PNG",
+                    "btn-live-open": "Open folder",
+                    "btn-live-detach": "Stop watching",
+                }
+                for widget_id, label in expected.items():
+                    button = app.query_one("#" + widget_id)
+                    self.assertEqual(str(button.label), label, widget_id)
+                    self.assertTrue(str(button.tooltip), widget_id)
+                legend = str(app.query_one("#live-legend").render())
+                for phrase in ("Verify evidence", "read-only", "Stop watching",
+                               "keeps running", "folder that holds the PNGs"):
+                    self.assertIn(phrase, legend)
+        asyncio.run(_run())
+
+    def test_command_palette_actions_have_stable_ids(self):
+        actions = [action for _label, action in tui_app.CommandScreen.COMMANDS]
+        for action in ("live-verify", "live-detach", "live-open-png", "live-open"):
+            self.assertIn(action, actions)
+        for action in actions:
+            self.assertTrue(action.startswith("go-") or action.startswith("live-")
+                            or action.startswith("runs-") or action.startswith("services-")
+                            or action in ("help", "quit"))
 
 
 if __name__ == "__main__":

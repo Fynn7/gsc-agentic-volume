@@ -161,7 +161,7 @@ def run_verify(run_dir: str, python: str | None = None) -> dict:
 def verify_summary(report: dict | None) -> list[str]:
     """Honest three-way split: execution / transport / visual-quality."""
     if not report:
-        return ["No verification.json yet — run Verify (read-only check, no model call)."]
+        return ["No verification.json yet — press Verify evidence (read-only check, no model call)."]
     lines = []
     lines.append("state=%s actualFrames=%s agentRenders=%s" % (
         report.get("state"), report.get("actualFrames"), report.get("agentRenders")))

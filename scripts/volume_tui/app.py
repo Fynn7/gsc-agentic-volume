@@ -99,24 +99,105 @@ except Exception:
     ComposeResult = None  # type: ignore
 
 CATEGORIES = ["ALL", "MODEL", "TOOL", "IMAGE", "INFER", "ERROR", "WARN", "FINISH"]
-HINT_TEXT = "Tab=next field | Ctrl+Up/Down=scroll window | wheel scrolls outside text boxes"
+HINT_TEXT = ("F1 = what every button does | Ctrl+Up/Down = scroll window | "
+             "wheel scrolls outside text boxes")
 TASK_PRESETS = ["task-a", "task-b", "custom"]
+
+# Preview budget: the frame is fitted into this many text rows, so the whole
+# image is visible at once (never a cut-off corner).
+LIVE_PREVIEW_MAX_ROWS = 48
+
+# One-line explanation of every Live button, shown under the button row.
+LIVE_LEGEND = (
+    "Stop run = ask the agent to stop now (evidence already written is kept). "
+    "Verify evidence = read-only check of this run: did it finish, and was a PNG "
+    "really sent to the model? It writes verification.json and never calls the model. "
+    "View PNG = open the previewed PNG in your image viewer, full size. "
+    "Open folder = open the file explorer at the folder that holds the PNGs "
+    "(the run log folder itself contains no images). "
+    "Stop watching = leave the Live view; the run keeps running in the background "
+    "(open it again from Runs)."
+)
 
 
 class HelpScreen(ModalScreen if _TEXTUAL else object):
     def compose(self):
         yield Static(
-            "Volume Agent TUI — help\n"
+            "Volume Agent TUI — what every button does\n"
+            "\n"
             "Tabs: Dashboard / New Run / Runs / Live / Volumes / Services / Settings\n"
-            "Ctrl+P commands · F1 help · t theme · q quit (confirm when a run is live)\n"
-            "Live: / filter text, category select, f follow tail, s stop (confirm),\n"
-            "  v verify, o open folder, Esc detach (run keeps going)\n"
-            "Ctrl+C hard stop: agent tree + local Ollama + owned services (confirm).\n"
-            "Evidence is read-only: rerun creates a new run, verify writes\n"
-            "verification.json, settings persist to tui-settings.json.\n\n"
+            "Ctrl+P = command palette · F1 = this help · t = theme · q = quit "
+            "(asks first while a run is live)\n"
+            "\n"
+            "LIVE — watch one run while it runs\n"
+            "  Stop run          ask the agent to stop now; evidence already\n"
+            "                    written is kept, the launcher records 'interrupted'\n"
+            "  Verify evidence   read-only check of this run: did it finish, and was\n"
+            "                    a PNG really sent to the model? Writes\n"
+            "                    verification.json. Never calls the model.\n"
+            "  View PNG          open the previewed PNG in your image viewer (full size)\n"
+            "  Open folder       open the file explorer at the folder that holds the\n"
+            "                    PNGs — the run log folder itself has no images\n"
+            "  Stop watching     leave the Live view; the run keeps running in the\n"
+            "                    background (open it again from Runs)\n"
+            "\n"
+            "RUNS — runs already on disk\n"
+            "  Open Live view    follow the selected run in the Live tab\n"
+            "  Verify evidence   same read-only check as in Live, for the selected run\n"
+            "  Rerun as new run   copy the selected run's task into New Run; nothing\n"
+            "                    starts until you press Start agent run\n"
+            "  Pick as A / B     remember two runs, then Compare A vs B shows their\n"
+            "                    config difference\n"
+            "\n"
+            "NEW RUN\n"
+            "  Check services & settings  check the local inference service and the\n"
+            "                    render settings; nothing is written\n"
+            "  Start agent run   write the run config and launch the agent; the Live\n"
+            "                    tab opens by itself\n"
+            "\n"
+            "VOLUMES\n"
+            "  Preview slice     render one slice of the selected prepared volume\n"
+            "                    (read-only, no render budget)\n"
+            "  Use this volume   use the selected volume for the next run\n"
+            "\n"
+            "SERVICES — only services this TUI started are ever touched\n"
+            "  Start missing services  start the owned services that are down\n"
+            "  Stop owned services     stop the owned services\n"
+            "  Restart owned           restart the owned services\n"
+            "  Stop all services       stop the agent tree, the local Ollama and the\n"
+            "                    owned services (the model unloads from VRAM)\n"
+            "\n"
+            "SETTINGS\n"
+            "  Save settings     write the form to runtime/tui-settings.json\n"
+            "  Reset to defaults fill the form with the built-in defaults (writes nothing)\n"
+            "  Test H200 endpoint send one small probe request; never falls back silently\n"
+            "\n"
+            "Evidence is read-only except new runs, verification.json and\n"
+            "tui-settings.json. Ctrl+C is the hard stop (agent tree + local Ollama +\n"
+            "owned services, confirmed).\n"
+            "\n"
             "Press Esc to close.",
             id="help-text",
         )
+
+
+class FramePreview(Static if _TEXTUAL else object):
+    """Preview pane for the current frame PNG.
+
+    The frame is drawn as half-block cells whose width must match the widget
+    exactly, otherwise the terminal folds the row and the picture is cut in
+    half. The widget therefore asks the app to re-fit the frame whenever its
+    own size changes (window resize, scrollbar appearing).
+    """
+
+    def on_resize(self, event) -> None:
+        try:
+            app = self.app
+        except Exception:
+            return
+        refresh = getattr(app, "_refresh_frame_display", None)
+        if refresh is not None:
+            refresh()
 
 
 class ConfirmScreen(ModalScreen if _TEXTUAL else object):
@@ -140,27 +221,31 @@ class ConfirmScreen(ModalScreen if _TEXTUAL else object):
 
 
 class CommandScreen(ModalScreen if _TEXTUAL else object):
+    # (label, action id) — the id is stable, the label spells out the effect.
     COMMANDS = [
-        ("Go: Dashboard", "tab-dashboard"),
-        ("Go: New Run", "tab-newrun"),
-        ("Go: Runs", "tab-runs"),
-        ("Go: Live", "tab-live"),
-        ("Go: Volumes", "tab-volumes"),
-        ("Go: Services", "tab-services"),
-        ("Go: Settings", "tab-settings"),
-        ("Live: Follow tail", "live-follow"),
-        ("Live: Stop run", "live-stop"),
-        ("Live: Verify", "live-verify"),
-        ("Runs: Refresh", "runs-refresh"),
-        ("Services: Refresh", "services-refresh"),
-        ("Help", "help"),
-        ("Quit", "quit"),
+        ("Go: Dashboard", "go-dashboard"),
+        ("Go: New Run", "go-newrun"),
+        ("Go: Runs", "go-runs"),
+        ("Go: Live", "go-live"),
+        ("Go: Volumes", "go-volumes"),
+        ("Go: Services", "go-services"),
+        ("Go: Settings", "go-settings"),
+        ("Live: Follow newest event", "live-follow"),
+        ("Live: Stop the run", "live-stop"),
+        ("Live: Verify evidence (read-only)", "live-verify"),
+        ("Live: View current PNG", "live-open-png"),
+        ("Live: Open PNG folder", "live-open"),
+        ("Live: Stop watching (run keeps going)", "live-detach"),
+        ("Runs: Refresh list", "runs-refresh"),
+        ("Services: Refresh list", "services-refresh"),
+        ("Help: what every button does", "help"),
+        ("Quit the TUI", "quit"),
     ]
 
     def compose(self):
         yield Static("Command palette (Enter runs, Esc closes)", id="cmd-title")
-        for label, _ in self.COMMANDS:
-            yield Button(label, id="cmd-%s" % label)
+        for label, action in self.COMMANDS:
+            yield Button(label, id="cmd-%s" % action)
 
     async def on_button_pressed(self, event):
         self.dismiss(result=event.button.id)
@@ -189,7 +274,9 @@ if _TEXTUAL:
         #runs-detail { height: auto; min-height: 3; }
         #events-table { height: 10; }
         #live-detail { height: 5; border: solid gray; }
-        #live-image { height: 16; border: solid cyan; }
+        #live-image-path { height: auto; color: $text-muted; }
+        #live-image { height: auto; min-height: 3; border: solid cyan; }
+        #live-legend { height: auto; color: $text-muted; }
         #volumes-table { height: 10; }
         #volumes-detail { height: auto; min-height: 3; }
         #slice-preview { height: 14; border: solid cyan; }
@@ -227,6 +314,9 @@ if _TEXTUAL:
             self.live_follow = True
             self.live_filter = "ALL"
             self.live_search = ""
+            self.live_image_path: str | None = None
+            self.live_image_revision = None
+            self._preview_key: tuple | None = None
             self.compare_a: str | None = None
             self.compare_b: str | None = None
             self._launcher_thread: threading.Thread | None = None
@@ -327,9 +417,12 @@ if _TEXTUAL:
                         with Vertical(classes="panel"):
                             yield Static("Loading…", id="status-bar")
                             with Horizontal(classes="row"):
-                                yield Button("New Run", id="btn-goto-newrun", variant="primary")
-                                yield Button("Follow live", id="btn-goto-live")
-                                yield Button("Refresh", id="btn-refresh")
+                                yield Button("New run", id="btn-goto-newrun", variant="primary",
+                                             tooltip="Open the New Run tab to start a new agent run.")
+                                yield Button("Open Live view", id="btn-goto-live",
+                                             tooltip="Open the Live tab. With a run selected in Runs it follows that run.")
+                                yield Button("Refresh status", id="btn-refresh",
+                                             tooltip="Re-read mode, model and the run list from disk.")
                 with TabPane("New Run", id="tab-newrun"):
                     with VerticalScroll():
                         with Vertical(classes="panel"):
@@ -350,8 +443,11 @@ if _TEXTUAL:
                                     yield Input(value, id=wid)
                             yield Static("", id="newrun-preflight")
                             with Horizontal(classes="row"):
-                                yield Button("Check preflight", id="btn-preflight")
-                                yield Button("Start run", id="btn-start-run", variant="success")
+                                yield Button("Check services & settings", id="btn-preflight",
+                                             tooltip="Check the local inference service and the render settings "
+                                                     "before starting. Nothing is written.")
+                                yield Button("Start agent run", id="btn-start-run", variant="success",
+                                             tooltip="Write the run config and launch the agent. The Live tab opens by itself.")
                 with TabPane("Runs", id="tab-runs"):
                     with VerticalScroll():
                         with Vertical(classes="panel"):
@@ -359,33 +455,57 @@ if _TEXTUAL:
                             yield Input("", placeholder="/ filter runId/status/model/task", id="runs-filter")
                             yield DataTable(id="runs-table")
                             with Horizontal(classes="row"):
-                                yield Button("Follow live", id="btn-runs-follow", variant="primary")
-                                yield Button("Verify", id="btn-runs-verify")
-                                yield Button("Rerun", id="btn-runs-rerun")
-                                yield Button("Refresh", id="btn-runs-refresh")
+                                yield Button("Open Live view", id="btn-runs-follow", variant="primary",
+                                             tooltip="Open the Live tab and follow the selected run.")
+                                yield Button("Verify evidence", id="btn-runs-verify",
+                                             tooltip="Read-only check of the selected run: did it finish, and was a PNG "
+                                                     "really sent to the model? Writes verification.json, never calls the model.")
+                                yield Button("Rerun as new run", id="btn-runs-rerun",
+                                             tooltip="Copy the selected run's task into New Run. Nothing starts until "
+                                                     "you press Start agent run.")
+                                yield Button("Refresh list", id="btn-runs-refresh",
+                                             tooltip="Re-scan the run folders on disk.")
                             with Horizontal(classes="row"):
-                                yield Button("Compare A", id="btn-compare-a")
-                                yield Button("Compare B", id="btn-compare-b")
-                                yield Button("Show compare", id="btn-compare-show")
+                                yield Button("Pick as A", id="btn-compare-a",
+                                             tooltip="Remember the selected run as comparison A.")
+                                yield Button("Pick as B", id="btn-compare-b",
+                                             tooltip="Remember the selected run as comparison B.")
+                                yield Button("Compare A vs B", id="btn-compare-show",
+                                             tooltip="Show the config difference of the two picked runs.")
                             yield Static("", id="runs-detail")
                 with TabPane("Live", id="tab-live"):
                     with VerticalScroll():
                         with Vertical(classes="panel"):
                             yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield Static("No live run. Start one from New Run or Follow from Runs.", id="live-head")
+                            yield Static("No live run. Start one from New Run or open a run from Runs.", id="live-head")
                             yield Static("", id="live-resources")
                             with Horizontal(classes="row"):
                                 yield Input("", placeholder="/ search events", id="live-search")
                                 yield Select([(c, c) for c in CATEGORIES], value="ALL", id="live-category", classes="narrow")
-                                yield Button("Follow: on", id="btn-live-follow")
+                                yield Button("Follow: on", id="btn-live-follow",
+                                             tooltip="Keep the event list scrolled to the newest event. "
+                                                     "Switch it off to read the history.")
                             yield DataTable(id="events-table")
                             yield Static("(select an event for details)", id="live-detail")
-                            yield Static("(no frame yet)", id="live-image")
+                            yield Static("Current frame PNG: (none yet)", id="live-image-path")
+                            yield FramePreview("(no frame yet)", id="live-image")
                             with Horizontal(classes="row"):
-                                yield Button("Stop", id="btn-live-stop", variant="error")
-                                yield Button("Verify", id="btn-live-verify")
-                                yield Button("Open folder", id="btn-live-open")
-                                yield Button("Detach", id="btn-live-detach")
+                                yield Button("Stop run", id="btn-live-stop", variant="error",
+                                             tooltip="Ask the agent to stop now. Evidence already written is kept.")
+                                yield Button("Verify evidence", id="btn-live-verify",
+                                             tooltip="Read-only check of this run: did it finish, and was a PNG really "
+                                                     "sent to the model? Writes verification.json, never calls the model.")
+                                yield Button("View PNG", id="btn-live-open-png",
+                                             tooltip="Open the previewed PNG in your image viewer, full size.")
+                                yield Button("Open folder", id="btn-live-open",
+                                             tooltip="Open the file explorer at the folder that holds the PNGs "
+                                                     "(the run log folder itself has no images).")
+                                yield Button("Stop watching", id="btn-live-detach",
+                                             tooltip="Leave the Live view. The run keeps running in the background; "
+                                                     "open it again from Runs.")
+                            yield Static("Verify evidence: (not run yet — read-only check of this run)",
+                                         id="live-verify")
+                            yield Static(LIVE_LEGEND, id="live-legend")
                 with TabPane("Volumes", id="tab-volumes"):
                     with VerticalScroll():
                         with Vertical(classes="panel"):
@@ -399,8 +519,11 @@ if _TEXTUAL:
                                 yield Label("Index", classes="field-label")
                                 yield Input("0", placeholder="index", id="slice-index")
                             with Horizontal(classes="row"):
-                                yield Button("Slice preview", id="btn-slice")
-                                yield Button("Use selected", id="btn-volume-use", variant="primary")
+                                yield Button("Preview slice", id="btn-slice",
+                                             tooltip="Render one slice of the selected prepared volume (read-only, "
+                                                     "uses no render budget).")
+                                yield Button("Use this volume", id="btn-volume-use", variant="primary",
+                                             tooltip="Use the selected volume for the next run.")
                             yield Static("(no slice yet)", id="slice-preview")
                 with TabPane("Services", id="tab-services"):
                     with VerticalScroll():
@@ -408,12 +531,18 @@ if _TEXTUAL:
                             yield Static(HINT_TEXT, classes="scroll-hint")
                             yield DataTable(id="services-table")
                             with Horizontal(classes="row"):
-                                yield Button("Start missing", id="btn-svc-start", variant="success")
-                                yield Button("Stop owned", id="btn-svc-stop")
-                                yield Button("Refresh", id="btn-svc-refresh")
+                                yield Button("Start missing services", id="btn-svc-start", variant="success",
+                                             tooltip="Start the services this TUI owns that are not running.")
+                                yield Button("Stop owned services", id="btn-svc-stop",
+                                             tooltip="Stop only the services this TUI started. Foreign processes are never touched.")
+                                yield Button("Refresh status", id="btn-svc-refresh",
+                                             tooltip="Re-check which services are alive.")
                             with Horizontal(classes="row"):
-                                yield Button("Restart", id="btn-svc-restart")
-                                yield Button("Stop ALL", id="btn-svc-stopall", variant="error")
+                                yield Button("Restart owned", id="btn-svc-restart",
+                                             tooltip="Restart the owned services one by one.")
+                                yield Button("Stop all services", id="btn-svc-stopall", variant="error",
+                                             tooltip="Stop the agent tree, the local Ollama and the owned services. "
+                                                     "The model unloads from VRAM.")
                             yield RichLog(id="service-logs", max_lines=200)
                 with TabPane("Settings", id="tab-settings"):
                     with VerticalScroll():
@@ -436,9 +565,12 @@ if _TEXTUAL:
                                 yield Label(label, classes="field-label")
                                 yield Input(value, id=wid)
                         with Horizontal(classes="row"):
-                            yield Button("Save", id="btn-settings-save", variant="primary")
-                            yield Button("Reset defaults", id="btn-settings-reset")
-                            yield Button("Probe H200", id="btn-h200-probe")
+                            yield Button("Save settings", id="btn-settings-save", variant="primary",
+                                         tooltip="Write these settings to runtime/tui-settings.json.")
+                            yield Button("Reset to defaults", id="btn-settings-reset",
+                                         tooltip="Fill the form with the built-in defaults. Nothing is written yet.")
+                            yield Button("Test H200 endpoint", id="btn-h200-probe",
+                                         tooltip="Send one small probe request to the H200 endpoint. Never falls back silently.")
                         yield Static("", id="settings-status")
             yield Footer()
 
@@ -484,6 +616,9 @@ if _TEXTUAL:
 
         def _tick_live(self):
             if not self.live_dir or self.live_frozen:
+                # No polling, but the window may have been resized: keep the
+                # preview fitted so the whole frame stays visible.
+                self._refresh_frame_display()
                 return
             try:
                 self._poll_live()
@@ -498,6 +633,9 @@ if _TEXTUAL:
             self.live_events = []
             self.live_frozen = False
             self.live_follow = True
+            self.live_image_path = None
+            self.live_image_revision = None
+            self._preview_key = None
             try:
                 self.query_one("#live-head", Static).update("Live: %s" % self.live_dir.name)
             except Exception:
@@ -597,6 +735,8 @@ if _TEXTUAL:
             if images:
                 newest = images[-1]
                 self._show_frame(newest.get("image"), newest.get("revision"))
+            else:
+                self._refresh_frame_display()
 
         def _set_follow_label(self, following: bool) -> None:
             try:
@@ -615,13 +755,110 @@ if _TEXTUAL:
                 pass
 
         def _show_frame(self, image: str | None, revision=None):
+            self.live_image_path = image
+            self.live_image_revision = revision
+            self._refresh_frame_display()
+
+        def _preview_box(self) -> tuple[int, int]:
+            """Cell box for the frame preview: (columns, rows) of the widget.
+
+            The box follows the window width so a wide frame uses the whole
+            panel; the row budget keeps the preview on one screen. The frame is
+            fitted into this box, never cropped.
+            """
+            width = 0
             try:
-                if image == getattr(self, "_last_frame_path", None):
-                    return  # same PNG: skip the redundant downsample
-                self._last_frame_path = image
-                self.query_one("#live-image", Static).update(imaging_mod.preview_or_message(image))
+                width = self.query_one("#live-image", Static).size.width
+            except Exception:
+                width = 0
+            if width < 16:
+                width = 80  # not laid out yet
+            rows = LIVE_PREVIEW_MAX_ROWS
+            try:
+                screen_height = self.screen.size.height
+                if screen_height:
+                    rows = max(16, min(LIVE_PREVIEW_MAX_ROWS, screen_height - 14))
             except Exception:
                 pass
+            return (int(width), int(rows))
+
+        def _refresh_frame_display(self) -> None:
+            """Show the current frame: its path plus a preview of the whole PNG.
+
+            The path is always visible so the PNG can be found on disk, and the
+            preview is re-fitted whenever the window size changed.
+            """
+            image = getattr(self, "live_image_path", None)
+            if image:
+                revision = getattr(self, "live_image_revision", None)
+                self._set_text("live-image-path", "Current frame PNG (revision %s): %s" % (
+                    revision if revision is not None else "?", image))
+            else:
+                self._set_text("live-image-path", "Current frame PNG: (none yet)")
+                self._preview_key = None
+                try:
+                    self.query_one("#live-image", Static).update("(no frame yet)")
+                except Exception:
+                    pass
+                return
+            columns, rows = self._preview_box()
+            key = (str(image), columns, rows)
+            if key == getattr(self, "_preview_key", None):
+                return
+            self._preview_key = key
+            try:
+                self.query_one("#live-image", Static).update(
+                    imaging_mod.preview_or_message(image, width=columns, height=rows))
+            except Exception:
+                pass
+
+        # -- where the frames live -----------------------------------------
+        def _live_png_path(self) -> Path | None:
+            """Absolute path of the frame PNG that is currently previewed."""
+            image = getattr(self, "live_image_path", None)
+            return Path(image) if image else None
+
+        def _live_frames_folder(self) -> Path | None:
+            """Folder that actually holds the PNGs.
+
+            The run directory only holds logs and JSON, so opening it hides
+            every screenshot. The frames live in the session folder
+            (runtime/<sessionId>/frame-N/image.png); fall back to it when no
+            frame has been rendered yet.
+            """
+            png = self._live_png_path()
+            if png is not None:
+                parent = png.parent
+                if parent.name.startswith("frame-") and parent.parent.is_dir():
+                    return parent.parent
+                return parent
+            if self.live_dir is not None:
+                try:
+                    session = trace_mod.resolve_session_dir(self.live_dir)
+                except Exception:
+                    session = None
+                if session:
+                    return session
+                return self.live_dir
+            return None
+
+        def _open_live_png(self) -> None:
+            png = self._live_png_path()
+            if png is None:
+                self.notify("No frame PNG yet — wait for the first render.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            message = evidence_mod.open_path(str(png))
+            self.notify(message, timeout=5, markup=False)
+
+        def _open_live_folder(self) -> None:
+            folder = self._live_frames_folder()
+            if folder is None:
+                self.notify("No folder to open yet — start or open a run first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            message = evidence_mod.open_path(str(folder))
+            self.notify(message, timeout=5, markup=False)
 
         # -- actions ------------------------------------------------------
         def action_commands(self):
@@ -629,24 +866,32 @@ if _TEXTUAL:
 
         def _command_chosen(self, result):
             mapping = {
-                "cmd-Go: Dashboard": "tab-dashboard", "cmd-Go: New Run": "tab-newrun",
-                "cmd-Go: Runs": "tab-runs", "cmd-Go: Live": "tab-live",
-                "cmd-Go: Volumes": "tab-volumes", "cmd-Go: Services": "tab-services",
-                "cmd-Go: Settings": "tab-settings",
+                "cmd-go-dashboard": "tab-dashboard", "cmd-go-newrun": "tab-newrun",
+                "cmd-go-runs": "tab-runs", "cmd-go-live": "tab-live",
+                "cmd-go-volumes": "tab-volumes", "cmd-go-services": "tab-services",
+                "cmd-go-settings": "tab-settings",
             }
             if result in mapping:
                 self._goto_tab(mapping[result])
-            elif result == "cmd-Live: Follow tail":
+            elif result == "cmd-live-follow":
                 self.live_follow = True
-            elif result == "cmd-Live: Stop run":
+                self._set_follow_label(True)
+                self._jump_to_latest()
+            elif result == "cmd-live-stop":
                 self._confirm_stop()
-            elif result == "cmd-Live: Verify":
+            elif result == "cmd-live-verify":
                 self._verify_live()
-            elif result in ("cmd-Runs: Refresh", "cmd-Services: Refresh"):
+            elif result == "cmd-live-open-png":
+                self._open_live_png()
+            elif result == "cmd-live-open":
+                self._open_live_folder()
+            elif result == "cmd-live-detach":
+                self._detach_live()
+            elif result in ("cmd-runs-refresh", "cmd-services-refresh"):
                 self._run_guarded("Refreshing", self._load_dashboard)
-            elif result == "cmd-Help":
+            elif result == "cmd-help":
                 self.action_help()
-            elif result == "cmd-Quit":
+            elif result == "cmd-quit":
                 self.action_quit_confirm()
 
         def action_help(self):
@@ -708,17 +953,32 @@ if _TEXTUAL:
 
         def _verify_live(self, button=None):
             if not self.live_dir:
+                self._set_text("live-verify", "Verify evidence: no run is open — open one from Runs first.")
                 return
             run_dir = str(self.live_dir)
-            self._run_guarded("Verifying run", lambda: self._run_verify(run_dir), button)
+            self._run_guarded("Verifying evidence", lambda: self._run_verify(run_dir), button)
 
         def _run_verify(self, run_dir: str):
             try:
                 result = runs_mod.run_verify(run_dir)
                 lines = runs_mod.verify_summary(result.get("report"))
-                self.call_from_thread(self._set_text, "live-detail", "\n".join(lines[:6]))
+                text = "Verify evidence (read-only) for %s:\n%s" % (
+                    Path(run_dir).name, "\n".join(lines[:6]))
+                self.call_from_thread(self._set_text, "live-verify", text)
             except Exception as error:
-                self.call_from_thread(self._set_text, "live-detail", "verify failed: %s" % error)
+                self.call_from_thread(self._set_text, "live-verify", "Verify evidence failed: %s" % error)
+
+        def _detach_live(self) -> None:
+            """Leave the Live view; the run keeps running in the background."""
+            run_id = self.live_run_id
+            self.live_dir = None
+            self.live_run_id = None
+            self.live_tail = None
+            if run_id:
+                self._set_text("live-head", "Stopped watching %s. The run keeps going in the background — "
+                                            "open it again from Runs." % run_id)
+            else:
+                self._set_text("live-head", "Stopped watching. No run was open.")
 
         # -- events -------------------------------------------------------
         def _goto_tab(self, tab_id: str) -> None:
@@ -766,13 +1026,12 @@ if _TEXTUAL:
                 self._confirm_stop()
             elif bid == "btn-live-verify":
                 self._verify_live(button)
+            elif bid == "btn-live-open-png":
+                self._open_live_png()
             elif bid == "btn-live-open":
-                if self.live_dir:
-                    evidence_mod.open_path(str(self.live_dir))
+                self._open_live_folder()
             elif bid == "btn-live-detach":
-                self.live_dir = None
-                self.live_run_id = None
-                self._set_text("live-head", "Detached. Run keeps going; Follow from Runs to reattach.")
+                self._detach_live()
             elif bid == "btn-live-follow":
                 if self.live_follow:
                     self.live_follow = False
@@ -894,17 +1153,20 @@ if _TEXTUAL:
         def _verify_selected_run(self, button=None):
             run = self._selected_run()
             if not run:
+                self._set_text("runs-detail", "Select a run row first, then press Verify evidence.")
                 return
             run_dir = str(run["directory"])
-            self._run_guarded("Verifying run", lambda: self._run_verify_into(run_dir), button)
+            self._run_guarded("Verifying evidence", lambda: self._run_verify_into(run_dir), button)
 
         def _run_verify_into(self, run_dir: str):
             try:
                 result = runs_mod.run_verify(run_dir)
                 lines = runs_mod.verify_summary(result.get("report"))
-                self.call_from_thread(self._set_text, "runs-detail", "\n".join(lines[:8]))
+                text = "Verify evidence (read-only) for %s:\n%s" % (
+                    Path(run_dir).name, "\n".join(lines[:8]))
+                self.call_from_thread(self._set_text, "runs-detail", text)
             except Exception as error:
-                self.call_from_thread(self._set_text, "runs-detail", "verify failed: %s" % error)
+                self.call_from_thread(self._set_text, "runs-detail", "Verify evidence failed: %s" % error)
 
         def _rerun_selected_run(self):
             run = self._selected_run()
@@ -935,11 +1197,12 @@ if _TEXTUAL:
                 self.compare_a = str(run["directory"])
             else:
                 self.compare_b = str(run["directory"])
-            self._set_text("runs-detail", "Compare A=%s B=%s — Show compare when both set." % (self.compare_a, self.compare_b))
+            self._set_text("runs-detail", "Comparison A = %s\nComparison B = %s\nPress 'Compare A vs B' to see the difference."
+                           % (self.compare_a, self.compare_b))
 
         def _show_compare(self):
             if not (self.compare_a and self.compare_b):
-                self._set_text("runs-detail", "Select Compare A and Compare B first.")
+                self._set_text("runs-detail", "Pick one run with 'Pick as A' and another with 'Pick as B' first.")
                 return
             try:
                 left = runs_mod.summary_numbers(runs_mod.find_run(Path(self.compare_a).name) or {"directory": self.compare_a})

@@ -21,31 +21,43 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
 
 ## Workspaces (Ctrl+P commands, F1 help, t theme)
 
+Every button states its purpose in its label, carries a tooltip, and is
+explained in the F1 help screen (`Live` also repeats it under the buttons).
+
 - **Dashboard**: mode/model/volume, Inference/Renderer status, owned services,
-  Running/Last run. Refresh re-discovers without blocking the UI.
+  Running/Last run. Refresh status re-discovers without blocking the UI.
 - **New Run**: Task preset (A/B loads audited text, Custom never inherits A/B),
   editable prompt, volume override, model/budget/context/temperature overrides,
-  preflight check, Start. Service DOWN blocks before any config is written.
-  A lone Model-context mismatch auto-starts a temporary TUI-owned Ollama on a
-  free loopback port (this run only; saved settings untouched).
-- **Runs**: filterable table (run/status/model/frames/task), Follow live
-  (re-enters a running run from existing events), Replay, Verify, Rerun
-  (pre-fills New Run), Open folder, dual-select Compare.
+  Check services & settings, Start agent run. Service DOWN blocks before any
+  config is written. A lone Model-context mismatch auto-starts a temporary
+  TUI-owned Ollama on a free loopback port (this run only; saved settings
+  untouched).
+- **Runs**: filterable table (run/status/model/frames/task), Open Live view
+  (re-enters a running run from existing events), Verify evidence, Rerun as new
+  run (pre-fills New Run), Pick as A/B + Compare A vs B (config diff).
 - **Live**: event timeline (category filter + text search + follow), selected
-  event detail, current frame inline preview (Pillow downsample to Rich
-  half-block cells; Static never interprets raw ANSI escapes) + external
-  open, resource bar (`telemetry.jsonl` GPU/VRAM +
-  Ollama context), Stop (cooperative `runtime/tui-control/<runId>.stop`,
-  launcher records `interrupted`/`failure.json`), Verify, Open folder, Detach.
-  Finish freezes the view (no more polling).
+  event detail, resource bar (`telemetry.jsonl` GPU/VRAM + Ollama context), and
+  the current frame: its **absolute PNG path** plus an inline preview (Pillow
+  downsample to Rich half-block cells; Static never interprets raw ANSI
+  escapes). The preview is fitted into the panel (aspect ratio kept, black
+  padding, never cropped) and re-fitted when the window is resized, so the
+  whole frame is visible instead of a cut-off corner.
+  - Stop run (cooperative `runtime/tui-control/<runId>.stop`, launcher records
+    `interrupted`/`failure.json`), Verify evidence (read-only check →
+    `verification.json`, never calls the model), View PNG (opens the previewed
+    PNG in the system image viewer), Open folder (opens the folder that holds
+    the PNGs — `runtime/<sessionId>` — **not** the run log folder, which has no
+    images), Stop watching (leave Live; the run keeps going, reopen it from
+    Runs). Finish freezes the view (no more polling).
 - **Volumes**: scan of the fixed `volumes/` folder (+ current selection),
-  filter, metadata, Use selected (persists to `tui-settings.json`), Slice
+  filter, metadata, Use this volume (persists to `tui-settings.json`), Slice
   Inspector (x/y/z + index → inline preview for prepared volumes only;
   never converts, never consumes budget, never touches run evidence).
-- **Services**: owned-service table (liveness re-verified), Start missing,
-  Stop owned, Restart, Stop ALL (confirmed; unloads local model), Refresh,
-  owned log tails. Foreign processes are never touched; release refuses while
-  a run/launcher is live (except forced Ctrl+C path).
+- **Services**: owned-service table (liveness re-verified), Start missing
+  services, Stop owned services, Restart owned, Stop all services (confirmed;
+  unloads local model), Refresh status, owned log tails. Foreign processes are
+  never touched; release refuses while a run/launcher is live (except forced
+  Ctrl+C path).
 - **Settings**: mode/model/endpoints, contextSize, renderBudget, temperature,
   think, timeouts, maxOutputTokens. Validated, saved to
   `runtime/tui-settings.json`, H200 probe honest (never silent fallback).
@@ -61,6 +73,9 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
   freezes on finish; the startup service check prints elapsed time.
 - Static text and table cells escape literal `[...]` (terminal markup would
   otherwise swallow tags like `[FROZEN]`); toasts render with markup off.
+- The frame preview is drawn at the panel width: a stale width would fold the
+  picture row in half, so `FramePreview` re-fits the PNG whenever its own size
+  changes (window resize, scrollbar).
 
 ## Backend contracts (unchanged semantics)
 
@@ -75,7 +90,9 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
   (mtime/size gated), `runtime/<session>/events.jsonl` (seq gap-fill),
   http request/metadata (request summaries, no base64). All events carry `ts`.
 - Verify: `runs.run_verify` subprocess + three-way summary
-  (execution / image transport / visual-quality UNVERIFIED).
+  (execution / image transport / visual-quality UNVERIFIED). The Live tab
+  writes it to its own `Verify evidence:` box so it never overwrites the
+  selected event detail.
 - Services: `services.ensure_services` (Local-loopback only, never H200,
   never `ollama pull`), ownership via `runtime/tui/services.json` + heartbeat,
   `release_owned_services` (refuses while live), `shutdown_all` (agent tree →

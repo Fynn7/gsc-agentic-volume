@@ -158,14 +158,18 @@ class SlicePreview(unittest.TestCase):
 
 
 class ImagingTelemetry(unittest.TestCase):
-    def test_ansi_preview_or_fallback(self):
+    def test_rich_preview_has_cells_not_ansi(self):
         with tempfile.TemporaryDirectory() as tmp:
             from PIL import Image
             path = Path(tmp) / "frame.png"
             Image.new("RGB", (8, 8), (10, 20, 30)).save(path)
-            text = tui_imaging.render_ansi(path, width=8, height=4)
-            self.assertIn("\x1b[", text)
+            rendered = tui_imaging.preview_or_message(path, width=8, height=4)
+            text = rendered.plain if hasattr(rendered, "plain") else rendered
             self.assertIn("\u2580", text)
+            self.assertNotIn("[38;", text)
+            self.assertNotIn("\x1b", text)
+            spans = getattr(rendered, "spans", None) or []
+            self.assertTrue(len(spans) > 0)
             self.assertIn("(no frame", tui_imaging.preview_or_message(None))
 
     def test_resource_line_missing_telemetry(self):
@@ -319,6 +323,226 @@ class TextualLayout(unittest.TestCase):
                         await pilot.press("enter")
                         await pilot.pause()
                         self.assertEqual(tui_app.cfg.load_settings()["model"], "probe-model")
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class TextualBusy(unittest.TestCase):
+    """Every waiting operation shows feedback and always settles."""
+
+    def test_guarded_worker_shows_busy_and_resets(self):
+        import asyncio
+        import threading
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                gate = threading.Event()
+                app._run_guarded("Probe", gate.wait,
+                                 button=app.query_one("#btn-refresh"))
+                await pilot.pause()
+                self.assertTrue(app.query_one("#btn-refresh").loading)
+                self.assertGreater(app._busy_count, 0)
+                spinner = app.query_one("#busy-spinner")
+                self.assertIn("busy", spinner.classes)
+                gate.set()
+                for _ in range(100):
+                    await pilot.pause()
+                    if app._busy_count == 0:
+                        break
+                self.assertEqual(app._busy_count, 0)
+                self.assertFalse(app.query_one("#btn-refresh").loading)
+                self.assertNotIn("busy", app.query_one("#busy-spinner").classes)
+        asyncio.run(_run())
+
+    def test_guarded_worker_error_resets_busy(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+
+                def boom():
+                    raise RuntimeError("probe-boom")
+
+                app._run_guarded("Probe", boom)
+                for _ in range(100):
+                    await pilot.pause()
+                    if app._busy_count == 0:
+                        break
+                self.assertEqual(app._busy_count, 0)
+        asyncio.run(_run())
+
+    def test_start_launch_failure_settles(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    target = Path(tmp) / "c.json"
+                    with patch.object(tui_app.flows_mod, "build_new_run",
+                                       return_value=({}, [])), \
+                         patch.object(tui_app.flows_mod, "service_gate",
+                                       return_value=[]), \
+                         patch.object(tui_app.cfg, "write_run_config",
+                                       return_value=target), \
+                         patch.object(tui_app.runner_mod, "launch",
+                                       side_effect=RuntimeError("boom")):
+                        app.run_worker(app._start_run, thread=True)
+                        for _ in range(100):
+                            await pilot.pause()
+                            if app._busy_count == 0 and app._launcher_result.get("settled"):
+                                break
+                self.assertEqual(app._busy_count, 0)
+                self.assertFalse(app.query_one("#btn-start-run").loading)
+                preflight = app.query_one("#newrun-preflight")
+                self.assertIn("boom", str(preflight.render()))
+        asyncio.run(_run())
+
+    def test_start_success_enters_live_and_frees_button(self):
+        import asyncio
+        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp) / "run-r1"
+                    run_dir.mkdir()
+                    target = Path(tmp) / "c.json"
+
+                    def fake_launch(config_path, on_line=None):
+                        if on_line:
+                            on_line('{"event": "run_started", "runId": "r1",'
+                                    ' "directory": "%s"}' % run_dir)
+                        result = tui_runner.LaunchResult()
+                        result.run_id = "r1"
+                        result.directory = run_dir
+                        result.exit_code = 0
+                        result.output_tail = ""
+                        return result
+
+                    with patch.object(tui_app.flows_mod, "build_new_run",
+                                       return_value=({"task": "x"}, [])), \
+                         patch.object(tui_app.flows_mod, "service_gate",
+                                       return_value=[]), \
+                         patch.object(tui_app.cfg, "write_run_config",
+                                       return_value=target), \
+                         patch.object(tui_app.runner_mod, "launch",
+                                       side_effect=fake_launch):
+                        app.run_worker(app._start_run, thread=True)
+                        for _ in range(200):
+                            await pilot.pause()
+                            if (app.query_one("#workspaces", TabbedContent).active == "tab-live"
+                                    and app._launcher_result.get("settled")):
+                                break
+                self.assertEqual(
+                    app.query_one("#workspaces", TabbedContent).active, "tab-live")
+                self.assertEqual(app._busy_count, 0)
+                self.assertFalse(app.query_one("#btn-start-run").loading)
+        asyncio.run(_run())
+
+    def test_live_table_keeps_scroll_when_appending(self):
+        import asyncio
+        import tempfile
+        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                app.query_one("#workspaces", TabbedContent).active = "tab-live"
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    app.start_live(Path(tmp), "run-demo")
+                    app.live_events = [
+                        {"cat": "INFER", "title": "INFER call #%d" % i, "detail": ""}
+                        for i in range(40)
+                    ]
+                    app.live_follow = False
+                    app._render_live()
+                    await pilot.pause()
+                    table = app.query_one("#events-table", tui_app.DataTable)
+                    self.assertEqual(table.row_count, 40)
+                    table.scroll_to(y=6, animate=False)
+                    await pilot.pause()
+                    before = table.scroll_offset.y
+                    self.assertGreater(before, 0)
+                    # A new event arrives (the normal poll path).
+                    app.live_events.append({"cat": "TOOL", "title": "TOOL render_scene", "detail": ""})
+                    app._render_live()
+                    await pilot.pause()
+                    self.assertEqual(table.row_count, 41)
+                    self.assertEqual(table.scroll_offset.y, before)
+                    self.assertFalse(app.live_follow)
+        asyncio.run(_run())
+
+    def test_live_follow_off_is_sticky_and_toggle_resumes(self):
+        import asyncio
+        import tempfile
+        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                app.query_one("#workspaces", TabbedContent).active = "tab-live"
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    app.start_live(Path(tmp), "run-demo")
+                    app.live_events = [
+                        {"cat": "INFER", "title": "row %d" % i, "detail": ""} for i in range(40)
+                    ]
+                    app.live_follow = True
+                    app._render_live()
+                    await pilot.pause()
+                    table = app.query_one("#events-table", tui_app.DataTable)
+                    table.scroll_to(y=4, animate=False)
+                    await pilot.pause()
+                    # Scrolling away from the tail must pause following.
+                    app.live_events.append({"cat": "TOOL", "title": "new", "detail": ""})
+                    app._render_live()
+                    await pilot.pause()
+                    self.assertFalse(app.live_follow)
+                    label = str(app.query_one("#btn-live-follow").label)
+                    self.assertIn("off", label)
+                    # Toggling follow on jumps to the newest row again.
+                    app._jump_to_latest()
+                    await pilot.pause()
+                    self.assertTrue(app.live_follow)
+                    self.assertIn("on", str(app.query_one("#btn-live-follow").label))
+        asyncio.run(_run())
+
+    def test_live_head_shows_spinner_when_running(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    app.start_live(Path(tmp), "run-demo")
+                    app._render_live()
+                    await pilot.pause()
+                    head = str(app.query_one("#live-head").render())
+                    self.assertIn("[live", head)
+                    app.live_frozen = True
+                    app._render_live()
+                    await pilot.pause()
+                    frozen = str(app.query_one("#live-head").render())
+                    self.assertIn("[FROZEN]", frozen)
+                    # Letter-led [...] is markup to Static: must render literally.
+                    app._set_text("runs-detail", "Custom: rotate [fast] now [25,-35,10]")
+                    await pilot.pause()
+                    detail = str(app.query_one("#runs-detail").render())
+                    self.assertIn("[fast]", detail)
+                    self.assertIn("[25,-35,10]", detail)
         asyncio.run(_run())
 
 

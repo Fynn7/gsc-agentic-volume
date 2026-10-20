@@ -32,8 +32,9 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
   (re-enters a running run from existing events), Replay, Verify, Rerun
   (pre-fills New Run), Open folder, dual-select Compare.
 - **Live**: event timeline (category filter + text search + follow), selected
-  event detail, current frame inline preview (Pillow → ANSI truecolor
-  half-blocks) + external open, resource bar (`telemetry.jsonl` GPU/VRAM +
+  event detail, current frame inline preview (Pillow downsample to Rich
+  half-block cells; Static never interprets raw ANSI escapes) + external
+  open, resource bar (`telemetry.jsonl` GPU/VRAM +
   Ollama context), Stop (cooperative `runtime/tui-control/<runId>.stop`,
   launcher records `interrupted`/`failure.json`), Verify, Open folder, Detach.
   Finish freezes the view (no more polling).
@@ -48,6 +49,18 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
 - **Settings**: mode/model/endpoints, contextSize, renderBudget, temperature,
   think, timeouts, maxOutputTokens. Validated, saved to
   `runtime/tui-settings.json`, H200 probe honest (never silent fallback).
+
+## Busy feedback (every waiting operation animates)
+
+- A one-row spinner under the header animates while any background worker is
+  active; the pressed button shows its own spinner and locks against
+  double clicks; worker failures surface as error toasts.
+- Covered: dashboard refresh, preflight, run start (button stays loaded until
+  Live takes over), runs refresh/verify, live verify, slice preview, all
+  service operations, H200 probe. The Live header animates while running and
+  freezes on finish; the startup service check prints elapsed time.
+- Static text and table cells escape literal `[...]` (terminal markup would
+  otherwise swallow tags like `[FROZEN]`); toasts render with markup off.
 
 ## Backend contracts (unchanged semantics)
 

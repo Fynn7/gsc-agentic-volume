@@ -42,6 +42,31 @@ except Exception:  # pragma: no cover - import path for tests
     imaging_mod = None  # type: ignore
     telemetry_mod = None  # type: ignore
 
+import re as _re
+
+_ESCAPE_TAG_RE = _re.compile(r"(\\*)(\[[A-Za-z#/@/][^[]*?])")
+
+
+def _escape_markup(text) -> str:
+    """Escape literal [...] so terminal markup never eats it.
+
+    Rich's own escape() only covers lowercase-led tags, but rendered output
+    also drops uppercase-led tags such as [FROZEN] (task text, model claims,
+    and error strings reach the UI verbatim). Mirror Rich's backslash logic
+    with a case-insensitive tag head instead.
+    """
+    text = str(text)
+
+    def _fix(match):
+        backslashes, tag = match.groups()
+        return "%s%s\\%s" % (backslashes, backslashes, tag)
+
+    text = _ESCAPE_TAG_RE.sub(_fix, text)
+    if text.endswith("\\") and not text.endswith("\\\\"):
+        return text + "\\"
+    return text
+
+
 try:
     from textual import events as _events
 except Exception:  # pragma: no cover
@@ -59,6 +84,7 @@ try:
         Header,
         Input,
         Label,
+        LoadingIndicator,
         RichLog,
         Select,
         Static,
@@ -147,6 +173,8 @@ if _TEXTUAL:
         TabbedContent { height: 1fr; }
         TabPane { height: 1fr; }
         VerticalScroll { height: 1fr; }
+        #busy-spinner { height: 1; display: none; }
+        #busy-spinner.busy { display: block; }
         .panel { height: auto; padding: 1 2; }
         .row { height: 3; }
         .row > Input { width: 1fr; }
@@ -203,6 +231,61 @@ if _TEXTUAL:
             self.compare_b: str | None = None
             self._launcher_thread: threading.Thread | None = None
             self._launcher_result: dict = {}
+            self._busy_count = 0
+
+        def _busy_inc(self) -> None:
+            self._busy_count += 1
+            self._refresh_busy()
+
+        def _busy_dec(self) -> None:
+            self._busy_count = max(0, self._busy_count - 1)
+            self._refresh_busy()
+
+        def _refresh_busy(self) -> None:
+            try:
+                self.query_one("#busy-spinner", LoadingIndicator).set_class(
+                    self._busy_count > 0, "busy")
+            except Exception:
+                pass
+
+        def _run_guarded(self, label: str, func, button=None) -> None:
+            """Run a blocking callable in a worker with visible feedback.
+
+            The pressed button (if given) shows its spinner and locks against
+            double clicks; the top spinner animates while any worker is active;
+            failures surface as error toasts instead of vanishing silently.
+            """
+            if button is not None:
+                try:
+                    button.loading = True
+                except Exception:
+                    pass
+            self._busy_inc()
+
+            def _finish(message=None, error=False):
+                if button is not None:
+                    try:
+                        button.loading = False
+                    except Exception:
+                        pass
+                self._busy_dec()
+                if message is not None:
+                    try:
+                        if error:
+                            self.notify(message, severity="error", timeout=6, markup=False)
+                        else:
+                            self.notify(message, timeout=3, markup=False)
+                    except Exception:
+                        pass
+
+            def _wrapped():
+                try:
+                    func()
+                except Exception as err:  # noqa: BLE001 - surfaced as toast
+                    self.call_from_thread(_finish, "%s failed: %s" % (label, err), True)
+                else:
+                    self.call_from_thread(_finish)
+            self.run_worker(_wrapped, thread=True)
 
         # -- helpers to allow injection in tests -------------------------
         def _cfg(self):
@@ -237,6 +320,7 @@ if _TEXTUAL:
         # -- layout -------------------------------------------------------
         def compose(self) -> ComposeResult:
             yield Header()
+            yield LoadingIndicator(id="busy-spinner")
             with TabbedContent(id="workspaces"):
                 with TabPane("Dashboard", id="tab-dashboard"):
                     with VerticalScroll():
@@ -295,7 +379,7 @@ if _TEXTUAL:
                                 yield Select([(c, c) for c in CATEGORIES], value="ALL", id="live-category", classes="narrow")
                                 yield Button("Follow: on", id="btn-live-follow")
                             yield DataTable(id="events-table")
-                            yield Static("", id="live-detail")
+                            yield Static("(select an event for details)", id="live-detail")
                             yield Static("(no frame yet)", id="live-image")
                             with Horizontal(classes="row"):
                                 yield Button("Stop", id="btn-live-stop", variant="error")
@@ -374,7 +458,7 @@ if _TEXTUAL:
                 except Exception:
                     pass
             self.set_interval(0.5, self._tick_live)
-            self.run_worker(self._load_dashboard, thread=True)
+            self._run_guarded("Loading dashboard", self._load_dashboard)
 
         def _load_dashboard(self):
             try:
@@ -391,8 +475,10 @@ if _TEXTUAL:
                 self.call_from_thread(self._set_text, "status-bar", "dashboard failed: %s" % error)
 
         def _set_text(self, widget_id: str, text: str):
+            # Static parses [..] as markup and drops unknown tags, so escape
+            # every dynamic text (task text, paths, errors all reach here).
             try:
-                self.query_one("#" + widget_id, Static).update(text)
+                self.query_one("#" + widget_id, Static).update(_escape_markup(text))
             except Exception:
                 pass
 
@@ -459,19 +545,51 @@ if _TEXTUAL:
             except Exception:
                 return
             items = self._filtered_events()
-            if self.live_follow:
-                items = items[-200:]
+            key = (self.live_filter, self.live_search)
+            prev_len = getattr(self, "_live_table_len", 0)
+            rebuild = (key != getattr(self, "_live_render_key", None)
+                       or len(items) < prev_len)
+            if self.live_follow and not rebuild and prev_len:
+                # If the user scrolled away from the tail, stop following so
+                # the view is not yanked back on every poll.
+                try:
+                    at_bottom = (table.scroll_offset.y + table.region.height
+                                 >= table.max_scroll_y - 1)
+                    if not at_bottom:
+                        self.live_follow = False
+                        self._set_follow_label(False)
+                except Exception:
+                    pass
             try:
-                table.clear()
-                for i, event in enumerate(items):
-                    table.add_row(str(i), str(event.get("cat", "")), str(event.get("title", ""))[:100])
+                if rebuild:
+                    table.clear()
+                    for i, event in enumerate(items):
+                        table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
+                                      _escape_markup(str(event.get("title", ""))[:100]))
+                    self._live_render_key = key
+                    self._live_table_len = len(items)
+                    if self.live_follow:
+                        table.scroll_end(animate=False)
+                elif len(items) > prev_len:
+                    # Incremental append: never clear, so scroll offset and the
+                    # cursor row survive every refresh.
+                    for i in range(prev_len, len(items)):
+                        event = items[i]
+                        table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
+                                      _escape_markup(str(event.get("title", ""))[:100]))
+                    self._live_table_len = len(items)
+                    if self.live_follow:
+                        table.scroll_end(animate=False)
             except Exception:
                 pass
             try:
-                self.query_one("#live-head", Static).update(
-                    "Live: %s events=%d %s" % (
-                        self.live_dir.name if self.live_dir else "?", len(self.live_events),
-                        "[FROZEN]" if self.live_frozen else "[live]"))
+                if self.live_frozen:
+                    state = "[FROZEN]"
+                else:
+                    frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 5) % 10]
+                    state = "[live %s]" % frame
+                self._set_text("live-head", "Live: %s events=%d %s" % (
+                    self.live_dir.name if self.live_dir else "?", len(self.live_events), state))
             except Exception:
                 pass
             # Newest frame preview.
@@ -480,8 +598,27 @@ if _TEXTUAL:
                 newest = images[-1]
                 self._show_frame(newest.get("image"), newest.get("revision"))
 
+        def _set_follow_label(self, following: bool) -> None:
+            try:
+                self.query_one("#btn-live-follow", Button).label = "Follow: %s" % (
+                    "on" if following else "off")
+            except Exception:
+                pass
+
+        def _jump_to_latest(self) -> None:
+            """Scroll the timeline to the newest event (and resume following)."""
+            self.live_follow = True
+            self._set_follow_label(True)
+            try:
+                self.query_one("#events-table", DataTable).scroll_end(animate=False)
+            except Exception:
+                pass
+
         def _show_frame(self, image: str | None, revision=None):
             try:
+                if image == getattr(self, "_last_frame_path", None):
+                    return  # same PNG: skip the redundant downsample
+                self._last_frame_path = image
                 self.query_one("#live-image", Static).update(imaging_mod.preview_or_message(image))
             except Exception:
                 pass
@@ -506,7 +643,7 @@ if _TEXTUAL:
             elif result == "cmd-Live: Verify":
                 self._verify_live()
             elif result in ("cmd-Runs: Refresh", "cmd-Services: Refresh"):
-                self.run_worker(self._load_dashboard, thread=True)
+                self._run_guarded("Refreshing", self._load_dashboard)
             elif result == "cmd-Help":
                 self.action_help()
             elif result == "cmd-Quit":
@@ -569,11 +706,11 @@ if _TEXTUAL:
             except Exception as error:
                 self._set_text("live-head", "Stop failed: %s" % error)
 
-        def _verify_live(self):
+        def _verify_live(self, button=None):
             if not self.live_dir:
                 return
             run_dir = str(self.live_dir)
-            self.run_worker(lambda: self._run_verify(run_dir), thread=True)
+            self._run_guarded("Verifying run", lambda: self._run_verify(run_dir), button)
 
         def _run_verify(self, run_dir: str):
             try:
@@ -602,22 +739,23 @@ if _TEXTUAL:
 
         async def on_button_pressed(self, event):
             bid = event.button.id
+            button = event.button
             if bid == "btn-refresh":
-                self.run_worker(self._load_dashboard, thread=True)
+                self._run_guarded("Refreshing dashboard", self._load_dashboard, button)
             elif bid == "btn-goto-newrun":
                 self._goto_tab("tab-newrun")
             elif bid == "btn-goto-live":
                 self._goto_tab("tab-live")
             elif bid == "btn-preflight":
-                self.run_worker(self._check_preflight, thread=True)
+                self._run_guarded("Preflight check", self._check_preflight, button)
             elif bid == "btn-start-run":
                 self.run_worker(self._start_run, thread=True)
             elif bid == "btn-runs-refresh":
-                self.run_worker(self._refresh_runs, thread=True)
+                self._run_guarded("Refreshing runs", self._refresh_runs, button)
             elif bid == "btn-runs-follow":
-                self._follow_selected_run()
+                self._follow_selected_run(button)
             elif bid == "btn-runs-verify":
-                self._verify_selected_run()
+                self._verify_selected_run(button)
             elif bid == "btn-runs-rerun":
                 self._rerun_selected_run()
             elif bid in ("btn-compare-a", "btn-compare-b"):
@@ -627,7 +765,7 @@ if _TEXTUAL:
             elif bid == "btn-live-stop":
                 self._confirm_stop()
             elif bid == "btn-live-verify":
-                self._verify_live()
+                self._verify_live(button)
             elif bid == "btn-live-open":
                 if self.live_dir:
                     evidence_mod.open_path(str(self.live_dir))
@@ -636,33 +774,35 @@ if _TEXTUAL:
                 self.live_run_id = None
                 self._set_text("live-head", "Detached. Run keeps going; Follow from Runs to reattach.")
             elif bid == "btn-live-follow":
-                self.live_follow = not self.live_follow
-                try:
-                    event.button.label = "Follow: %s" % ("on" if self.live_follow else "off")
-                except Exception:
-                    pass
+                if self.live_follow:
+                    self.live_follow = False
+                    self._set_follow_label(False)
+                else:
+                    self._jump_to_latest()
             elif bid == "btn-slice":
-                self._slice_preview()
+                self._slice_preview(button)
             elif bid == "btn-volume-use":
                 self._use_selected_volume()
             elif bid == "btn-svc-refresh":
-                self.run_worker(self._refresh_services, thread=True)
+                self._run_guarded("Refreshing services", self._refresh_services, button)
             elif bid == "btn-svc-start":
-                self.run_worker(self._ensure_services, thread=True)
+                self._run_guarded("Starting services", self._ensure_services, button)
             elif bid == "btn-svc-stop":
-                self.run_worker(lambda: self._release_services(False), thread=True)
+                self._run_guarded("Stopping owned services",
+                                  lambda: self._release_services(False), button)
             elif bid == "btn-svc-stopall":
                 self.push_screen(ConfirmScreen(
                     "Stop ALL local inference + owned services? Model unloads from VRAM.",
-                    on_yes=lambda: self.run_worker(lambda: self._release_services(True), thread=True)))
+                    on_yes=lambda: self._run_guarded(
+                        "Stopping all services", lambda: self._release_services(True))))
             elif bid == "btn-svc-restart":
-                self.run_worker(self._restart_services, thread=True)
+                self._run_guarded("Restarting services", self._restart_services, button)
             elif bid == "btn-settings-save":
                 self._save_settings()
             elif bid == "btn-settings-reset":
                 self._reset_settings()
             elif bid == "btn-h200-probe":
-                self.run_worker(self._probe_h200, thread=True)
+                self._run_guarded("Probing H200", self._probe_h200, button)
 
         async def on_input_changed(self, event):
             if event.input.id == "live-search":
@@ -719,9 +859,10 @@ if _TEXTUAL:
                     text = " ".join(str(run.get(k, "")) for k in ("runId", "status", "model", "task"))
                     if needle and needle not in text.lower():
                         continue
-                    table.add_row(str(run.get("runId", "?")), str(run.get("status", "?")),
-                                  str(run.get("model", "?")), str(run.get("frames")),
-                                  str(run.get("task", "?"))[:60])
+                    table.add_row(_escape_markup(str(run.get("runId", "?"))),
+                                  _escape_markup(str(run.get("status", "?"))),
+                                  _escape_markup(str(run.get("model", "?"))), str(run.get("frames")),
+                                  _escape_markup(str(run.get("task", "?"))[:60]))
             except Exception:
                 pass
 
@@ -742,20 +883,20 @@ if _TEXTUAL:
                 return visible[row]
             return None
 
-        def _follow_selected_run(self):
+        def _follow_selected_run(self, button=None):
             run = self._selected_run()
             if not run:
                 return
             self.start_live(run["directory"], run.get("runId"))
             self._goto_tab("tab-live")
-            self.run_worker(lambda: self._poll_live(), thread=True)
+            self._run_guarded("Following live", self._poll_live, button)
 
-        def _verify_selected_run(self):
+        def _verify_selected_run(self, button=None):
             run = self._selected_run()
             if not run:
                 return
             run_dir = str(run["directory"])
-            self.run_worker(lambda: self._run_verify_into(run_dir), thread=True)
+            self._run_guarded("Verifying run", lambda: self._run_verify_into(run_dir), button)
 
         def _run_verify_into(self, run_dir: str):
             try:
@@ -880,11 +1021,27 @@ if _TEXTUAL:
                                       "Blocked:\n" + "\n".join("- %s" % p if isinstance(p, str) else "- %s" % p.get("name") for p in problems[:8]))
                 return
             config_path = flows_mod.write_config(effective, preset, cfg)
-            self.call_from_thread(self._set_text, "newrun-preflight", "Launching %s…" % config_path.name)
-            self._launcher_result = {}
+            self.call_from_thread(self._set_text, "newrun-preflight", "Launching %s..." % config_path.name)
+            try:
+                self.query_one("#btn-start-run", Button).loading = True
+            except Exception:
+                pass
+            self._busy_inc()
+            self._launcher_result = {"settled": False}
             thread = threading.Thread(target=self._launch_blocking, args=(str(config_path),), daemon=True)
             self._launcher_thread = thread
             thread.start()
+
+        def _settle_launch(self) -> None:
+            """Release the Start button + busy spinner exactly once per launch."""
+            if self._launcher_result.get("settled"):
+                return
+            self._launcher_result["settled"] = True
+            try:
+                self.query_one("#btn-start-run", Button).loading = False
+            except Exception:
+                pass
+            self._busy_dec()
 
         def _launch_blocking(self, config_path: str):
             def on_line(line: str):
@@ -896,6 +1053,7 @@ if _TEXTUAL:
                     self._launcher_result["directory"] = payload["directory"]
                     self._launcher_result["run_id"] = payload.get("runId")
                     self.call_from_thread(self._enter_live_from_launcher)
+            result = None
             try:
                 result = runner_mod.launch(Path(config_path), on_line=on_line)
                 self._launcher_result["exit_code"] = result.exit_code
@@ -904,7 +1062,16 @@ if _TEXTUAL:
                     self._launcher_result["run_id"] = result.run_id
                     self.call_from_thread(self._enter_live_from_launcher)
             except Exception as error:
+                self._launcher_result["error"] = str(error)
                 self.call_from_thread(self._set_text, "newrun-preflight", "Launch failed: %s" % error)
+            finally:
+                if not self._launcher_result.get("directory") and not self._launcher_result.get("error"):
+                    tail = (result.output_tail if result else "")[-1500:]
+                    self.call_from_thread(
+                        self._set_text, "newrun-preflight",
+                        "Launch ended without reserving a run (config/duplicate/reservation). "
+                        "No evidence touched.\n%s" % tail)
+                self.call_from_thread(self._settle_launch)
 
         def _enter_live_from_launcher(self):
             directory = self._launcher_result.get("directory")
@@ -912,6 +1079,7 @@ if _TEXTUAL:
                 return
             self.start_live(directory, self._launcher_result.get("run_id"))
             self._goto_tab("tab-live")
+            self._settle_launch()
 
         # -- volumes ---------------------------------------------------------
         def _render_volumes(self, needle: str):
@@ -930,7 +1098,8 @@ if _TEXTUAL:
                         continue
                     dims = "x".join(str(v) for v in (item.get("dimensions") or ["?"]))
                     flags = ("default " if item.get("default") else "") + ("+%d" % (item.get("copies", 1) - 1) if item.get("copies", 1) > 1 else "")
-                    table.add_row(str(item.get("path", ""))[-60:], dims, flags)
+                    table.add_row(_escape_markup(str(item.get("path", ""))[-60:]),
+                                  _escape_markup(dims), _escape_markup(flags))
             except Exception:
                 pass
 
@@ -943,7 +1112,7 @@ if _TEXTUAL:
                 return self.volumes[row]
             return None
 
-        def _slice_preview(self):
+        def _slice_preview(self, button=None):
             item = self._selected_volume()
             if not item:
                 self._set_text("volumes-detail", "Select a volume row first.")
@@ -954,15 +1123,31 @@ if _TEXTUAL:
             except Exception:
                 self._set_text("volumes-detail", "Slice index must be an integer.")
                 return
-            result = volumes_mod.slice_preview_path(item["path"], axis, index)
-            if result.get("ok"):
-                self._set_text("volumes-detail", "slice %s=%d dims=%s" % (axis, index, result.get("dimensions")))
-                try:
-                    self.query_one("#slice-preview", Static).update(imaging_mod.preview_or_message(result["image"], width=50, height=20))
-                except Exception:
-                    pass
-            else:
-                self._set_text("volumes-detail", "Slice unavailable: %s" % result.get("detail"))
+            header, want_axis, want_index = item["path"], axis, index
+            self._set_text("volumes-detail", "Rendering slice %s=%d..." % (axis, index))
+
+            def _work():
+                result = volumes_mod.slice_preview_path(header, want_axis, want_index)
+                if result.get("ok"):
+                    self.call_from_thread(
+                        self._set_text, "volumes-detail",
+                        "slice %s=%d dims=%s" % (want_axis, want_index, result.get("dimensions")))
+                    try:
+                        image = imaging_mod.preview_or_message(result["image"], width=50, height=20)
+                    except Exception as error:
+                        image = "(preview failed: %s)" % error
+                    self.call_from_thread(self._show_slice_image, image)
+                else:
+                    self.call_from_thread(
+                        self._set_text, "volumes-detail",
+                        "Slice unavailable: %s" % result.get("detail"))
+            self._run_guarded("Slice preview", _work, button)
+
+        def _show_slice_image(self, image: str) -> None:
+            try:
+                self.query_one("#slice-preview", Static).update(image)
+            except Exception:
+                pass
 
         def _use_selected_volume(self):
             item = self._selected_volume()
@@ -985,17 +1170,25 @@ if _TEXTUAL:
                 table = self.query_one("#services-table", DataTable)
                 table.clear()
                 for entry in items:
-                    table.add_row(str(entry.get("kind", "")), str(entry.get("pid", "")),
+                    table.add_row(_escape_markup(str(entry.get("kind", ""))),
+                                  _escape_markup(str(entry.get("pid", ""))),
                                   "alive" if entry.get("alive") else "stopped")
             except Exception:
                 pass
+            try:
+                from rich.text import Text as _RichText
+            except Exception:  # pragma: no cover
+                _RichText = None
             try:
                 log = self.query_one("#service-logs", RichLog)
                 log.clear()
                 for name, lines in services_mod.service_logs():
                     log.write("[bold]%s[/bold]" % name)
                     for line in lines[-15:]:
-                        log.write(line[:160])
+                        if _RichText is not None:
+                            log.write(_RichText(line[:160]))
+                        else:
+                            log.write(line[:160])
             except Exception:
                 pass
 
@@ -1043,14 +1236,14 @@ if _TEXTUAL:
                 problems = cfg.validate_settings(self.settings)
                 if problems:
                     self._set_text("settings-status", "Invalid:\n" + "\n".join("- " + p for p in problems))
-                    self.notify("Settings invalid: %s" % problems[0], severity="error", timeout=5)
+                    self.notify("Settings invalid: %s" % problems[0], severity="error", timeout=5, markup=False)
                     return
                 cfg.save_settings(self.settings)
                 self._set_text("settings-status", "Saved to runtime/tui-settings.json.")
-                self.notify("Settings saved.", timeout=3)
+                self.notify("Settings saved.", timeout=3, markup=False)
             except Exception as error:
                 self._set_text("settings-status", "Save failed: %s" % error)
-                self.notify("Save failed: %s" % error, severity="error", timeout=5)
+                self.notify("Save failed: %s" % error, severity="error", timeout=5, markup=False)
 
         def _reset_settings(self):
             self.settings = dict(cfg.DEFAULTS)
@@ -1059,7 +1252,7 @@ if _TEXTUAL:
             except Exception:
                 pass
             self._set_text("settings-status", "Reset to defaults.")
-            self.notify("Settings reset to defaults.", timeout=3)
+            self.notify("Settings reset to defaults.", timeout=3, markup=False)
 
         def _probe_h200(self):
             import urllib.request
@@ -1080,10 +1273,14 @@ if _TEXTUAL:
             print("Run .\\Start-VolumeTUI.ps1 in Windows Terminal or PowerShell.")
             return 2
         settings = cfg.load_settings()
+        print("Starting owned background services (Local loopback only)...")
+        import time as _time
+        _svc_start = _time.monotonic()
         try:
             report = services_mod.ensure_services(settings)
             for line in services_mod.report_lines(report):
                 print(line)
+            print("Service check done in %.1fs." % (_time.monotonic() - _svc_start))
         except Exception as error:
             print("Service auto-start skipped: %s" % error)
         try:

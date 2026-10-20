@@ -27,8 +27,10 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
 Every button states its purpose in its label, carries a tooltip, and is
 explained in the F1 help screen — stated once, never repeated on screen.
 
-- **Dashboard**: mode/model/volume, Inference/Renderer status, owned services,
-  Running/Last run. Refresh status re-discovers without blocking the UI.
+- **Dashboard**: mode/model/volume, Inference/Renderer status (`up` / `down` /
+  `foreign service` / `remote (not probed)` — only loopback is probed), owned
+  services, Running/Last run. Refresh status re-discovers without blocking the
+  UI.
 - **New Run**: Task preset (A/B loads audited text, Custom never inherits A/B),
   editable prompt, volume override, model/budget/context/temperature overrides,
   Check services & settings, Start agent run. Service DOWN blocks before any
@@ -156,8 +158,9 @@ process (the documented emergency path).
   (execution / image transport / visual-quality UNVERIFIED). The Live tab
   writes it to its own `Verify evidence:` box so it never overwrites the
   selected event detail.
-- Services: `services.ensure_services` (Local-loopback only, never H200,
-  never `ollama pull`), ownership via `runtime/tui/services.json` + heartbeat,
+- Services: `services.ensure_services` (Local-loopback only: the H200 tunnel is
+  probed read-only and never started, never `ollama pull`), ownership via
+  `runtime/tui/services.json` + heartbeat,
   `release_owned_services` (refuses while a live run needs them),
   `shutdown_all` (agent tree → local Ollama → owned services, SIGINT-immune).
 - Volumes: `volumes.discover_volumes` scans only `volumes/` (+ selection/gate),

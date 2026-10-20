@@ -488,6 +488,12 @@ def model_problems(settings: dict) -> list[dict]:
     """Missing-model / context-mismatch problems. Never downloads anything."""
     endpoint = settings["h200Endpoint"] if settings.get("mode") == "H200" else settings.get("endpoint", "")
     model = settings.get("model", "")
+    if not endpoint:
+        return []  # nothing configured: the gate reports it elsewhere
+    if _loopback(str(endpoint)) is None:
+        return [{"name": "Endpoint %s" % endpoint, "ok": False,
+                 "detail": "not a local address — not probed",
+                 "fix": "The TUI only talks to loopback endpoints (127.0.0.1); it never dials out."}]
     try:
         tags = _http_get(endpoint.rstrip("/") + "/api/tags", 10.0)
     except Exception:
@@ -587,13 +593,19 @@ def ensure_services(settings: dict) -> dict:
     if settings.get("mode") == "Local":
         _ensure_ollama(settings, owned, report)
     else:
-        try:
-            _http_get(settings.get("h200Endpoint", "").rstrip("/") + "/api/version", 5.0)
-            report["reused"].append("h200 tunnel %s (user-owned, left untouched)" % settings.get("h200Endpoint"))
-        except Exception as error:
-            report["problems"].append({"name": "H200 %s" % settings.get("h200Endpoint"), "ok": False,
-                                       "detail": str(error)[:160],
-                                       "fix": "Open the documented SSH tunnel first; the TUI never dials out or guesses accounts."})
+        endpoint = str(settings.get("h200Endpoint") or "")
+        if _loopback(endpoint) is None:
+            report["problems"].append({"name": "H200 %s" % endpoint, "ok": False,
+                                       "detail": "not a local tunnel — not probed",
+                                       "fix": "The H200 endpoint must be the local SSH tunnel (127.0.0.1); the TUI never dials out."})
+        else:
+            try:
+                _http_get(endpoint.rstrip("/") + "/api/version", 5.0)
+                report["reused"].append("h200 tunnel %s (user-owned, left untouched)" % endpoint)
+            except Exception as error:
+                report["problems"].append({"name": "H200 %s" % endpoint, "ok": False,
+                                           "detail": str(error)[:160],
+                                           "fix": "Open the documented SSH tunnel first; the TUI never dials out or guesses accounts."})
     _ensure_renderer(settings, owned, report)
     report["problems"].extend(model_problems(settings))
     report["owns"] = bool(owned)
@@ -839,7 +851,7 @@ def shutdown_all(settings: dict | None = None, hard: bool = False,
     later quit path reads.
     """
     global _SHUTDOWN_REPORT
-    if _SHUTDOWN_REPORT is not None:
+    if cache and _SHUTDOWN_REPORT is not None:
         return _SHUTDOWN_REPORT
     _block_interrupts()
     heartbeat_stop()

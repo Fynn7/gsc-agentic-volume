@@ -103,24 +103,22 @@ HINT_TEXT = ("F1 = what every button does | Ctrl+Up/Down = scroll window | "
              "wheel scrolls outside text boxes")
 TASK_PRESETS = ["task-a", "task-b", "custom"]
 
-# Settings form fields: (label, widget id, setting key). One list, used by the
-# form, by "Save settings" and by "Reset to defaults", so they cannot drift.
+# Settings form fields: (label, widget id, setting key, kind). One list, used
+# by the form, by "Save settings" and by "Reset to defaults", so they cannot
+# drift apart.
 SETTINGS_ROWS = (
-    ("Mode", "set-mode", "mode"),
-    ("Model", "set-model", "model"),
-    ("Local endpoint", "set-endpoint", "endpoint"),
-    ("H200 endpoint", "set-h200", "h200Endpoint"),
-    ("Renderer", "set-renderer", "rendererService"),
-    ("Context size", "set-context", "contextSize"),
-    ("Render budget", "set-budget", "renderBudget"),
-    ("Temperature", "set-temp", "temperature"),
-    ("Timeout (s)", "set-timeout", "timeoutSeconds"),
-    ("Task timeout (s)", "set-tasktimeout", "taskTimeoutSeconds"),
-    ("Max output tokens", "set-maxtokens", "maxOutputTokens"),
+    ("Mode", "set-mode", "mode", "text"),
+    ("Model", "set-model", "model", "text"),
+    ("Local endpoint", "set-endpoint", "endpoint", "text"),
+    ("H200 endpoint", "set-h200", "h200Endpoint", "text"),
+    ("Renderer", "set-renderer", "rendererService", "text"),
+    ("Context size", "set-context", "contextSize", "int"),
+    ("Render budget", "set-budget", "renderBudget", "int"),
+    ("Temperature", "set-temp", "temperature", "float"),
+    ("Timeout (s)", "set-timeout", "timeoutSeconds", "int"),
+    ("Task timeout (s)", "set-tasktimeout", "taskTimeoutSeconds", "int"),
+    ("Max output tokens", "set-maxtokens", "maxOutputTokens", "int"),
 )
-SETTINGS_INT_KEYS = ("contextSize", "renderBudget", "timeoutSeconds",
-                     "taskTimeoutSeconds", "maxOutputTokens")
-SETTINGS_FLOAT_KEYS = ("temperature",)
 
 # Preview budget: the frame is fitted into this many text rows, so the whole
 # image is visible at once (never a cut-off corner).
@@ -200,8 +198,9 @@ class HelpScreen(DismissibleModal):
             "  Stop owned services     stop the owned services\n"
             "  Refresh status          re-read the owned services and their logs\n"
             "  Restart owned           restart the owned services\n"
-            "  Stop all services       stop the agent tree, the local Ollama and the\n"
-            "                    owned services (the model unloads from VRAM)\n"
+            "  Stop all services       stop the agent tree, the local Ollama this TUI\n"
+            "                    started and the owned services (the model unloads\n"
+            "                    from VRAM)\n"
             "\n"
             "SETTINGS\n"
             "  Save settings     write the form to runtime/tui-settings.json\n"
@@ -417,11 +416,22 @@ if _TEXTUAL:
             self._refresh_busy()
 
         def _refresh_busy(self) -> None:
+            """The spinner is widget state: a worker must not touch it directly."""
+            self._on_ui(self._set_busy_class, self._busy_count > 0)
+
+        def _set_busy_class(self, busy: bool) -> None:
             try:
-                self.query_one("#busy-spinner", LoadingIndicator).set_class(
-                    self._busy_count > 0, "busy")
+                self.query_one("#busy-spinner", LoadingIndicator).set_class(busy, "busy")
             except Exception:
                 pass
+
+        def _on_ui(self, func, *args) -> None:
+            """Run a widget update on the UI thread (workers call this)."""
+            try:
+                self.call_from_thread(func, *args)
+            except RuntimeError:
+                # Already on the UI thread: Textual refuses the hop.
+                func(*args)
 
         def _run_guarded(self, label: str, func, button=None) -> None:
             """Run a blocking callable in a worker with visible feedback.
@@ -626,15 +636,15 @@ if _TEXTUAL:
                                 yield Button("Restart owned", id="btn-svc-restart",
                                              tooltip="Restart the owned services one by one.")
                                 yield Button("Stop all services", id="btn-svc-stopall", variant="error",
-                                             tooltip="Stop the agent tree, the local Ollama and the owned services. "
-                                                     "The model unloads from VRAM.")
+                                             tooltip="Stop the agent tree, the local Ollama this TUI started and the owned "
+                                                     "services. The model unloads from VRAM.")
                             yield RichLog(id="service-logs", max_lines=200)
                 with TabPane("Settings", id="tab-settings"):
                     with VerticalScroll():
                         with Vertical(classes="panel"):
                             yield Static(HINT_TEXT, classes="scroll-hint")
                             yield Label("Settings (saved to runtime/tui-settings.json on Save)")
-                        for label, wid, key in SETTINGS_ROWS:
+                        for label, wid, key, _kind in SETTINGS_ROWS:
                             with Horizontal(classes="row"):
                                 yield Label(label, classes="field-label")
                                 yield Input(str(self.settings.get(key, "")), id=wid)
@@ -1259,10 +1269,10 @@ if _TEXTUAL:
                                   lambda: self._release_services(False), button)
             elif bid == "btn-svc-stopall":
                 self.push_screen(ConfirmScreen(
-                    "Stop the agent run, the local Ollama and the owned services?\n"
-                    "The model unloads from VRAM; the run's evidence stays on disk.",
+                    "Stop the agent run, the local Ollama this TUI started and the owned\n"
+                    "services? The model unloads from VRAM; the run's evidence stays on disk.",
                     on_yes=lambda: self._run_guarded(
-                        "Stopping everything", self._stop_everything_owned)))
+                        "Stopping everything", self._stop_everything_owned, button)))
             elif bid == "btn-svc-restart":
                 self._run_guarded("Restarting services", self._restart_services, button)
             elif bid == "btn-settings-save":
@@ -1313,7 +1323,14 @@ if _TEXTUAL:
         def _refresh_runs(self):
             runs = self.discover_runs(fresh=True)
             self.runs = runs
-            self.call_from_thread(self._render_runs, "")
+            # Keep the active filter: the table and _selected_run must show
+            # the same runs, or the row the cursor is on is another run.
+            needle = ""
+            try:
+                needle = self.query_one("#runs-filter", Input).value
+            except Exception:
+                pass
+            self.call_from_thread(self._render_runs, needle)
 
         def _render_runs(self, needle: str):
             try:
@@ -1710,13 +1727,18 @@ if _TEXTUAL:
             whatever was started meanwhile.
             """
             try:
+                # A second Ctrl+C must not abort the stop half-way.
+                self._on_ui(services_mod.block_interrupts)
+            except Exception:
+                pass
+            try:
                 report = services_mod.shutdown_all(self.settings, hard=False, cache=False)
                 self.call_from_thread(
                     self._set_text, "live-head",
                     "; ".join(services_mod.shutdown_lines(report)[:4]) or "stopped")
             except Exception:
                 pass
-            self._refresh_services()
+            self._on_ui(self._refresh_services)
 
         def _restart_services(self):
             try:
@@ -1728,12 +1750,12 @@ if _TEXTUAL:
         # -- settings ----------------------------------------------------------
         def _save_settings(self):
             try:
-                for _label, widget, key in SETTINGS_ROWS:
+                for _label, widget, key, kind in SETTINGS_ROWS:
                     raw = self.query_one("#" + widget, Input).value.strip()
-                    if key in SETTINGS_INT_KEYS:
+                    if kind == "int":
                         if raw:
                             self.settings[key] = int(raw)
-                    elif key in SETTINGS_FLOAT_KEYS:
+                    elif kind == "float":
                         if raw:
                             self.settings[key] = float(raw)
                     else:
@@ -1764,7 +1786,7 @@ if _TEXTUAL:
             the next run must not silently use the defaults.
             """
             defaults = dict(cfg.DEFAULTS)
-            for _label, widget, key in SETTINGS_ROWS:
+            for _label, widget, key, _kind in SETTINGS_ROWS:
                 self._set_input(widget, str(defaults.get(key, "")))
             try:
                 self.query_one("#set-think", Select).value = (

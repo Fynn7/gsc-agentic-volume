@@ -966,6 +966,33 @@ class ReviewFixes(unittest.TestCase):
                 self.assertIn("TUI-owned", text)
         asyncio.run(_run())
 
+    def test_refresh_list_keeps_the_active_filter(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            runs = [{"runId": "alpha", "status": "Finished", "model": "m",
+                     "frames": 1, "task": "t"},
+                    {"runId": "beta", "status": "Finished", "model": "m",
+                     "frames": 1, "task": "t"}]
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-runs"
+                await pilot.pause()
+                app.query_one("#runs-filter", tui_app.Input).value = "alpha"
+                with patch.object(app, "discover_runs", return_value=runs):
+                    app.run_worker(app._refresh_runs, thread=True)
+                    for _ in range(100):
+                        await pilot.pause()
+                        if app.query_one("#runs-table", tui_app.DataTable).row_count == 1:
+                            break
+                table = app.query_one("#runs-table", tui_app.DataTable)
+                # The table shows the filtered runs, and the row the cursor is
+                # on is the run the actions would act on.
+                self.assertEqual(table.row_count, 1)
+                self.assertEqual(app._selected_run()["runId"], "alpha")
+        asyncio.run(_run())
+
     def test_settings_expose_the_think_control(self):
         import asyncio
 

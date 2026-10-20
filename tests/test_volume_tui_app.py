@@ -523,6 +523,13 @@ class TextualBusy(unittest.TestCase):
                             if (app.query_one("#workspaces", TabbedContent).active == "tab-live"
                                     and app._launcher_result.get("settled")):
                                 break
+                        # The mount-time dashboard load may still hold the busy
+                        # spinner (the service probes are slow where the
+                        # loopback packets are dropped instead of refused).
+                        for _ in range(200):
+                            await pilot.pause()
+                            if app._busy_count == 0:
+                                break
                 self.assertEqual(
                     app.query_one("#workspaces", TabbedContent).active, "tab-live")
                 self.assertEqual(app._busy_count, 0)

@@ -22,6 +22,7 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -251,6 +252,23 @@ def _endpoint_up(endpoint: str, timeout: float = 1.0) -> bool:
         _http_get(endpoint.rstrip("/") + "/api/version", timeout)
         return True
     except Exception:
+        return False
+
+
+def _port_open(url: str, timeout: float = 0.35) -> bool:
+    """True when something accepts a TCP connection on that loopback port.
+
+    A status display must not wait for a full HTTP timeout on a host that
+    drops the loopback packets instead of refusing them.
+    """
+    parsed = _loopback(url)
+    if parsed is None:
+        return False
+    host, port = parsed
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
         return False
 
 
@@ -657,18 +675,20 @@ def service_status(settings: dict | None = None) -> dict:
         if _loopback(endpoint) is None:
             status["inference"] = "remote (not probed)"
         else:
-            status["inference"] = "up" if _endpoint_up(endpoint) else "down"
+            status["inference"] = "up" if _port_open(endpoint) else "down"
     service = str(settings.get("rendererService") or "")
     if service:
         if _loopback(service) is None:
             status["renderer"] = "remote (not probed)"
+        elif not _port_open(service):
+            status["renderer"] = "down"
         else:
             try:
-                identity = _http_get(service.rstrip("/") + "/api/service", 1.5)
+                identity = _http_get(service.rstrip("/") + "/api/service", 1.0)
                 status["renderer"] = ("up" if identity.get("service") == "gav-native-renderer"
                                       else "foreign service")
             except Exception:
-                status["renderer"] = "down"
+                status["renderer"] = "up"
     return status
 
 

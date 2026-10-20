@@ -1,8 +1,16 @@
+"""Capabilities of the native renderer path (slice, scene validation).
+
+The scene carries the hash of the compiled Raycaster.exe, so the validation
+test points that hash at a stub file: the logic under test is pure, and it
+must stay covered on a checkout without the C++ toolchain.
+"""
 import unittest,tempfile,json,sys,copy
 from pathlib import Path
+from unittest.mock import patch
 import numpy as np
 from PIL import Image
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
+import renderer
 from volume import prepare,inspect_slice
 from renderer import initial_scene,validate_scene,render
 class Capabilities(unittest.TestCase):
@@ -18,11 +26,13 @@ class Capabilities(unittest.TestCase):
    r=inspect_slice(self.volume,axis,index,self.root); self.assertTrue(np.array_equal(np.array(Image.open(r['image'])),expected))
   with self.assertRaises(ValueError): inspect_slice(self.volume,'z',3,self.root)
  def test_invalid_action_preserves_scene(self):
-  scene=initial_scene(self.volume); before=copy.deepcopy(scene)
-  bad=copy.deepcopy(scene); bad['crop']=[0,8,0,5,0,3]
-  with self.assertRaises(ValueError): validate_scene(bad,self.volume)
-  self.assertEqual(scene,before)
-  bad=copy.deepcopy(scene); bad['tf']['width']=0
-  with self.assertRaises(ValueError): validate_scene(bad,self.volume)
-  bad=copy.deepcopy(scene); bad['tf']['start']=True
-  with self.assertRaises(ValueError): validate_scene(bad,self.volume)
+  stub=self.root/'Raycaster.stub.exe'; stub.write_bytes(b'stub')
+  with patch.object(renderer,'EXE',stub):
+   scene=initial_scene(self.volume); before=copy.deepcopy(scene)
+   bad=copy.deepcopy(scene); bad['crop']=[0,8,0,5,0,3]
+   with self.assertRaises(ValueError): validate_scene(bad,self.volume)
+   self.assertEqual(scene,before)
+   bad=copy.deepcopy(scene); bad['tf']['width']=0
+   with self.assertRaises(ValueError): validate_scene(bad,self.volume)
+   bad=copy.deepcopy(scene); bad['tf']['start']=True
+   with self.assertRaises(ValueError): validate_scene(bad,self.volume)

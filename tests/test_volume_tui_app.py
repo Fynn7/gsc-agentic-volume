@@ -728,5 +728,46 @@ class LiveFrameAndLabels(unittest.TestCase):
                             or action in ("help", "quit"))
 
 
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class QuitLeavesNothingBehind(unittest.TestCase):
+    """Quitting the TUI must stop the agent run and the owned services."""
+
+    def test_quit_stops_everything_before_exiting(self):
+        import asyncio
+        from unittest.mock import patch
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            with patch.object(tui_app.services_mod, "shutdown_all") as shutdown:
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app.runs = [{"runId": "run-x", "status": "Running"}]
+                    app.live_run_id = "run-x"
+                    app._quit_and_stop()
+                    await pilot.pause()
+                    await asyncio.sleep(0.2)
+                    await pilot.pause()
+            self.assertTrue(shutdown.called, "the quit must run the shutdown")
+            self.assertFalse(app.is_running)
+        asyncio.run(_run())
+
+    def test_quit_dialog_names_the_run_and_promises_no_leftovers(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.runs = [{"runId": "run-x", "status": "Running"}]
+                app.live_run_id = "run-x"
+                app.action_quit_confirm()
+                await pilot.pause()
+                text = str(app.screen.query_one("#confirm-message").render())
+                self.assertIn("run-x", text)
+                self.assertIn("Nothing is left running", text)
+                self.assertIn("Ollama", text)
+        asyncio.run(_run())
+
+
 if __name__ == "__main__":
     unittest.main()

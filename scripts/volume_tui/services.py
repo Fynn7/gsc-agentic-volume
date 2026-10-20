@@ -8,8 +8,10 @@ Rules (never violated):
 - Auto-start is Local-loopback only. H200 endpoints are never started, probed
   intrusively, or guessed; a dead tunnel is reported with its fix.
 - Models are never downloaded (`ollama pull` stays a manual step).
-- Release is refused while any agent run or launcher is still active; owned
-  services stay up and the record is kept for a later session to adopt.
+- Leaving the TUI leaves nothing behind: the live agent run is stopped
+  cooperatively (evidence stays complete), whatever survives is killed, and
+  the services this TUI started are stopped with it. The "Stop owned services"
+  button alone refuses while a run is live (that run still needs them).
 - A stale record (previous TUI died) is adopted only after its heartbeat went
   stale; a fresh heartbeat means another live TUI owns them (contested).
 """
@@ -39,6 +41,10 @@ from run_lifecycle import process_alive
 SESSION_ID = secrets.token_hex(8)
 RECORD = ROOT / "runtime" / "tui" / "services.json"
 HEARTBEAT_TTL = 90.0
+
+# Result of the one shutdown this process performs; repeated calls (quit path
+# plus the safety net in main()) must not stop anything twice.
+_SHUTDOWN_REPORT: dict | None = None
 
 _CREATE_FLAGS = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0
 
@@ -133,6 +139,15 @@ def _block_interrupts() -> None:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     except (ValueError, OSError, AttributeError):
         pass
+
+
+def block_interrupts() -> None:
+    """Ignore SIGINT for the rest of the process (call from the main thread).
+
+    The shutdown must not be aborted half way: a second Ctrl+C would leave
+    the agent tree and the local Ollama running.
+    """
+    _block_interrupts()
 
 
 def _descendant_pids(root_pid: int) -> list[int]:
@@ -278,17 +293,26 @@ def _manifest_run_pids() -> list[tuple[int, tuple[str, ...]]]:
     return found
 
 
-def _terminate_agent_trees() -> dict:
-    """Kill this TUI's launcher/harness/MCP trees (agent first, never the TUI)."""
+def _terminate_agent_trees(descendants: list[int] | None = None) -> dict:
+    """Kill this TUI's launcher/harness/MCP trees (agent first, never the TUI).
+
+    `descendants` is the snapshot taken before the cooperative stop: children
+    whose parent dies first (the codex MCP server) would otherwise be orphaned
+    and survive the shutdown.
+    """
     report: dict = {"stopped": [], "failed": []}
+    mine = os.getpid()
+    if descendants is None:
+        descendants = _descendant_pids(mine)
+    else:
+        descendants = [pid for pid in descendants if pid != mine]
     try:
         import runner as runner_mod
         report["stopped"].extend("launcher pid %d" % pid for pid in runner_mod.stop_active())
     except Exception as error:  # noqa: BLE001 - shutdown must continue
         report["failed"].append("launcher: %s" % error)
-    mine = os.getpid()
     killed: set[int] = set()
-    for pid in _descendant_pids(mine):
+    for pid in descendants:
         if pid == mine:
             continue
         image = (_image_of_pid(pid) or "").lower()
@@ -296,6 +320,17 @@ def _terminate_agent_trees() -> dict:
             if _terminate(pid):
                 killed.add(pid)
                 report["stopped"].append("%s pid %d" % (image, pid))
+    # Anything from the snapshot that outlived its parent (MCP servers).
+    for pid in descendants:
+        if pid == mine or pid in killed:
+            continue
+        if not process_alive(pid):
+            continue
+        image = (_image_of_pid(pid) or "").lower()
+        if _terminate(pid):
+            report["stopped"].append("%s pid %d (left over)" % (image or "process", pid))
+        else:
+            report["failed"].append("%s pid %d (terminate failed)" % (image or "process", pid))
     seen: set[int] = set()
     for pid, images in _recorded_run_pids() + _manifest_run_pids():
         if pid in seen or pid in killed:
@@ -636,7 +671,7 @@ def _live_runs() -> list[str]:
         found = runs_mod.discover_runs(limit=50, _fresh=True)
     except Exception:
         return []
-    return [r.get("runId", "?") for r in found if r.get("status") == "Running"]
+    return [r.get("runId", "?") for r in found if runs_mod.is_live(r)]
 
 
 def _live_launchers() -> list[str]:
@@ -662,7 +697,7 @@ def _live_launchers() -> list[str]:
 def release_owned_services(force: bool = False) -> dict:
     """Stop exactly our own services; refuse while any agent/launcher is active.
 
-    `force=True` is used by the Ctrl+C path after the agent tree has already
+    `force=True` is used by the shutdown path after the agent tree has already
     been terminated: the "live run" gate is then meaningless (the evidence on
     disk still says Running) and must not keep Ollama loaded.
     """
@@ -673,13 +708,17 @@ def release_owned_services(force: bool = False) -> dict:
     if not force:
         blockers = _live_runs() + _live_launchers()
         if blockers:
-            report["kept"] = "activity still live (%s); owned services left running" % blockers[0]
+            report["kept"] = ("%s is still live and uses them — stop it first "
+                              "(Live: Stop run); owned services left running" % blockers[0])
             return report
     remaining = {}
     for kind, entry in record["services"].items():
         pid = entry.get("pid")
         if not (isinstance(pid, int) and process_alive(pid)):
-            continue  # already gone; drop silently
+            # Already gone (the agent-tree kill may have taken it with it).
+            if isinstance(pid, int):
+                report["stopped"].append("%s pid %d (already gone)" % (kind, pid))
+            continue
         if _image_of_pid(pid) != entry.get("image"):
             report["skipped"].append("%s pid %d (image no longer ours, left alone)" % (kind, pid))
             continue
@@ -692,40 +731,141 @@ def release_owned_services(force: bool = False) -> dict:
     return report
 
 
-def shutdown_all(settings: dict | None = None) -> dict:
-    """Ctrl+C hard stop: agent tree -> local Ollama -> TUI-owned services.
+def request_run_stops() -> list[str]:
+    """Ask every live run to stop cooperatively.
 
-    A second Ctrl+C cannot abort it (`SIGINT` is ignored for the rest of the
-    process). Evidence directories are only read, never deleted. Verification
-    of the Ollama stop is reported honestly instead of assumed.
+    The launcher polls `runtime/tui-control/<runId>.stop` and then records
+    `interrupted` + `failure.json`, so the evidence stays complete instead of
+    being cut in half by a kill. Returns the run ids that were asked to stop.
     """
+    import runner as runner_mod
+    requested: list[str] = []
+    try:
+        entries = runs_mod.discover_runs(limit=50, _fresh=True)
+    except Exception:
+        entries = []
+    for entry in entries:
+        if not runs_mod.is_live(entry):
+            continue
+        run_id = str(entry.get("runId") or "")
+        if not run_id:
+            continue
+        try:
+            runner_mod.request_stop(run_id)
+            requested.append(run_id)
+        except Exception:
+            continue
+    return requested
+
+
+def _wait_for_launchers(timeout: float = 6.0) -> list[str]:
+    """Wait for the launchers that were asked to stop to disappear."""
+    deadline = time.time() + timeout
+    while True:
+        remaining = _live_launchers()
+        if not remaining or time.time() >= deadline:
+            return remaining
+        time.sleep(0.25)
+
+def _owns_ollama() -> bool:
+    """True when this TUI started the local Ollama (it is in our record)."""
+    record = _read_record()
+    for entry in (record.get("services") or {}).values():
+        if isinstance(entry, dict) and str(entry.get("image", "")).lower().startswith("ollama"):
+            return True
+    return False
+
+
+def _inference_state(settings: dict | None = None, owned: bool = False) -> dict:
+    """Report (never kill) the local inference endpoint state."""
+    settings = settings or config_mod.load_settings()
+    report: dict = {"endpoint": None, "verified": None, "owned": bool(owned)}
+    if settings.get("mode") != "Local":
+        return report
+    endpoint = settings.get("endpoint", "")
+    if _loopback(endpoint) is None:
+        return report
+    report["endpoint"] = endpoint
+    report["verified"] = not _endpoint_up(endpoint)
+    return report
+
+
+def shutdown_all(settings: dict | None = None, hard: bool = False) -> dict:
+    """Leave no process behind: agent run -> local Ollama -> owned services.
+
+    The live runs are asked to stop first (cooperative stop, so the launcher
+    still records `interrupted`/`failure.json`); whatever survives that grace
+    period is killed, including children that outlived their parent. Then the
+    local Ollama and the services this TUI started are stopped.
+
+    `hard=True` (the Ctrl+C path) additionally kills every `ollama*` process,
+    including one that predates this TUI. The normal quit only stops what
+    this TUI started and reports anything foreign that stays alive.
+
+    The result is cached: the quit path and the safety net in `main()` must
+    not stop the same process twice.
+    """
+    global _SHUTDOWN_REPORT
+    if _SHUTDOWN_REPORT is not None:
+        return _SHUTDOWN_REPORT
     _block_interrupts()
     heartbeat_stop()
-    report: dict = {"agent": [], "stopped": [], "failed": [], "kept": [], "inference": {}}
-    agent = _terminate_agent_trees()
+    report: dict = {"agent": [], "stopped": [], "failed": [], "kept": [], "inference": {},
+                    "requested": [], "remaining": []}
+    # Snapshot the children before anything dies: a child whose parent is
+    # killed first (the codex MCP server) would otherwise be orphaned.
+    descendants = _descendant_pids(os.getpid())
+    report["requested"] = request_run_stops()
+    if report["requested"]:
+        # Give the launcher time to record the interrupted evidence.
+        report["remaining"] = _wait_for_launchers()
+    else:
+        report["remaining"] = _live_launchers()
+    agent = _terminate_agent_trees(descendants)
     report["agent"] = agent["stopped"]
     report["failed"].extend(agent["failed"])
-    inference = terminate_local_inference(settings)
-    report["inference"] = inference
-    report["stopped"].extend(inference["stopped"])
-    report["failed"].extend(inference["failed"])
+    owned_ollama = _owns_ollama()
+    if hard:
+        # Same order as the documented hard stop: inference first, then the
+        # remaining owned services.
+        inference = terminate_local_inference(settings)
+        report["inference"] = inference
+        report["stopped"].extend(inference.get("stopped", []))
+        report["failed"].extend(inference.get("failed", []))
     release = release_owned_services(force=True)
     report["stopped"].extend(release["stopped"])
     report["kept"].extend(release["skipped"])
+    if release.get("kept"):
+        report["kept"].append(release["kept"])
+    if not hard:
+        inference = _inference_state(settings, owned=owned_ollama)
+        report["inference"] = inference
+        if inference.get("endpoint") and not inference.get("verified") and not inference.get("owned"):
+            report["kept"].append("local Ollama at %s still runs (not started by this TUI, "
+                                  "left alone)" % inference["endpoint"])
+    _SHUTDOWN_REPORT = report
     return report
 
 
 def shutdown_lines(report: dict) -> list[str]:
     lines = []
+    for run_id in report.get("requested", []):
+        lines.append("[stop requested] run %s (the launcher records interrupted/failure.json)" % run_id)
     for stopped in report.get("stopped", []):
         lines.append("[stopped] %s" % stopped)
     for kept in report.get("kept", []):
         lines.append("[kept] %s" % kept)
     inference = report.get("inference") or {}
     if inference.get("endpoint"):
-        state = ("verified down" if inference.get("verified")
-                 else "STILL ANSWERING — check manually")
+        if inference.get("verified"):
+            state = "verified down"
+        elif inference.get("owned"):
+            state = "STILL ANSWERING — check manually"
+        else:
+            state = "still running (not started by this TUI)"
         lines.append("[inference] local Ollama at %s: %s" % (inference["endpoint"], state))
+    for remaining in report.get("remaining", []):
+        lines.append("[note] launcher was still alive after the stop request and was killed: %s" % remaining)
     for failed in report.get("failed", []):
         lines.append("[failed] %s" % failed)
     return lines

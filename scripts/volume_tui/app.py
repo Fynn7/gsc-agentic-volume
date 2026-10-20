@@ -176,6 +176,11 @@ class HelpScreen(ModalScreen if _TEXTUAL else object):
             "tui-settings.json. Ctrl+C is the hard stop (agent tree + local Ollama +\n"
             "owned services, confirmed).\n"
             "\n"
+            "LEAVING THE TUI leaves no process behind: the live agent run is stopped\n"
+            "(its evidence stays complete), the services this TUI started are\n"
+            "stopped with it, and anything that survives is killed. Ctrl+C does the\n"
+            "same and additionally stops a local Ollama that this TUI did not start.\n"
+            "\n"
             "Press Esc to close.",
             id="help-text",
         )
@@ -928,13 +933,59 @@ if _TEXTUAL:
                     event.prevent_default()
 
         def action_quit_confirm(self):
-            running = [r for r in self.runs if r.get("status") == "Running"]
-            if running:
+            """Quit: stop every process this TUI owns, then leave."""
+            live = self._live_run_ids()
+            if live:
                 self.push_screen(ConfirmScreen(
-                    "Run %s is still active. Quit TUI and detach (run keeps going)?" % running[0]["runId"],
-                    on_yes=lambda: self.exit(0)))
+                    "Quit the TUI and stop everything it owns?\n\n"
+                    "  - agent run(s): %s (launcher, harness, MCP children)\n"
+                    "  - the renderer service this TUI started\n"
+                    "  - the local Ollama this TUI started (model unloaded from VRAM)\n\n"
+                    "Nothing is left running. The run keeps its evidence on disk."
+                    % ", ".join(live),
+                    on_yes=self._quit_and_stop))
             else:
-                self.exit(0)
+                self._quit_and_stop()
+
+        def _live_run_ids(self) -> list[str]:
+            """Run ids that are still running (from the table and the Live tab)."""
+            ids = []
+            for entry in self.runs:
+                if runs_mod.is_live(entry) and entry.get("runId"):
+                    ids.append(str(entry["runId"]))
+            if self.live_run_id and self.live_run_id not in ids:
+                ids.append(str(self.live_run_id))
+            return ids
+
+        def _quit_and_stop(self) -> None:
+            """Leave no process behind, then exit.
+
+            The agent run is stopped cooperatively first (the launcher still
+            records interrupted/failure.json), everything that survives is
+            killed, and the services this TUI started are stopped with it.
+            """
+            self._busy_inc()
+            self._set_text("live-head", "Stopping the agent run, the local Ollama and the "
+                                        "services this TUI started…")
+            # The cleanup runs in a worker, so SIGINT is ignored up front (main
+            # thread) — a second Ctrl+C must not leave half the tree running.
+            try:
+                services_mod.block_interrupts()
+            except Exception:
+                pass
+
+            def _work():
+                try:
+                    services_mod.shutdown_all()
+                except Exception:
+                    pass
+                try:
+                    self.call_from_thread(self._busy_dec)
+                    self.call_from_thread(self.exit, 0)
+                except Exception:
+                    pass
+
+            self.run_worker(_work, thread=True)
 
         def _confirm_stop(self):
             if not self.live_run_id:
@@ -1546,31 +1597,40 @@ if _TEXTUAL:
             print("Service check done in %.1fs." % (_time.monotonic() - _svc_start))
         except Exception as error:
             print("Service auto-start skipped: %s" % error)
+        _install_termination_handlers()
         try:
             app = VolumeAgentApp()
             app.run()
             return 0
         except KeyboardInterrupt:
             print("\nInterrupted — stopping agent, local Ollama and owned services…")
+            return 130
+        finally:
+            # Every exit path (quit, Ctrl+C, crash, closed window) leaves no
+            # process behind: the agent tree, the local Ollama and the services
+            # this TUI started are stopped here.
             try:
-                report = services_mod.shutdown_all()
+                report = services_mod.shutdown_all(hard=True)
                 for line in services_mod.shutdown_lines(report):
                     print(line)
             except Exception as error:
                 print("Shutdown problem: %s" % error)
-            return 130
-        finally:
+
+    def _install_termination_handlers() -> None:
+        """Turn SIGTERM/SIGBREAK into SystemExit so the cleanup still runs."""
+        import signal as _signal
+
+        def _handler(signum, frame):  # noqa: ARG001 - signal handler
+            raise SystemExit(128 + int(signum))
+
+        for name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
+            number = getattr(_signal, name, None)
+            if number is None:
+                continue
             try:
-                services_mod.heartbeat_stop()
-                release = services_mod.release_owned_services()
-                for line in services_mod.release_lines(release):
-                    print(line)
-            except KeyboardInterrupt:
-                report = services_mod.shutdown_all()
-                for line in services_mod.shutdown_lines(report):
-                    print(line)
-            except Exception as error:
-                print("Service release skipped: %s" % error)
+                _signal.signal(number, _handler)
+            except (ValueError, OSError, AttributeError):
+                continue
 
 else:  # textual missing: importable stubs for unit tests
     class VolumeAgentApp:  # type: ignore

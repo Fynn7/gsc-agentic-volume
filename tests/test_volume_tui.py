@@ -4,9 +4,12 @@ Launcher `execute` is mocked; HTTP/verify paths use temp dirs and fixture runs.
 """
 import io
 import json
+import os
 import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -592,8 +595,11 @@ class SelfAcceptanceFixes(unittest.TestCase):
 
     def test_ctrl_c_shutdown_stops_agent_ollama_and_owned_services(self):
         import services as tui_services
-        with patch.object(tui_services, "_block_interrupts") as blocked, \
+        with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+             patch.object(tui_services, "_block_interrupts") as blocked, \
              patch.object(tui_services, "heartbeat_stop"), \
+             patch.object(tui_services, "request_run_stops", return_value=["run-x"]), \
+             patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
              patch.object(tui_services, "_terminate_agent_trees",
                           return_value={"stopped": ["codex.exe pid 9"], "failed": []}), \
              patch.object(tui_services, "terminate_local_inference",
@@ -601,11 +607,14 @@ class SelfAcceptanceFixes(unittest.TestCase):
                                         "endpoint": "http://127.0.0.1:11434", "verified": True}), \
              patch.object(tui_services, "release_owned_services",
                           return_value={"stopped": ["renderer pid 5"], "kept": None, "skipped": []}):
-            report = tui_services.shutdown_all({"mode": "Local"})
+            report = tui_services.shutdown_all({"mode": "Local"}, hard=True)
         blocked.assert_called_once()
         self.assertEqual(report["agent"], ["codex.exe pid 9"])
         self.assertEqual(report["stopped"], ["ollama.exe pid 7", "renderer pid 5"])
         self.assertEqual(report["failed"], [])
+        # The run was asked to stop first, so its evidence stays complete.
+        self.assertEqual(report["requested"], ["run-x"])
+        self.assertEqual(report["remaining"], [])
 
     def test_local_inference_kill_is_verified_and_spares_foreign_listener(self):
         import services as tui_services
@@ -666,6 +675,124 @@ class SelfAcceptanceFixes(unittest.TestCase):
             self.assertEqual(code, 2)
             text = out.getvalue().lower()
             self.assertTrue("terminal" in text or "interactive" in text or "textual" in text)
+
+
+class ShutdownLeavesNothingBehind(unittest.TestCase):
+    """Leaving the TUI must stop every process it owns."""
+
+    def test_cooperative_stop_is_requested_for_every_live_run(self):
+        import runner as runner_mod
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(runner_mod, "CONTROL_DIR", root), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-a", "status": "Running"},
+                                            {"runId": "run-b", "status": "Finished"}]):
+                requested = tui_services.request_run_stops()
+            self.assertEqual(requested, ["run-a"])
+            # The launcher polls this marker and records interrupted/failure.json.
+            self.assertTrue((root / "run-a.stop").is_file())
+
+    def test_shutdown_kills_children_that_outlived_their_parent(self):
+        import runner as runner_mod
+        import services as tui_services
+        killed = []
+        with patch.object(tui_services, "_image_of_pid",
+                          side_effect=lambda pid: {11: "python.exe", 12: "mcp.exe"}.get(pid)), \
+             patch.object(tui_services, "process_alive", return_value=True), \
+             patch.object(tui_services, "_terminate",
+                          side_effect=lambda pid: killed.append(pid) or True), \
+             patch.object(tui_services, "_recorded_run_pids", return_value=[]), \
+             patch.object(tui_services, "_manifest_run_pids", return_value=[]), \
+             patch.object(runner_mod, "stop_active", return_value=[]):
+            report = tui_services._terminate_agent_trees([11, 12])
+        self.assertEqual(sorted(killed), [11, 12])
+        # 12 is not one of the owned images, so it is only caught as a leftover.
+        self.assertTrue(any("left over" in line for line in report["stopped"]))
+
+    def test_shutdown_runs_once_and_reuses_the_report(self):
+        import services as tui_services
+        calls = []
+        with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+             patch.object(tui_services, "_block_interrupts"), \
+             patch.object(tui_services, "heartbeat_stop"), \
+             patch.object(tui_services, "request_run_stops", return_value=[]), \
+             patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
+             patch.object(tui_services, "_terminate_agent_trees",
+                          return_value={"stopped": [], "failed": []}), \
+             patch.object(tui_services, "_inference_state",
+                          return_value={"endpoint": None, "verified": None, "owned": False}), \
+             patch.object(tui_services, "release_owned_services",
+                          return_value={"stopped": ["renderer pid 5"], "kept": None, "skipped": []}), \
+             patch.object(tui_services, "_owns_ollama", return_value=False):
+            def _release(force=False):
+                calls.append(force)
+                return {"stopped": ["renderer pid 5"], "kept": None, "skipped": []}
+            with patch.object(tui_services, "release_owned_services", side_effect=_release):
+                first = tui_services.shutdown_all({"mode": "Local"})
+                second = tui_services.shutdown_all({"mode": "Local"}, hard=True)
+        self.assertIs(first, second)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0])
+
+    def test_release_refusal_names_the_run_that_needs_the_services(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "services.json").write_text(json.dumps(
+                {"owner": tui_services.SESSION_ID, "heartbeat": 9999999999.0,
+                 "services": {"ollama": {"pid": 31337, "image": "ollama.exe"}}}))
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-x", "status": "Running"}]):
+                rel = tui_services.release_owned_services()
+            self.assertIn("run-x", rel["kept"])
+            self.assertIn("Stop run", rel["kept"])
+
+
+@unittest.skipUnless(os.name == "nt", "process-tree kill is Windows specific")
+class ShutdownKillsRealProcesses(unittest.TestCase):
+    """The shutdown must really terminate the processes, not just report it."""
+
+    def _alive(self, pid):
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True)
+        return str(pid) in out.stdout
+
+    def test_launcher_children_and_owned_service_all_die(self):
+        import services as tui_services
+        python = sys.executable
+        launcher = subprocess.Popen([python, "-c", "import time; time.sleep(300)"])
+        child = subprocess.Popen([python, "-c", "import time; time.sleep(300)"])
+        renderer = subprocess.Popen([python, "-c", "import time; time.sleep(300)"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = root / "services.json"
+            record.write_text(json.dumps({
+                "owner": tui_services.SESSION_ID, "heartbeat": 1e9,
+                "services": {"renderer": {"pid": renderer.pid, "image": "python.exe"}}}),
+                encoding="utf-8")
+            with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+                 patch.object(tui_services, "RECORD", record), \
+                 patch.object(tui_services, "request_run_stops", return_value=[]), \
+                 patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
+                 patch.object(tui_services, "_inference_state",
+                              return_value={"endpoint": None, "verified": None, "owned": False}), \
+                 patch.object(tui_services, "_owns_ollama", return_value=False):
+                report = tui_services.shutdown_all({"mode": "Local"})
+        deadline = time.time() + 10
+        while time.time() < deadline and any(self._alive(pid) for pid in
+                                             (launcher.pid, child.pid, renderer.pid)):
+            time.sleep(0.2)
+        for pid in (launcher.pid, child.pid, renderer.pid):
+            self.assertFalse(self._alive(pid), "pid %d survived the shutdown" % pid)
+        self.assertTrue(any("renderer" in line for line in report["stopped"]))
+        for proc in (launcher, child, renderer):
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
 
 
 class TemporaryContextInstance(unittest.TestCase):

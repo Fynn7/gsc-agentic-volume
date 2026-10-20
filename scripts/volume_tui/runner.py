@@ -142,7 +142,7 @@ def request_stop(run_id: str) -> Path:
 
 
 def stop_notice() -> str:
-    return ("Esc/menu quit never kills the agent; the run keeps its evidence and can be "
-            "re-opened via History. Ctrl+C is the hard stop: the agent tree, local Ollama "
-            "(model unloaded) and TUI-owned services are terminated together. Kill a harness "
+    return ("Quitting the TUI stops the agent run, the local Ollama and the services this TUI "
+            "started: the run keeps its evidence and stays in the run list. Ctrl+C is the hard "
+            "stop: the same, plus a local Ollama that this TUI did not start. Kill a harness "
             "PID manually only after confirming manifest.json pid belongs to this run directory.")

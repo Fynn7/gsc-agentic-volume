@@ -121,6 +121,18 @@ def classify(run: dict, manifest: dict | None) -> str:
     return "Unknown"
 
 
+def is_live(entry: dict) -> bool:
+    """True while the run has not recorded an end.
+
+    `classify` guesses from process liveness; this asks the recorded state, so
+    a run whose launcher died but whose harness still runs is still live and
+    must be stopped (and keeps its services) instead of being ignored.
+    """
+    if str(entry.get("status") or "").lower() == "running":
+        return True
+    return str((entry.get("run") or {}).get("status") or "").lower() == "running"
+
+
 def latest_for_base(base: str) -> Path | None:
     candidate = Path(base) / "LATEST.txt" if not Path(base).is_absolute() else Path(base) / "LATEST.txt"
     anchor = (ROOT / candidate) if not candidate.is_absolute() else candidate

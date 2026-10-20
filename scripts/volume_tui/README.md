@@ -186,10 +186,15 @@ Task A run: Live/Stop/Verify/Compare/Volumes/Services/Settings.
 
 ### CI
 
-`.github/workflows/tests.yml` runs exactly the two commands above on every push
-to `dev`/`main` and on every pull request: a Windows runner (the TUI, the
-launcher and the C++ raycaster are Windows-only), Python 3.12, the pinned
-dependencies from `scripts/volume_tui/requirements.txt` (textual) and
-`scripts/volume_context/requirements.txt` (NumPy/Pillow). The one test that
-needs the compiled `Raycaster.exe` skips when it is not built, so a fresh
-checkout is green without the C++ toolchain.
+`.github/workflows/tests.yml` runs the same two commands above on every push
+and on every pull request — with the runner's Python, because the TUI venv
+cannot exist on a fresh checkout. Windows runner (the TUI, the launcher and
+the C++ raycaster are Windows-only), Python 3.12, the pinned dependencies from
+`scripts/volume_tui/requirements.txt` (textual) and
+`scripts/volume_context/requirements.txt` (NumPy/Pillow), pip cache on the
+requirement files, 15-minute timeout.
+
+The scene validation hashes the compiled `Raycaster.exe`; without the C++
+toolchain the test points that hash at a stub file, so the validation stays
+covered. Building the raycaster itself remains a local step
+(`scripts/build-raycaster.ps1`, Visual Studio Build Tools 2026).

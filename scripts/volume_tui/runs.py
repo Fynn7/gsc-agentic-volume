@@ -121,6 +121,18 @@ def classify(run: dict, manifest: dict | None) -> str:
     return "Unknown"
 
 
+def is_live(entry: dict) -> bool:
+    """True while the run has not recorded an end.
+
+    `classify` guesses from process liveness; this asks the recorded state, so
+    a run whose launcher died but whose harness still runs is still live and
+    must be stopped (and keeps its services) instead of being ignored.
+    """
+    if str(entry.get("status") or "").lower() == "running":
+        return True
+    return str((entry.get("run") or {}).get("status") or "").lower() == "running"
+
+
 def latest_for_base(base: str) -> Path | None:
     candidate = Path(base) / "LATEST.txt" if not Path(base).is_absolute() else Path(base) / "LATEST.txt"
     anchor = (ROOT / candidate) if not candidate.is_absolute() else candidate
@@ -161,7 +173,7 @@ def run_verify(run_dir: str, python: str | None = None) -> dict:
 def verify_summary(report: dict | None) -> list[str]:
     """Honest three-way split: execution / transport / visual-quality."""
     if not report:
-        return ["No verification.json yet — run Verify (read-only check, no model call)."]
+        return ["No verification.json yet — press Verify evidence (read-only check, no model call)."]
     lines = []
     lines.append("state=%s actualFrames=%s agentRenders=%s" % (
         report.get("state"), report.get("actualFrames"), report.get("agentRenders")))
@@ -175,3 +187,190 @@ def verify_summary(report: dict | None) -> list[str]:
     if final.get("image"):
         lines.append("final rev=%s %s" % (final.get("revision"), final.get("image")))
     return lines
+
+
+def find_run(run_id: str, _fresh: bool = True) -> dict | None:
+    """Lookup one run by runId (read-only)."""
+    for entry in discover_runs(_fresh=_fresh):
+        if entry.get("runId") == run_id:
+            return entry
+    return None
+
+
+def run_config_text(run_dir: str | Path) -> str:
+    """Pretty config.json for diff/detail views; empty when unreadable."""
+    try:
+        data = _read_json(Path(run_dir) / "config.json")
+    except OSError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
+def task_text_of(run_dir: str | Path) -> str:
+    try:
+        data = _read_json(Path(run_dir) / "config.json") or {}
+    except OSError:
+        return ""
+    task = data.get("task")
+    return task if isinstance(task, str) else ""
+
+
+def config_diff(left_dir: str | Path, right_dir: str | Path) -> list[str]:
+    """Unified diff of the two runs' config.json (read-only, no model call)."""
+    import difflib
+    left = run_config_text(left_dir).splitlines()
+    right = run_config_text(right_dir).splitlines()
+    if not left and not right:
+        return ["No config.json in either run."]
+    diff = list(difflib.unified_diff(left, right, fromfile="left config.json",
+                                     tofile="right config.json", lineterm=""))
+    return diff or ["Configs are identical."]
+
+
+def final_image_of(entry: dict) -> str | None:
+    """Best final PNG path: verification final, else newest frame PNG under runtime/<session>."""
+    verification = entry.get("verification") or {}
+    final = verification.get("final") if isinstance(verification, dict) else None
+    if isinstance(final, dict) and final.get("image"):
+        return str(final["image"])
+    session_id = entry.get("sessionId")
+    if session_id:
+        try:
+            candidates = sorted((ROOT / "runtime" / str(session_id)).rglob("*.png"))
+            if candidates:
+                return str(candidates[-1])
+        except OSError:
+            pass
+    # Fallback inside the run dir itself.
+    try:
+        candidates = sorted(Path(str(entry.get("directory", ""))).rglob("frame-*/image.png"))
+        if candidates:
+            return str(candidates[-1])
+    except OSError:
+        pass
+    return None
+
+
+def frame_images(run_dir: str | Path, limit: int = 60) -> list[dict]:
+    """Proven frame PNGs from session.json events (rev + path, newest last)."""
+    try:
+        data = _read_json(Path(run_dir) / "session.json") or {}
+    except OSError:
+        return []
+    events = data.get("events")
+    if not isinstance(events, list):
+        return []
+    out: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("kind") not in ("initial_render", "render"):
+            continue
+        result = event.get("result") or {}
+        image = result.get("image")
+        scene = result.get("scene") or {}
+        if image:
+            out.append({"revision": scene.get("revision"), "image": str(image),
+                        "nonblack": result.get("nonblackPixels")})
+    return out[-limit:] if limit else out
+
+
+def summary_numbers(entry: dict) -> dict:
+    """Compact numbers for dashboard/compare (status/frames/seconds/model/volume)."""
+    manifest = entry.get("manifest") or {}
+    run = entry.get("run") or {}
+    verification = entry.get("verification") or {}
+    seconds = manifest.get("seconds") or manifest.get("totalSeconds")
+    return {
+        "runId": entry.get("runId", "?"),
+        "status": entry.get("status", "Unknown"),
+        "model": entry.get("model", "?"),
+        "frames": entry.get("frames"),
+        "seconds": seconds,
+        "exitCode": manifest.get("exitCode"),
+        "task": entry.get("task", "?"),
+        "actualFrames": (verification or {}).get("actualFrames"),
+        "agentRenders": (verification or {}).get("agentRenders"),
+        "volume": ((_read_json(Path(str(entry.get("directory", ""))) / "config.json") or {}).get("volumePath", "?")),
+    }
+
+
+# Keys that carry base64 image bytes in the recorded logs. The copied JSON
+# replaces them with a size note: image bytes never belong in a clipboard
+# paste, and the run log stays readable.
+_IMAGE_BLOB_KEYS = ("data", "image_url", "b64_json", "imageData", "image_base64")
+_BLOB_MIN_CHARS = 512
+
+
+def _strip_image_blobs(value, key=None):
+    """Replace base64 image payloads with a size note (never copied raw)."""
+    if isinstance(value, dict):
+        return {k: _strip_image_blobs(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_image_blobs(v, key) for v in value]
+    if isinstance(value, str) and key in _IMAGE_BLOB_KEYS and len(value) > _BLOB_MIN_CHARS:
+        return "<%d base64 image bytes omitted>" % len(value)
+    return value
+
+
+def _jsonl_records(path: Path) -> tuple[list, list]:
+    """Parse a .jsonl log into records; broken lines are reported, not hidden."""
+    records: list = []
+    problems: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return records, [str(error)]
+    for number, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            problems.append("line %d is not valid JSON" % number)
+    return records, problems
+
+
+def run_json_log(run_dir: str | Path, events=None) -> dict:
+    """The whole run as one JSON document (read-only).
+
+    The document holds the run's meta data, the complete event log and every
+    JSON log file of the run directory (parsed, so the copy is valid JSON
+    and not a wall of text). Base64 image payloads become a size note and
+    every file that could not be read is listed under "skipped" — nothing
+    disappears silently.
+    """
+    import time as _time
+
+    directory = Path(run_dir)
+    run = _read_json(directory / "run.json") or {}
+    document = {
+        "runId": run.get("runId", directory.name),
+        "runDir": str(directory),
+        "copiedAt": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "status": run.get("status"),
+        "events": list(events or []),
+        "files": {},
+        "skipped": [],
+    }
+    sources = sorted(directory.glob("*.json")) + sorted(directory.glob("*.jsonl"))
+    http = directory / "http"
+    if http.is_dir():
+        sources += sorted(http.glob("*.metadata.json"))
+    for path in sources:
+        name = path.name if path.parent == directory else "http/%s" % path.name
+        try:
+            if path.suffix == ".jsonl":
+                records, problems = _jsonl_records(path)
+                document["files"][name] = _strip_image_blobs(records)
+                for problem in problems:
+                    document["skipped"].append({"name": name, "reason": problem})
+            else:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                document["files"][name] = _strip_image_blobs(data)
+        except (OSError, ValueError) as error:
+            document["skipped"].append({"name": name, "reason": str(error)})
+    return document

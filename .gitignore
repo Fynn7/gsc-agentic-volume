@@ -15,6 +15,9 @@ VirtualSampling/Raycaster/Datasets/
 VirtualSampling/Raycaster/VS/*.dat
 VirtualSampling/Raycaster/VS/*.lz4
 
+# Local volume payloads live in the fixed scan folder (not committed).
+/volumes/
+
 
 # Local freeze evidence contains private experimental screenshots and records.
 /audit/

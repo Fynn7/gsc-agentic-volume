@@ -92,8 +92,15 @@ class EventTail:
         self._seen_metadata: set[str] = set()
         self._seen_seq: set = set()
         self._session_offset = 0
+        self._session_mtime: float = 0.0
+        self._session_size: int = -1
         self._turn = 0
         self.counters = {"images": 0, "tools": 0, "http": 0}
+
+    @staticmethod
+    def _now() -> float:
+        import time as _time
+        return _time.time()
 
     def _lines(self, key: str, path: Path):
         state = self._files.setdefault(key, {"path": None, "offset": 0, "buffer": ""})
@@ -136,31 +143,32 @@ class EventTail:
                 record = json.loads(line)
             except ValueError:
                 continue  # partial/corrupt line skipped, same as agent_console
+            stamp = self._now()
             kind = record.get("type")
             if kind == "turn.started":
                 self._turn += 1
                 out.append({"cat": "MODEL", "title": "MODEL #%d  Running" % self._turn,
-                            "detail": "turn started"})
+                            "detail": "turn started", "ts": stamp})
             elif kind == "turn.completed":
                 usage = record.get("usage") or {}
                 if self._turn > 0:
                     out.append({"cat": "MODEL", "title": "MODEL #%d  Done" % self._turn,
                             "detail": "input=%s cached=%s output=%s" % (
                                 usage.get("input_tokens"), usage.get("cached_input_tokens"),
-                                usage.get("output_tokens"))})
+                                usage.get("output_tokens")), "ts": stamp})
                 else:
                     out.append({"cat": "MODEL", "title": "MODEL  Done (turn count unknown)",
                             "detail": "input=%s cached=%s output=%s" % (
                                 usage.get("input_tokens"), usage.get("cached_input_tokens"),
-                                usage.get("output_tokens"))})
+                                usage.get("output_tokens")), "ts": stamp})
             elif kind == "item.completed":
                 item = record.get("item") or {}
                 if item.get("type") == "agent_message":
                     out.append({"cat": "MODEL", "title": "MODEL  message",
-                                "detail": console_mod._brief(item.get("text", ""), 500)})
+                                "detail": console_mod._brief(item.get("text", ""), 500), "ts": stamp})
                 elif item.get("type") == "error":
                     out.append({"cat": "ERROR", "title": "WARN  harness",
-                                "detail": console_mod._brief(item.get("message", ""), 320)})
+                                "detail": console_mod._brief(item.get("message", ""), 320), "ts": stamp})
         return out
 
     # -- run_dir/session.json (embedded events array; always in the run dir) --
@@ -174,10 +182,21 @@ class EventTail:
         gaps by sequence number.
         """
         out = []
+        path = self.run_dir / "session.json"
         try:
-            data = json.loads((self.run_dir / "session.json").read_text(encoding="utf-8"))
+            stat = path.stat()
+        except OSError:
+            return out
+        # mtime/size gate: a live session.json is rewritten wholesale on every
+        # event, so skip the full JSON parse when nothing changed.
+        if stat.st_mtime == self._session_mtime and stat.st_size == self._session_size:
+            return out
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return out
+        self._session_mtime = stat.st_mtime
+        self._session_size = stat.st_size
         events = data.get("events")
         if not isinstance(events, list):
             return out
@@ -200,6 +219,8 @@ class EventTail:
 
     def _service_record(self, record: dict) -> dict | None:
         """One service event (shared by session.json and events.jsonl tails)."""
+        import time as _time
+        stamp = _time.time()
         kind = record.get("kind")
         if kind in ("initial_render", "render", "slice"):
             result = record.get("result") or {}
@@ -211,29 +232,37 @@ class EventTail:
             return {"cat": "IMAGE", "title": "IMAGE %s  Native PNG saved" % label,
                     "detail": "rev=%s nonblack=%s\n%s" % (
                         rev, result.get("nonblackPixels"), image),
-                    "image": image, "revision": rev}
+                    "image": image, "revision": rev, "ts": stamp,
+                    "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "external_tool_call":
             self.counters["tools"] += 1
             return {"cat": "TOOL", "title": "TOOL  %s  Started" % record.get("name"),
-                    "detail": console_mod._brief(record.get("arguments", {}), 240)}
+                    "detail": console_mod._brief(record.get("arguments", {}), 240),
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
+                    "name": record.get("name"), "arguments": record.get("arguments")}
         elif kind == "external_tool_return":
             try:
                 seconds = " %.2fs" % float(record["seconds"])
             except (KeyError, TypeError, ValueError):
                 seconds = ""
             return {"cat": "TOOL", "title": "TOOL  %s  Success (%s)" % (record.get("name"), seconds.strip() or "?"),
-                    "detail": ""}
+                    "detail": "", "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
+                    "name": record.get("name"), "seconds": record.get("seconds")}
         elif kind == "tool_error":
             return {"cat": "ERROR", "title": "TOOL  %s  Failed" % record.get("name"),
-                    "detail": console_mod._brief(record.get("message", ""), 300)}
+                    "detail": console_mod._brief(record.get("message", ""), 300),
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
+                    "name": record.get("name")}
         elif kind == "finish":
             return {"cat": "FINISH", "title": "FINISH  selected revision %s" % record.get("selectedRevision"),
                     "detail": "verification=%s claim: %s" % (
                         record.get("externalTaskVerification"),
-                        console_mod._brief(record.get("modelClaim", ""), 400))}
+                        console_mod._brief(record.get("modelClaim", ""), 400)),
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "error":
             return {"cat": "ERROR", "title": "ERROR",
-                    "detail": console_mod._brief(record.get("message", ""), 300)}
+                    "detail": console_mod._brief(record.get("message", ""), 300),
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         return None
 
     # -- runtime/<session>/events.jsonl (tools + images) ------------------
@@ -268,7 +297,7 @@ class EventTail:
             self._seen_request.add(path.name)
             index = _http_index(path)
             out.append({"cat": "INFER", "title": "INFER  call #%d  Sent to model" % index,
-                        "detail": _request_summary(self.run_dir, index)})
+                        "detail": _request_summary(self.run_dir, index), "ts": self._now()})
         for path in sorted(directory.glob("http-*.metadata.json"), key=_http_index):
             if path.name in self._seen_metadata:
                 continue
@@ -278,16 +307,18 @@ class EventTail:
             except (OSError, ValueError):
                 continue
             self.counters["http"] += 1
+            stamp = self._now()
             if meta.get("error") or (isinstance(meta.get("status"), int) and meta.get("status") >= 400):
                 out.append({"cat": "ERROR", "title": "INFER  call #%s  FAILED" % meta.get("index"),
                             "detail": "%s %s status=%s %s" % (meta.get("method"), meta.get("path"),
-                                                             meta.get("status"), meta.get("error", ""))})
+                                                             meta.get("status"), meta.get("error", "")),
+                            "ts": stamp})
             else:
                 seconds = meta.get("seconds")
                 out.append({"cat": "INFER", "title": "INFER  call #%s  %s in %ss" % (
                     meta.get("index"), meta.get("status"),
                     ("%.2f" % seconds) if seconds is not None else "?"),
-                    "detail": "%s %s" % (meta.get("method"), meta.get("path"))})
+                    "detail": "%s %s" % (meta.get("method"), meta.get("path")), "ts": stamp})
         return out
 
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -28,6 +29,15 @@ from run_lifecycle import (ConfigError, ReservationError, RunConflictError, RunL
 
 # One lock per logical task, shared by independent launcher processes.
 LOCK_DIRECTORY = ROOT / 'runtime' / 'locks'
+CONTROL_DIRECTORY = ROOT / 'runtime' / 'tui-control'
+
+
+def stop_requested(run_id):
+    """Cooperative stop flag written by the TUI Stop button (read-only evidence otherwise)."""
+    try:
+        return (CONTROL_DIRECTORY / ('%s.stop' % run_id)).is_file()
+    except OSError:
+        return False
 PROVENANCE_SOURCES = [ROOT / 'src/app.py', ROOT / 'src/renderer.py', ROOT / 'src/volume.py',
                       ROOT / 'src/external_tools.py', ROOT / 'scripts/renderer_mcp.py',
                       ROOT / 'scripts/run_local_agent.py', ROOT / 'scripts/run_lifecycle.py']
@@ -35,6 +45,33 @@ PROVENANCE_SOURCES = [ROOT / 'src/app.py', ROOT / 'src/renderer.py', ROOT / 'src
 
 def write_json(path, data):
     path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+
+
+def stop_harness(process):
+    """Kill the harness and every child it spawned (Ctrl+C / timeout).
+
+    Uses `/T` so codex's MCP server children die too; a follow-up Ctrl+C must
+    not abort the kill, so SIGINT is ignored for the rest of this process.
+    """
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/pid', str(process.pid), '/T', '/F'],
+                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            process.terminate()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def http(base, path, body=None, timeout=120):
@@ -246,22 +283,47 @@ def execute(context, show_images=False, open_images=False):
         for key, value in overrides.items(): command += ['-c', key + '=' + json.dumps(value)]
     else: raise ValueError('Only the validated Codex route is implemented; alternate harnesses require a real compatibility diagnosis')
     manifest = {'harness':harness,'command':command,'runStarted':run_started,'started':time.time(),'sessionId':session['id'],'rendererService':identity,'taskSuccess':'unverified','protocolTranslation':False,'runId':context.run_id,'resultDirectory':str(directory),'resultBase':context.record['resultBase'],'configSource':str(context.source),'configSha256':context.record['configSha256'],'mode':'new-experiment','inferenceOverrides':{k:config.get(k) for k in ['temperature','think','maxOutputTokens']}}
-    manifest['harnessVersion']=subprocess.check_output([executable,'--version'],env=env,text=True,creationflags=subprocess.CREATE_NO_WINDOW).strip()
+    manifest['harnessVersion']=subprocess.check_output([executable,'--version'],env=env,text=True,creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0).strip()
     manifest['sourceHashes']={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in PROVENANCE_SOURCES}
     write_json(directory/'manifest.json', manifest)
     trace.start()
     try:
         with (directory/'harness.jsonl').open('wb') as stdout, (directory/'harness-stderr.log').open('wb') as stderr:
-            process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW)
+            process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             manifest['pid']=process.pid
             context.lock.update(harnessPid=process.pid, phase='harness-running')
-            try: manifest['exitCode']=process.wait(timeout=config['taskTimeoutSeconds'])
-            except subprocess.TimeoutExpired:
-                manifest['timedOut']=True
-                subprocess.run(['taskkill','/pid',str(process.pid),'/T','/F'],capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
-                process.wait(); manifest['exitCode']=process.returncode
+            # Cooperative stop: the TUI Stop button writes runtime/tui-control/<runId>.stop.
+            # Poll in short slices so a stop request terminates the harness tree and still
+            # flows through the normal interrupted/failure.json path. No stop file means
+            # the legacy timeout/KeyboardInterrupt behavior is unchanged.
+            try:
+                deadline = time.time() + float(config['taskTimeoutSeconds'])
+                while True:
+                    try:
+                        manifest['exitCode']=process.wait(timeout=0.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if stop_requested(context.run_id):
+                            manifest['interrupted']=True
+                            manifest['stopReason']='tui-stop-request'
+                            stop_harness(process)
+                            manifest['exitCode']=process.returncode
+                            raise KeyboardInterrupt('stop requested via runtime/tui-control/%s.stop' % context.run_id)
+                        if time.time() >= deadline:
+                            manifest['timedOut']=True
+                            stop_harness(process)
+                            manifest['exitCode']=process.returncode
+                            break
+            except KeyboardInterrupt:
+                # Cooperative TUI stop already recorded above; hard Ctrl+C lands here too.
+                if not manifest.get('interrupted'):
+                    manifest['interrupted']=True
+                    stop_harness(process)
+                    manifest['exitCode']=process.returncode
+                raise
     finally:
         stop.set(); telemetry.join(10); server.shutdown(); server.server_close()
+        interrupted=bool(manifest.get('interrupted'))
         manifest.update(ended=time.time(),httpRequests=recorder.count)
         manifest['seconds']=manifest['ended']-manifest['started']
         manifest['totalSeconds']=manifest['ended']-manifest['runStarted']
@@ -273,8 +335,13 @@ def execute(context, show_images=False, open_images=False):
         trace.stop()
         trace.poll_once()
         trace.summary(manifest)
-        context.record.update(status='finished', ended=manifest['ended'], exitCode=manifest.get('exitCode'),
+        context.record.update(status='failed' if interrupted else 'finished', ended=manifest['ended'], exitCode=manifest.get('exitCode'),
                               timedOut=bool(manifest.get('timedOut')), sessionId=session['id'])
+        if interrupted:
+            context.record['interrupted']=True
+            context.record['error']='interrupted by Ctrl+C; harness and its child processes were terminated'
+            write_json(directory/'failure.json', {'status':'interrupted','stage':'run','time':time.time(),
+                                                  'error':context.record['error'],'taskSuccess':'unverified'})
         write_json(directory/'run.json', context.record)
     return exit_code_from_manifest(manifest)
 
@@ -339,6 +406,9 @@ def main(argv=None):
                       'directory': str(context.directory), 'configSource': str(context.source)}), flush=True)
     try:
         return execute(context, show_images=args.show_images, open_images=args.open_images)
+    except KeyboardInterrupt:
+        # execute() already killed the harness tree and recorded the interruption.
+        return 130
     except Exception as error:
         failure = mark_failed(context, error)
         report_failure('run', error, args.debug, response=failure.get('response'), directory=context.directory)

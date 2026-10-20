@@ -4,8 +4,12 @@ Launcher `execute` is mocked; HTTP/verify paths use temp dirs and fixture runs.
 """
 import io
 import json
+import os
+import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -54,10 +58,132 @@ class TaskConfig(unittest.TestCase):
                 settings = tui_config.load_settings()
                 self.assertEqual(settings["model"], "qwen3.6:35b")
                 settings["mode"] = "H200"
+                settings["volumePath"] = str(target.parent / "chosen.dat")
                 tui_config.save_settings(settings)
                 reloaded = tui_config.load_settings()
                 self.assertEqual(reloaded["mode"], "H200")
+                self.assertEqual(reloaded["volumePath"], settings["volumePath"])
                 self.assertEqual(tui_config.active_endpoint(reloaded), reloaded["h200Endpoint"])
+
+    def test_selected_volume_drives_new_configs_with_gate_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gate = root / "gate" / "render.dat"
+            gate.parent.mkdir()
+            gate.write_text("ObjectFileName: render.raw\nResolution: 4 4 4\n")
+            chosen = root / "chosen.dat"
+            chosen.write_text("ObjectFileName: chosen.raw\nResolution: 8 8 8\n")
+            with patch.object(tui_config, "GATE_VOLUME", gate):
+                settings = dict(tui_config.DEFAULTS, volumePath=str(chosen))
+                built = tui_config.build_effective_config("task-a", "", settings)
+                self.assertEqual(Path(built["volumePath"]), chosen.resolve())
+                settings["volumePath"] = ""
+                built = tui_config.build_effective_config("task-a", "", settings)
+                self.assertEqual(Path(built["volumePath"]), gate.resolve())
+
+
+class VolumeDiscovery(unittest.TestCase):
+    def _tree(self, root: Path):
+        runtime = root / "runtime"
+        gate = runtime / "gate-volume" / "render.dat"
+        gate.parent.mkdir(parents=True)
+        gate.write_text("ObjectFileName: render.raw\nResolution: 4 5 6\nFormat: uchar\n")
+        (gate.parent / "volume.json").write_text(json.dumps(
+            {"dimensions": [4, 5, 6], "volumeHash": "same"}))
+
+        # Fixed scan root: only this folder is discovered.
+        volumes = root / "volumes"
+        copied = volumes / "session-1" / "volume"
+        copied.mkdir(parents=True)
+        (copied / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 4 5 6\n")
+        (copied / "volume.json").write_text(json.dumps(
+            {"dimensions": [4, 5, 6], "volumeHash": "same"}))
+
+        duplicate = volumes / "session-2" / "volume"
+        duplicate.mkdir(parents=True)
+        (duplicate / "render.dat").write_text("ObjectFileName: render.raw\nResolution: 4 5 6\n")
+        (duplicate / "volume.json").write_text(json.dumps(
+            {"dimensions": [4, 5, 6], "volumeHash": "same"}))
+
+        sample = volumes / "sample.nhdr"
+        sample.write_text("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 8 9 10\n")
+        compressed = volumes / "compressed.dat"
+        compressed.write_text("ObjectFileName: x.lz4\nResolution: 2 2 2\nCompression: lz4\n")
+
+        # TU Wien binary DAT (6-byte header, no sibling volume.json).
+        binary = volumes / "present246x246x221.dat"
+        binary.write_bytes(struct.pack("<3H", 246, 246, 221) + b"\x00" * 16)
+
+        # Outside the fixed folder: must not be discovered any more.
+        outside = root / "experiments" / "sample.nhdr"
+        outside.parent.mkdir()
+        outside.write_text("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 1 2 3\n")
+        prior = runtime / "run-3" / "volume" / "render.dat"
+        prior.parent.mkdir(parents=True)
+        prior.write_text("ObjectFileName: header.raw\nResolution: 9 9 9\n")
+        (prior.parent / "volume.json").write_text(json.dumps(
+            {"dimensions": [9, 9, 9], "volumeHash": "prior"}))
+        prior_config = runtime / "run-3"
+        (prior_config / "config.json").write_text(json.dumps({"volumePath": str(prior)}))
+        return runtime, gate, volumes, duplicate / "render.dat", sample, compressed, binary, outside, prior
+
+    def _scan(self, root, runtime, gate, volumes, selected=None):
+        import volumes as tui_volumes
+        with patch.object(tui_volumes, "ROOT", root), \
+             patch.object(tui_volumes, "RUNTIME", runtime), \
+             patch.object(tui_volumes, "GATE", gate), \
+             patch.object(tui_volumes, "VOLUME_DIR", volumes):
+            return tui_volumes.discover_volumes(selected)
+
+    def test_scan_reads_only_the_volume_folder_and_collapses_identical_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, gate, volumes, duplicate, sample, compressed, binary, outside, prior = self._tree(root)
+            found = self._scan(root, runtime, gate, volumes, gate)
+            paths = [Path(item["path"]) for item in found]
+            self.assertEqual(paths[0], gate.resolve())
+            self.assertTrue(found[0]["default"])
+            self.assertEqual(len([item for item in found if item["hash"] == "same"]), 1)
+            self.assertEqual(found[[item["hash"] for item in found].index("same")]["copies"], 3)
+            self.assertNotIn(duplicate.resolve(), paths)  # identical payload collapses into the gate row
+            self.assertNotIn((volumes / "session-1" / "volume" / "render.dat").resolve(), paths)
+            self.assertIn(sample.resolve(), paths)
+            self.assertNotIn(compressed.resolve(), paths)
+            self.assertNotIn(outside.resolve(), paths)
+            self.assertNotIn(prior.resolve(), paths)
+            nhdr = next(item for item in found if Path(item["path"]) == sample.resolve())
+            self.assertEqual(nhdr["dimensions"], [8, 9, 10])
+            binary_item = next(item for item in found if Path(item["path"]) == binary.resolve())
+            self.assertEqual(binary_item["dimensions"], [246, 246, 221])
+
+    def test_selection_is_listed_first_and_unsupported_is_explained(self):
+        import volumes as tui_volumes
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime, gate, volumes, duplicate, sample, compressed, binary, outside, prior = self._tree(root)
+            found = self._scan(root, runtime, gate, volumes, duplicate)
+            self.assertEqual(Path(found[0]["path"]), duplicate.resolve())
+            self.assertIn("8x9x10", tui_volumes.option_text(
+                next(item for item in found if Path(item["path"]) == sample.resolve())))
+            facts = tui_volumes.describe(compressed)
+            self.assertFalse(facts["ok"])
+            self.assertIn("lz4", facts["detail"])
+
+    def test_preflight_checks_the_selected_volume(self):
+        import env as tui_env
+        with tempfile.TemporaryDirectory() as tmp:
+            chosen = Path(tmp) / "chosen.dat"
+            chosen.write_text("ObjectFileName: chosen.raw\nResolution: 4 4 4\n")
+            settings = {"mode": "Local", "endpoint": "http://127.0.0.1:1",
+                        "h200Endpoint": "http://127.0.0.1:2",
+                        "rendererService": "http://127.0.0.1:3",
+                        "model": "qwen3.6:35b", "volumePath": str(chosen)}
+            with patch.object(tui_config, "GATE_VOLUME", Path(tmp) / "missing.dat"), \
+                 patch.object(tui_env, "_http_json", side_effect=OSError("refused")):
+                items = tui_env.check_environment(settings)["items"]
+            volume = next(item for item in items if item["name"] == "Volume")
+            self.assertTrue(volume["ok"])
+            self.assertEqual(Path(volume["detail"]), chosen.resolve())
 
 
 class LifecycleDelegation(unittest.TestCase):
@@ -90,6 +216,22 @@ class LifecycleDelegation(unittest.TestCase):
         self.assertIn("run_local_agent.py", source)
         self.assertNotIn("reserve_directory", source)
         self.assertNotIn("RunLock", source)
+
+    def test_harness_kill_uses_tree_flag_and_survives_second_ctrl_c(self):
+        process = unittest.mock.MagicMock(pid=4321)
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return unittest.mock.MagicMock(returncode=0)
+
+        with patch.object(launcher.subprocess, "run", side_effect=fake_run), \
+             patch.object(launcher.signal, "signal") as install:
+            launcher.stop_harness(process)
+        install.assert_called_once()
+        self.assertIn("/T", calls[0])
+        self.assertIn("/F", calls[0])
+        process.wait.assert_called_once()
 
 
 class TraceEvents(unittest.TestCase):
@@ -137,8 +279,6 @@ class TraceEvents(unittest.TestCase):
             self.assertEqual([e["cat"] for e in tail.poll()], [])
 
     def test_infer_event_shows_request_summary_not_filler(self):
-        import ui as tui_ui
-        import inspect
         with tempfile.TemporaryDirectory() as tmp:
             run_dir, session_dir = self._fixture_run(Path(tmp))
             (run_dir / "http" / "http-001.forwarded.bin").write_text(json.dumps({
@@ -164,7 +304,6 @@ class TraceEvents(unittest.TestCase):
             self.assertIn("1 image(s)", detail)
             self.assertNotIn("AAAA", detail)
             self.assertNotIn("fake", detail)
-        self.assertNotIn("fake", inspect.getsource(tui_ui._live_view))
 
     def test_session_json_events_need_no_session_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,30 +447,26 @@ class SelfAcceptanceFixes(unittest.TestCase):
         self.assertIn("turn count unknown", out[0]["title"])
         self.assertNotIn("#0", out[0]["title"])
 
-    def test_keyboard_interrupt_exits_cleanly_without_traceback(self):
-        import ui as tui_ui
-        with patch.object(tui_ui, "_main", side_effect=KeyboardInterrupt):
-            self.assertEqual(tui_ui.main(), 130)
-
     def test_service_gate_blocks_only_on_down_services(self):
-        import ui as tui_ui
+        import flows as tui_flows
+        import env as tui_env
         down = {"items": [{"name": "Inference http://127.0.0.1:11434", "ok": False, "detail": "refused", "fix": "start ollama"},
                           {"name": "Renderer http://127.0.0.1:8765", "ok": True}]}
-        with patch.object(tui_ui.env_mod, "check_environment", return_value=down):
-            problems = tui_ui._service_gate({})
+        with patch.object(tui_env, "check_environment", return_value=down):
+            problems = tui_flows.service_gate({}, tui_env, __import__("services"))
             self.assertEqual(len(problems), 1)
             self.assertTrue(problems[0]["name"].startswith("Inference"))
         up = {"items": [{"name": "Inference x", "ok": True}, {"name": "Renderer y", "ok": True}]}
-        with patch.object(tui_ui.env_mod, "check_environment", return_value=up):
-            self.assertEqual(tui_ui._service_gate({}), [])
+        with patch.object(tui_env, "check_environment", return_value=up):
+            self.assertEqual(tui_flows.service_gate({}, tui_env, __import__("services")), [])
 
     def test_failure_hint_reads_failure_json(self):
-        import ui as tui_ui
+        import evidence as tui_evidence
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.assertIsNone(tui_ui._failure_hint(root))
+            self.assertIsNone(tui_evidence.failure_hint(root))
             (root / "failure.json").write_text(json.dumps({"error": "boom  info"}))
-            self.assertIn("boom", tui_ui._failure_hint(root))
+            self.assertIn("boom", tui_evidence.failure_hint(root))
 
     def test_renderer_down_hint_names_the_real_start_command(self):
         import env as tui_env
@@ -439,6 +574,73 @@ class SelfAcceptanceFixes(unittest.TestCase):
                 self.assertEqual(killed, [])
                 self.assertTrue(any("no longer ours" in s for s in rel["skipped"]))
 
+    def test_force_release_bypasses_live_run_gate(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "services.json").write_text(json.dumps(
+                {"owner": tui_services.SESSION_ID, "heartbeat": 9999999999.0,
+                 "services": {"ollama": {"pid": 31337, "image": "ollama.exe"}}}))
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services, "process_alive", return_value=True), \
+                 patch.object(tui_services, "_image_of_pid", return_value="ollama.exe"), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-x", "status": "Running"}]), \
+                 patch.object(tui_services, "_live_launchers", return_value=["x.lock:pid"]):
+                killed = []
+                with patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True):
+                    rel = tui_services.release_owned_services(force=True)
+                self.assertEqual(killed, [31337])
+                self.assertIsNone(rel["kept"])
+
+    def test_ctrl_c_shutdown_stops_agent_ollama_and_owned_services(self):
+        import services as tui_services
+        with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+             patch.object(tui_services, "_block_interrupts") as blocked, \
+             patch.object(tui_services, "heartbeat_stop"), \
+             patch.object(tui_services, "request_run_stops", return_value=["run-x"]), \
+             patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
+             patch.object(tui_services, "_terminate_agent_trees",
+                          return_value={"stopped": ["codex.exe pid 9"], "failed": []}), \
+             patch.object(tui_services, "terminate_local_inference",
+                          return_value={"stopped": ["ollama.exe pid 7"], "failed": [],
+                                        "endpoint": "http://127.0.0.1:11434", "verified": True}), \
+             patch.object(tui_services, "release_owned_services",
+                          return_value={"stopped": ["renderer pid 5"], "kept": None, "skipped": []}):
+            report = tui_services.shutdown_all({"mode": "Local"}, hard=True)
+        blocked.assert_called_once()
+        self.assertEqual(report["agent"], ["codex.exe pid 9"])
+        self.assertEqual(report["stopped"], ["ollama.exe pid 7", "renderer pid 5"])
+        self.assertEqual(report["failed"], [])
+        # The run was asked to stop first, so its evidence stays complete.
+        self.assertEqual(report["requested"], ["run-x"])
+        self.assertEqual(report["remaining"], [])
+
+    def test_local_inference_kill_is_verified_and_spares_foreign_listener(self):
+        import services as tui_services
+        killed = []
+        with patch.object(tui_services, "_pids_with_images", return_value=[7, 8]), \
+             patch.object(tui_services, "_listener_pids", return_value=[]), \
+             patch.object(tui_services, "_image_of_pid",
+                          side_effect=lambda pid: {7: "ollama.exe", 8: "notepad.exe"}.get(pid)), \
+             patch.object(tui_services, "_terminate", side_effect=lambda pid: killed.append(pid) or True), \
+             patch.object(tui_services, "_endpoint_up", return_value=False):
+            report = tui_services.terminate_local_inference(
+                {"mode": "Local", "endpoint": "http://127.0.0.1:11434"})
+        self.assertEqual(killed, [7])
+        self.assertTrue(report["verified"])
+        self.assertEqual(report["failed"], [])
+
+    def test_h200_never_kills_a_remote_endpoint_provider(self):
+        import services as tui_services
+        with patch.object(tui_services, "_pids_with_images") as pids, \
+             patch.object(tui_services, "_terminate") as terminate:
+            report = tui_services.terminate_local_inference(
+                {"mode": "H200", "endpoint": "http://127.0.0.1:11434"})
+        pids.assert_not_called()
+        terminate.assert_not_called()
+        self.assertEqual(report["stopped"], [])
+
     def test_h200_never_autostarts(self):
         import services as tui_services
         with tempfile.TemporaryDirectory() as tmp:
@@ -460,29 +662,149 @@ class SelfAcceptanceFixes(unittest.TestCase):
 
     def test_no_tty_refuses_with_guidance_not_traceback(self):
         import io
-        import ui as tui_ui
-        real_main = tui_ui._main
-        try:
-            with patch.object(tui_ui.sys.stdin, "isatty", return_value=False):
-                out = io.StringIO()
-                with unittest.mock.patch.object(tui_ui.sys, "stdout", out):
-                    code = real_main()
-                self.assertEqual(code, 2)
-                self.assertIn("interactive", out.getvalue())
-        finally:
-            tui_ui._main = real_main
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "volume_tui_app",
+            Path(__file__).resolve().parents[1] / "scripts" / "volume_tui" / "app.py")
+        tui_app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tui_app)
+        with patch.object(tui_app.sys.stdin, "isatty", return_value=False):
+            out = io.StringIO()
+            with unittest.mock.patch.object(tui_app.sys, "stdout", out):
+                code = tui_app.main()
+            self.assertEqual(code, 2)
+            text = out.getvalue().lower()
+            self.assertTrue("terminal" in text or "interactive" in text or "textual" in text)
+
+
+class ShutdownLeavesNothingBehind(unittest.TestCase):
+    """Leaving the TUI must stop every process it owns."""
+
+    def test_cooperative_stop_is_requested_for_every_live_run(self):
+        import runner as runner_mod
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(runner_mod, "CONTROL_DIR", root), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-a", "status": "Running"},
+                                            {"runId": "run-b", "status": "Finished"}]):
+                requested = tui_services.request_run_stops()
+            self.assertEqual(requested, ["run-a"])
+            # The launcher polls this marker and records interrupted/failure.json.
+            self.assertTrue((root / "run-a.stop").is_file())
+
+    def test_shutdown_kills_children_that_outlived_their_parent(self):
+        import runner as runner_mod
+        import services as tui_services
+        killed = []
+        with patch.object(tui_services, "_image_of_pid",
+                          side_effect=lambda pid: {11: "python.exe", 12: "mcp.exe"}.get(pid)), \
+             patch.object(tui_services, "process_alive", return_value=True), \
+             patch.object(tui_services, "_terminate",
+                          side_effect=lambda pid: killed.append(pid) or True), \
+             patch.object(tui_services, "_recorded_run_pids", return_value=[]), \
+             patch.object(tui_services, "_manifest_run_pids", return_value=[]), \
+             patch.object(runner_mod, "stop_active", return_value=[]):
+            report = tui_services._terminate_agent_trees([11, 12])
+        self.assertEqual(sorted(killed), [11, 12])
+        # 12 is not one of the owned images, so it is only caught as a leftover.
+        self.assertTrue(any("left over" in line for line in report["stopped"]))
+
+    def test_shutdown_runs_once_and_reuses_the_report(self):
+        import services as tui_services
+        calls = []
+        with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+             patch.object(tui_services, "_block_interrupts"), \
+             patch.object(tui_services, "heartbeat_stop"), \
+             patch.object(tui_services, "request_run_stops", return_value=[]), \
+             patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
+             patch.object(tui_services, "_terminate_agent_trees",
+                          return_value={"stopped": [], "failed": []}), \
+             patch.object(tui_services, "_inference_state",
+                          return_value={"endpoint": None, "verified": None, "owned": False}), \
+             patch.object(tui_services, "release_owned_services",
+                          return_value={"stopped": ["renderer pid 5"], "kept": None, "skipped": []}), \
+             patch.object(tui_services, "_owns_ollama", return_value=False):
+            def _release(force=False):
+                calls.append(force)
+                return {"stopped": ["renderer pid 5"], "kept": None, "skipped": []}
+            with patch.object(tui_services, "release_owned_services", side_effect=_release):
+                first = tui_services.shutdown_all({"mode": "Local"})
+                second = tui_services.shutdown_all({"mode": "Local"}, hard=True)
+        self.assertIs(first, second)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0])
+
+    def test_release_refusal_names_the_run_that_needs_the_services(self):
+        import services as tui_services
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "services.json").write_text(json.dumps(
+                {"owner": tui_services.SESSION_ID, "heartbeat": 9999999999.0,
+                 "services": {"ollama": {"pid": 31337, "image": "ollama.exe"}}}))
+            with patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services.runs_mod, "discover_runs",
+                              return_value=[{"runId": "run-x", "status": "Running"}]):
+                rel = tui_services.release_owned_services()
+            self.assertIn("run-x", rel["kept"])
+            self.assertIn("Stop run", rel["kept"])
+
+
+@unittest.skipUnless(os.name == "nt", "process-tree kill is Windows specific")
+class ShutdownKillsRealProcesses(unittest.TestCase):
+    """The shutdown must really terminate the processes, not just report it."""
+
+    def _alive(self, pid):
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True)
+        return str(pid) in out.stdout
+
+    def test_launcher_children_and_owned_service_all_die(self):
+        import services as tui_services
+        python = sys.executable
+        launcher = subprocess.Popen([python, "-c", "import time; time.sleep(300)"])
+        child = subprocess.Popen([python, "-c", "import time; time.sleep(300)"])
+        renderer = subprocess.Popen([python, "-c", "import time; time.sleep(300)"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = root / "services.json"
+            record.write_text(json.dumps({
+                "owner": tui_services.SESSION_ID, "heartbeat": 1e9,
+                "services": {"renderer": {"pid": renderer.pid, "image": "python.exe"}}}),
+                encoding="utf-8")
+            with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
+                 patch.object(tui_services, "RECORD", record), \
+                 patch.object(tui_services, "request_run_stops", return_value=[]), \
+                 patch.object(tui_services, "_wait_for_launchers", return_value=[]), \
+                 patch.object(tui_services, "_inference_state",
+                              return_value={"endpoint": None, "verified": None, "owned": False}), \
+                 patch.object(tui_services, "_owns_ollama", return_value=False):
+                report = tui_services.shutdown_all({"mode": "Local"})
+        deadline = time.time() + 10
+        while time.time() < deadline and any(self._alive(pid) for pid in
+                                             (launcher.pid, child.pid, renderer.pid)):
+            time.sleep(0.2)
+        for pid in (launcher.pid, child.pid, renderer.pid):
+            self.assertFalse(self._alive(pid), "pid %d survived the shutdown" % pid)
+        self.assertTrue(any("renderer" in line for line in report["stopped"]))
+        for proc in (launcher, child, renderer):
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
 
 
 class TemporaryContextInstance(unittest.TestCase):
     def test_offer_predicate_only_for_lone_local_context_mismatch(self):
-        import ui as tui_ui
+        import flows as tui_flows
         local = {"mode": "Local"}
         mismatch = [{"name": "Model context", "ok": False, "detail": "loaded x context 262144 != required 16384"}]
-        self.assertIsNotNone(tui_ui._temporary_context_offer(local, mismatch))
-        self.assertIsNone(tui_ui._temporary_context_offer({"mode": "H200"}, mismatch))
-        self.assertIsNone(tui_ui._temporary_context_offer(local, mismatch + [
+        self.assertIsNotNone(tui_flows.temporary_context_offer(local, mismatch))
+        self.assertIsNone(tui_flows.temporary_context_offer({"mode": "H200"}, mismatch))
+        self.assertIsNone(tui_flows.temporary_context_offer(local, mismatch + [
             {"name": "Renderer y", "ok": False}]))
-        self.assertIsNone(tui_ui._temporary_context_offer(
+        self.assertIsNone(tui_flows.temporary_context_offer(
             local, [{"name": "Inference x", "ok": False}]))
 
     def test_temporary_ollama_uses_free_port_and_required_context_then_reaped(self):
@@ -526,50 +848,6 @@ class TemporaryContextInstance(unittest.TestCase):
                 rel = tui_services.release_owned_services()
             self.assertEqual(killed, [5555])
             self.assertIsNone(rel["kept"])
-
-
-class MessageColors(unittest.TestCase):
-    def test_every_category_has_its_own_color_and_warn_is_orange(self):
-        import screen as tui_screen
-        for cat in ("MODEL", "TOOL", "IMAGE", "INFER", "ERROR", "WARN", "FINISH"):
-            self.assertIn(cat, tui_screen.CATEGORY_COLORS)
-        self.assertEqual(len(set(tui_screen.CATEGORY_COLORS.values())), 7)
-        self.assertEqual(tui_screen.CATEGORY_COLORS["WARN"], "orange")
-        self.assertEqual(tui_screen.CATEGORY_COLORS["ERROR"], "red")
-
-    def test_warn_titles_go_orange_while_other_errors_stay_red(self):
-        import screen as tui_screen
-        import ui as tui_ui
-        real_isatty = tui_screen.sys.stdout.isatty
-        try:
-            tui_screen.sys.stdout.isatty = lambda: True
-            warn = tui_ui._cat_title({"cat": "ERROR", "title": "WARN  harness trouble"})
-            self.assertIn(tui_screen.COLORS["orange"], warn)
-            failed = tui_ui._cat_title({"cat": "ERROR", "title": "TOOL  render_scene  Failed"})
-            self.assertIn(tui_screen.COLORS["red"], failed)
-            model = tui_ui._cat_title({"cat": "MODEL", "title": "MODEL #1  Running"})
-            self.assertIn(tui_screen.COLORS["cyan"], model)
-        finally:
-            tui_screen.sys.stdout.isatty = real_isatty
-
-    def test_color_respects_no_color_and_pipes(self):
-        import screen as tui_screen
-        with patch.dict(tui_screen.os.environ, {"NO_COLOR": "1"}):
-            self.assertEqual(tui_screen.colored("x", "red"), "x")
-        self.assertEqual(tui_screen.visible_len("\x1b[31mabc\x1b[0m"), 3)
-        self.assertEqual(tui_screen.visible_len(tui_screen._truncate_ansi("\x1b[31mabcdef\x1b[0m", 3)), 3)
-
-    def test_status_colors(self):
-        import screen as tui_screen
-        import ui as tui_ui
-        real_isatty = tui_screen.sys.stdout.isatty
-        try:
-            tui_screen.sys.stdout.isatty = lambda: True
-            self.assertIn(tui_screen.COLORS["green"], tui_ui._color_status("Finished"))
-            self.assertIn(tui_screen.COLORS["red"], tui_ui._color_status("Failed"))
-            self.assertIn(tui_screen.COLORS["cyan"], tui_ui._color_status("Running"))
-        finally:
-            tui_screen.sys.stdout.isatty = real_isatty
 
 
 if __name__ == '__main__':

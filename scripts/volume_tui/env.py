@@ -7,6 +7,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+import config as cfg
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -38,10 +40,11 @@ def check_environment(settings: dict) -> dict:
     add("Ollama binary", bool(ollama), ollama or "not on PATH",
         "Install Ollama (Local mode needs it)." if not ollama else "")
 
-    volume = ROOT / "runtime" / "gate-volume" / "render.dat"
+    volume = cfg.selected_volume(settings)
     raycaster = ROOT / "VirtualSampling" / "Raycaster" / "VS" / "x64" / "Release" / "Raycaster.exe"
-    add("Default volume", volume.is_file(), str(volume),
-        "Restore runtime/gate-volume/render.dat; do not substitute another dataset silently." if not volume.is_file() else "")
+    add("Volume", volume is not None, str(volume or "none selected"),
+        "Choose an existing volume in the TUI (Volumes menu) or restore runtime/gate-volume/render.dat."
+        if volume is None else "")
     add("Native raycaster", raycaster.is_file(), str(raycaster),
         "Build/restore the audited Raycaster.exe; stop if missing." if not raycaster.is_file() else "")
 
@@ -73,7 +76,7 @@ def check_environment(settings: dict) -> dict:
         # Honest pending state: remote capability check happens live in Settings.
         model_ok = True
     _ = model_ok
-    return {"ok": all(i["ok"] for i in items if i["name"].startswith(("Python", "Codex", "Default", "Native"))),
+    return {"ok": all(i["ok"] for i in items if i["name"].startswith(("Python", "Codex", "Volume", "Native"))),
             "items": items}
 
 

@@ -107,18 +107,6 @@ TASK_PRESETS = ["task-a", "task-b", "custom"]
 # image is visible at once (never a cut-off corner).
 LIVE_PREVIEW_MAX_ROWS = 48
 
-# One-line explanation of every Live button, shown under the button row.
-LIVE_LEGEND = (
-    "Stop run = ask the agent to stop now (evidence already written is kept). "
-    "Verify evidence = read-only check of this run: did it finish, and was a PNG "
-    "really sent to the model? It writes verification.json and never calls the model. "
-    "View PNG = open the previewed PNG in your image viewer, full size. "
-    "Open folder = open the file explorer at the folder that holds the PNGs "
-    "(the run log folder itself contains no images). "
-    "Stop watching = leave the Live view; the run keeps running in the background "
-    "(open it again from Runs)."
-)
-
 
 class HelpScreen(ModalScreen if _TEXTUAL else object):
     def compose(self):
@@ -281,7 +269,6 @@ if _TEXTUAL:
         #live-detail { height: 5; border: solid gray; }
         #live-image-path { height: auto; color: $text-muted; }
         #live-image { height: auto; min-height: 3; border: solid cyan; }
-        #live-legend { height: auto; color: $text-muted; }
         #volumes-table { height: 10; }
         #volumes-detail { height: auto; min-height: 3; }
         #slice-preview { height: 14; border: solid cyan; }
@@ -506,11 +493,10 @@ if _TEXTUAL:
                                              tooltip="Open the file explorer at the folder that holds the PNGs "
                                                      "(the run log folder itself has no images).")
                                 yield Button("Stop watching", id="btn-live-detach",
-                                             tooltip="Leave the Live view. The run keeps running in the background; "
-                                                     "open it again from Runs.")
+                                             tooltip="Leave the Live view. The run keeps going until the TUI is "
+                                                     "closed (closing stops it); open it again from Runs.")
                             yield Static("Verify evidence: (not run yet — read-only check of this run)",
                                          id="live-verify")
-                            yield Static(LIVE_LEGEND, id="live-legend")
                 with TabPane("Volumes", id="tab-volumes"):
                     with VerticalScroll():
                         with Vertical(classes="panel"):
@@ -1026,8 +1012,8 @@ if _TEXTUAL:
             self.live_run_id = None
             self.live_tail = None
             if run_id:
-                self._set_text("live-head", "Stopped watching %s. The run keeps going in the background — "
-                                            "open it again from Runs." % run_id)
+                self._set_text("live-head", "Stopped watching %s. The run keeps going until the TUI is "
+                                            "closed (closing stops it) — open it again from Runs." % run_id)
             else:
                 self._set_text("live-head", "Stopped watching. No run was open.")
 

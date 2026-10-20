@@ -712,10 +712,8 @@ class LiveFrameAndLabels(unittest.TestCase):
                     button = app.query_one("#" + widget_id)
                     self.assertEqual(str(button.label), label, widget_id)
                     self.assertTrue(str(button.tooltip), widget_id)
-                legend = str(app.query_one("#live-legend").render())
-                for phrase in ("Verify evidence", "read-only", "Stop watching",
-                               "keeps running", "folder that holds the PNGs"):
-                    self.assertIn(phrase, legend)
+                # The explanations live in the tooltips (and F1), not twice.
+                self.assertFalse(app.query("#live-legend"))
         asyncio.run(_run())
 
     def test_command_palette_actions_have_stable_ids(self):

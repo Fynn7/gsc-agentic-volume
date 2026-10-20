@@ -23,7 +23,7 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
 ## Workspaces (Ctrl+P commands, F1 help, t theme)
 
 Every button states its purpose in its label, carries a tooltip, and is
-explained in the F1 help screen (`Live` also repeats it under the buttons).
+explained in the F1 help screen — stated once, never repeated on screen.
 
 - **Dashboard**: mode/model/volume, Inference/Renderer status, owned services,
   Running/Last run. Refresh status re-discovers without blocking the UI.

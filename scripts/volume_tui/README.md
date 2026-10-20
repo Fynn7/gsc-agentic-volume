@@ -36,20 +36,28 @@ explained in the F1 help screen — stated once, never repeated on screen.
 - **Runs**: filterable table (run/status/model/frames/task), Open Live view
   (re-enters a running run from existing events), Verify evidence, Rerun as new
   run (pre-fills New Run), Pick as A/B + Compare A vs B (config diff).
-- **Live**: event timeline (category filter + text search + follow), selected
+- **Live**: event timeline (category filter + text search), selected
   event detail, resource bar (`telemetry.jsonl` GPU/VRAM + Ollama context), and
   the current frame: its **absolute PNG path** plus an inline preview (Pillow
   downsample to Rich half-block cells; Static never interprets raw ANSI
   escapes). The preview is fitted into the panel (aspect ratio kept, black
   padding, never cropped) and re-fitted when the window is resized, so the
   whole frame is visible instead of a cut-off corner.
+  - The timeline **follows the newest event on its own** while it is scrolled
+    to the bottom; scrolling up to read the history stops the follow, and
+    scrolling back to the bottom resumes it (there is no Follow button).
+    A new filter/search starts at the first match and stops the follow until
+    the view is back at the tail.
   - Stop run (cooperative `runtime/tui-control/<runId>.stop`, launcher records
     `interrupted`/`failure.json`), Verify evidence (read-only check →
     `verification.json`, never calls the model), View PNG (opens the previewed
     PNG in the system image viewer), Open folder (opens the folder that holds
     the PNGs — `runtime/<sessionId>` — **not** the run log folder, which has no
-    images), Stop watching (leave Live; the run keeps going, reopen it from
-    Runs). Finish freezes the view (no more polling).
+    images), Copy JSON log (copies the whole run's JSON log to the clipboard:
+    the run's meta data, every event and every JSON log file of the run folder
+    — base64 image bytes are replaced by a size note, unreadable files are
+    listed inside the payload), Stop watching (leave Live; the run keeps going,
+    reopen it from Runs). Finish freezes the view (no more polling).
 - **Volumes**: scan of the fixed `volumes/` folder (+ current selection),
   filter, metadata, Use this volume (persists to `tui-settings.json`), Slice
   Inspector (x/y/z + index → inline preview for prepared volumes only;
@@ -89,9 +97,9 @@ process (the documented emergency path).
   active; the pressed button shows its own spinner and locks against
   double clicks; worker failures surface as error toasts.
 - Covered: dashboard refresh, preflight, run start (button stays loaded until
-  Live takes over), runs refresh/verify, live verify, slice preview, all
-  service operations, H200 probe. The Live header animates while running and
-  freezes on finish; the startup service check prints elapsed time.
+  Live takes over), runs refresh/verify, live verify, live copy, slice preview,
+  all service operations, H200 probe. The Live header animates while running
+  and freezes on finish; the startup service check prints elapsed time.
 - Static text and table cells escape literal `[...]` (terminal markup would
   otherwise swallow tags like `[FROZEN]`); toasts render with markup off.
 - The frame preview is drawn at the panel width: a stale width would fold the
@@ -116,6 +124,13 @@ process (the documented emergency path).
 - Events: `trace_events.EventTail` tails harness.jsonl, run `session.json`
   (mtime/size gated), `runtime/<session>/events.jsonl` (seq gap-fill),
   http request/metadata (request summaries, no base64). All events carry `ts`.
+- Run log: `runs.run_json_log` builds one JSON document out of the run
+  directory (meta + every event + every JSON/JSONL log file, base64 image
+  bytes replaced by a size note, unreadable files listed under `skipped`);
+  `evidence.copy_to_clipboard` puts it on the system clipboard (PowerShell
+  `Set-Clipboard` over stdin on Windows, `pbcopy`/`wl-copy`/`xclip` elsewhere,
+  the terminal's own OSC 52 escape as the fallback). Read-only, nothing is
+  written into the run folder.
 - Verify: `runs.run_verify` subprocess + three-way summary
   (execution / image transport / visual-quality UNVERIFIED). The Live tab
   writes it to its own `Verify evidence:` box so it never overwrites the

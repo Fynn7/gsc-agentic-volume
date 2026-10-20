@@ -134,6 +134,55 @@ class RunHelpers(unittest.TestCase):
         self.assertEqual(numbers["status"], "Finished")
         self.assertEqual(tui_runs.final_image_of(entry), "D:/final.png")
 
+    def test_run_json_log_holds_every_json_log_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "run.json").write_text(json.dumps({"runId": "r1", "status": "finished"}))
+            (run_dir / "session.json").write_text(json.dumps({"id": "s", "events": []}))
+            (run_dir / "harness.jsonl").write_text(
+                json.dumps({"type": "turn.started"}) + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
+            (run_dir / "broken.jsonl").write_text("not json\n")
+            http = run_dir / "http"
+            http.mkdir()
+            (http / "http-001.metadata.json").write_text(json.dumps({"index": 1, "status": 200}))
+            events = [{"cat": "MODEL", "title": "MODEL #1  Running", "ts": 1.0}]
+            document = tui_runs.run_json_log(run_dir, events=events)
+            self.assertEqual(document["runId"], "r1")
+            self.assertEqual(document["events"], events)
+            self.assertIn("run.json", document["files"])
+            self.assertIn("session.json", document["files"])
+            self.assertEqual(len(document["files"]["harness.jsonl"]), 2)
+            self.assertIn("http/http-001.metadata.json", document["files"])
+            # A broken line is reported, never hidden.
+            self.assertTrue(any(item["name"] == "broken.jsonl"
+                                for item in document["skipped"]))
+
+    def test_run_json_log_omits_base64_image_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "harness.jsonl").write_text(json.dumps({
+                "type": "item.completed",
+                "item": {"type": "mcp_tool_call",
+                         "result": {"content": [{"type": "image", "data": "A" * 4096}]}}}) + "\n")
+            document = tui_runs.run_json_log(run_dir)
+            blob = document["files"]["harness.jsonl"][0]["item"]["result"]["content"][0]["data"]
+            self.assertNotIn("AAAA", blob)
+            self.assertIn("4096", blob)
+
+
+class ClipboardHelper(unittest.TestCase):
+    def test_copy_to_clipboard_never_raises(self):
+        import evidence as tui_evidence
+        message = tui_evidence.copy_to_clipboard("")
+        self.assertIn("Nothing to copy", message)
+
+    def test_copy_to_clipboard_reports_failure_without_raising(self):
+        import evidence as tui_evidence
+        with patch.object(tui_evidence.subprocess, "run",
+                          side_effect=OSError("no clipboard")):
+            message = tui_evidence.copy_to_clipboard("payload")
+        self.assertIn("Clipboard copy failed", message)
+
 
 class SlicePreview(unittest.TestCase):
     def test_slice_needs_prepared_volume(self):
@@ -265,7 +314,7 @@ class TextualLayout(unittest.TestCase):
                 width = app.screen.size.width
                 app.query_one("#workspaces", TabbedContent).active = "tab-live"
                 await pilot.pause()
-                for wid in ("#live-search", "#live-category", "#btn-live-follow"):
+                for wid in ("#live-search", "#live-category", "#btn-live-copy"):
                     region = app.query_one(wid).region
                     self.assertLessEqual(region.x + region.width, width)
                 app.query_one("#workspaces", TabbedContent).active = "tab-volumes"
@@ -497,7 +546,6 @@ class TextualBusy(unittest.TestCase):
                         {"cat": "INFER", "title": "INFER call #%d" % i, "detail": ""}
                         for i in range(40)
                     ]
-                    app.live_follow = False
                     app._render_live()
                     await pilot.pause()
                     table = app.query_one("#events-table", tui_app.DataTable)
@@ -511,11 +559,11 @@ class TextualBusy(unittest.TestCase):
                     app._render_live()
                     await pilot.pause()
                     self.assertEqual(table.row_count, 41)
+                    # Reading the history: the view is not yanked to the tail.
                     self.assertEqual(table.scroll_offset.y, before)
-                    self.assertFalse(app.live_follow)
         asyncio.run(_run())
 
-    def test_live_follow_off_is_sticky_and_toggle_resumes(self):
+    def test_live_follows_only_while_at_the_bottom(self):
         import asyncio
         import tempfile
         from textual.widgets import TabbedContent
@@ -531,24 +579,70 @@ class TextualBusy(unittest.TestCase):
                     app.live_events = [
                         {"cat": "INFER", "title": "row %d" % i, "detail": ""} for i in range(40)
                     ]
-                    app.live_follow = True
                     app._render_live()
                     await pilot.pause()
                     table = app.query_one("#events-table", tui_app.DataTable)
-                    table.scroll_to(y=4, animate=False)
-                    await pilot.pause()
-                    # Scrolling away from the tail must pause following.
+                    # The first render ends at the newest event.
                     app.live_events.append({"cat": "TOOL", "title": "new", "detail": ""})
                     app._render_live()
                     await pilot.pause()
-                    self.assertFalse(app.live_follow)
-                    label = str(app.query_one("#btn-live-follow").label)
-                    self.assertIn("off", label)
-                    # Toggling follow on jumps to the newest row again.
+                    self.assertEqual(table.row_count, 41)
+                    self.assertTrue(app._at_bottom(table))
+                    # Scrolling up to read the history stops the follow.
+                    table.scroll_to(y=4, animate=False)
+                    await pilot.pause()
+                    app.live_events.append({"cat": "TOOL", "title": "newer", "detail": ""})
+                    app._render_live()
+                    await pilot.pause()
+                    self.assertEqual(table.scroll_offset.y, 4)
+                    self.assertFalse(app._at_bottom(table))
+                    # Scrolling back to the tail resumes the follow.
                     app._jump_to_latest()
                     await pilot.pause()
-                    self.assertTrue(app.live_follow)
-                    self.assertIn("on", str(app.query_one("#btn-live-follow").label))
+                    self.assertTrue(app._at_bottom(table))
+                    app.live_events.append({"cat": "TOOL", "title": "newest", "detail": ""})
+                    app._render_live()
+                    await pilot.pause()
+                    self.assertEqual(table.row_count, 43)
+                    self.assertTrue(app._at_bottom(table))
+        asyncio.run(_run())
+
+    def test_copy_json_log_button_copies_the_whole_run(self):
+        import asyncio
+        import tempfile
+        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                app.query_one("#workspaces", TabbedContent).active = "tab-live"
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    (run_dir / "run.json").write_text(json.dumps({"runId": "run-demo"}))
+                    app.start_live(run_dir, "run-demo")
+                    app.live_events = [{"cat": "MODEL", "title": "MODEL #1  Running", "detail": ""}]
+                    copied = {}
+
+                    def _fake_copy(text):
+                        copied["text"] = text
+                        return "Copied %d characters to the clipboard." % len(text)
+
+                    with patch.object(tui_app.evidence_mod, "copy_to_clipboard", _fake_copy):
+                        app.query_one("#btn-live-copy", tui_app.Button).focus()
+                        await pilot.pause()
+                        await pilot.press("enter")
+                        for _ in range(200):
+                            await pilot.pause()
+                            if "text" in copied and app._busy_count == 0:
+                                break
+                    self.assertIn("text", copied)
+                    document = json.loads(copied["text"])
+                    self.assertEqual(document["runId"], "run-demo")
+                    self.assertEqual(len(document["events"]), 1)
+                    self.assertIn("run.json", document["files"])
+                    self.assertEqual(app._busy_count, 0)
         asyncio.run(_run())
 
     def test_live_head_shows_spinner_when_running(self):
@@ -707,6 +801,7 @@ class LiveFrameAndLabels(unittest.TestCase):
                     "btn-live-open-png": "View PNG",
                     "btn-live-open": "Open folder",
                     "btn-live-detach": "Stop watching",
+                    "btn-live-copy": "Copy JSON log",
                 }
                 for widget_id, label in expected.items():
                     button = app.query_one("#" + widget_id)

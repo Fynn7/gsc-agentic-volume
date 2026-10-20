@@ -295,3 +295,82 @@ def summary_numbers(entry: dict) -> dict:
         "agentRenders": (verification or {}).get("agentRenders"),
         "volume": ((_read_json(Path(str(entry.get("directory", ""))) / "config.json") or {}).get("volumePath", "?")),
     }
+
+
+# Keys that carry base64 image bytes in the recorded logs. The copied JSON
+# replaces them with a size note: image bytes never belong in a clipboard
+# paste, and the run log stays readable.
+_IMAGE_BLOB_KEYS = ("data", "image_url", "b64_json", "imageData", "image_base64")
+_BLOB_MIN_CHARS = 512
+
+
+def _strip_image_blobs(value, key=None):
+    """Replace base64 image payloads with a size note (never copied raw)."""
+    if isinstance(value, dict):
+        return {k: _strip_image_blobs(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_image_blobs(v, key) for v in value]
+    if isinstance(value, str) and key in _IMAGE_BLOB_KEYS and len(value) > _BLOB_MIN_CHARS:
+        return "<%d base64 image bytes omitted>" % len(value)
+    return value
+
+
+def _jsonl_records(path: Path) -> tuple[list, list]:
+    """Parse a .jsonl log into records; broken lines are reported, not hidden."""
+    records: list = []
+    problems: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return records, [str(error)]
+    for number, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            problems.append("line %d is not valid JSON" % number)
+    return records, problems
+
+
+def run_json_log(run_dir: str | Path, events=None) -> dict:
+    """The whole run as one JSON document (read-only).
+
+    The document holds the run's meta data, the complete event log and every
+    JSON log file of the run directory (parsed, so the copy is valid JSON
+    and not a wall of text). Base64 image payloads become a size note and
+    every file that could not be read is listed under "skipped" — nothing
+    disappears silently.
+    """
+    import time as _time
+
+    directory = Path(run_dir)
+    run = _read_json(directory / "run.json") or {}
+    document = {
+        "runId": run.get("runId", directory.name),
+        "runDir": str(directory),
+        "copiedAt": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "status": run.get("status"),
+        "events": list(events or []),
+        "files": {},
+        "skipped": [],
+    }
+    sources = sorted(directory.glob("*.json")) + sorted(directory.glob("*.jsonl"))
+    http = directory / "http"
+    if http.is_dir():
+        sources += sorted(http.glob("*.metadata.json"))
+    for path in sources:
+        name = path.name if path.parent == directory else "http/%s" % path.name
+        try:
+            if path.suffix == ".jsonl":
+                records, problems = _jsonl_records(path)
+                document["files"][name] = _strip_image_blobs(records)
+                for problem in problems:
+                    document["skipped"].append({"name": name, "reason": problem})
+            else:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                document["files"][name] = _strip_image_blobs(data)
+        except (OSError, ValueError) as error:
+            document["skipped"].append({"name": name, "reason": str(error)})
+    return document

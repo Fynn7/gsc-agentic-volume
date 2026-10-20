@@ -126,8 +126,15 @@ class HelpScreen(ModalScreen if _TEXTUAL else object):
             "  View PNG          open the previewed PNG in your image viewer (full size)\n"
             "  Open folder       open the file explorer at the folder that holds the\n"
             "                    PNGs — the run log folder itself has no images\n"
+            "  Copy JSON log     copy the whole run's JSON log to the clipboard: the\n"
+            "                    run's meta data, every event and every JSON log file\n"
+            "                    of the run folder. Read-only.\n"
             "  Stop watching     leave the Live view; the run keeps running in the\n"
             "                    background (open it again from Runs)\n"
+            "\n"
+            "  The event timeline follows the newest event on its own while it is\n"
+            "  scrolled to the bottom; scroll up to read the history and it stops\n"
+            "  following until you scroll back down.\n"
             "\n"
             "RUNS — runs already on disk\n"
             "  Open Live view    follow the selected run in the Live tab\n"
@@ -223,7 +230,7 @@ class CommandScreen(ModalScreen if _TEXTUAL else object):
         ("Go: Volumes", "go-volumes"),
         ("Go: Services", "go-services"),
         ("Go: Settings", "go-settings"),
-        ("Live: Follow newest event", "live-follow"),
+        ("Live: Jump to newest event", "live-jump"),
         ("Live: Stop the run", "live-stop"),
         ("Live: Verify evidence (read-only)", "live-verify"),
         ("Live: View current PNG", "live-open-png"),
@@ -303,7 +310,7 @@ if _TEXTUAL:
             self.live_tail = None
             self.live_events: list[dict] = []
             self.live_frozen = False
-            self.live_follow = True
+            self._live_following = True
             self.live_filter = "ALL"
             self.live_search = ""
             self.live_image_path: str | None = None
@@ -474,9 +481,10 @@ if _TEXTUAL:
                             with Horizontal(classes="row"):
                                 yield Input("", placeholder="/ search events", id="live-search")
                                 yield Select([(c, c) for c in CATEGORIES], value="ALL", id="live-category", classes="narrow")
-                                yield Button("Follow: on", id="btn-live-follow",
-                                             tooltip="Keep the event list scrolled to the newest event. "
-                                                     "Switch it off to read the history.")
+                                yield Button("Copy JSON log", id="btn-live-copy",
+                                             tooltip="Copy the whole run's JSON log to the clipboard: the run's "
+                                                     "meta data, every event and every JSON log file of the run "
+                                                     "folder. Read-only.")
                             yield DataTable(id="events-table")
                             yield Static("(select an event for details)", id="live-detail")
                             yield Static("Current frame PNG: (none yet)", id="live-image-path")
@@ -623,12 +631,17 @@ if _TEXTUAL:
             self.live_tail = trace_mod.EventTail(self.live_dir, trace_mod.resolve_session_dir(self.live_dir))
             self.live_events = []
             self.live_frozen = False
-            self.live_follow = True
+            self._live_following = True
             self.live_image_path = None
             self.live_image_revision = None
             self._preview_key = None
             try:
                 self.query_one("#live-head", Static).update("Live: %s" % self.live_dir.name)
+            except Exception:
+                pass
+            # Follow the newest event until the user scrolls up.
+            try:
+                self.query_one("#events-table", DataTable).anchor()
             except Exception:
                 pass
 
@@ -668,6 +681,35 @@ if _TEXTUAL:
                 items = [e for e in items if needle in (e.get("title", "") + " " + e.get("detail", "")).lower()]
             return items
 
+        @staticmethod
+        def _at_bottom(table) -> bool:
+            """True when the event table shows its last row."""
+            try:
+                return table.scroll_offset.y >= table.max_scroll_y - 1
+            except Exception:
+                return True
+
+        def _sync_follow(self, table) -> None:
+            """Follow the newest event while the timeline sits at the bottom.
+
+            The anchor keeps the table pinned to the last row. Scrolling up
+            releases it (Textual does that on its own), so the history stays
+            readable; scrolling back to the bottom anchors it again.
+            """
+            at_bottom = self._at_bottom(table)
+            if at_bottom and not self._live_following:
+                self._live_following = True
+                try:
+                    table.anchor()
+                except Exception:
+                    pass
+            elif not at_bottom and self._live_following:
+                self._live_following = False
+                try:
+                    table.release_anchor()
+                except Exception:
+                    pass
+
         def _render_live(self):
             try:
                 table = self.query_one("#events-table", DataTable)
@@ -676,19 +718,9 @@ if _TEXTUAL:
             items = self._filtered_events()
             key = (self.live_filter, self.live_search)
             prev_len = getattr(self, "_live_table_len", 0)
-            rebuild = (key != getattr(self, "_live_render_key", None)
-                       or len(items) < prev_len)
-            if self.live_follow and not rebuild and prev_len:
-                # If the user scrolled away from the tail, stop following so
-                # the view is not yanked back on every poll.
-                try:
-                    at_bottom = (table.scroll_offset.y + table.region.height
-                                 >= table.max_scroll_y - 1)
-                    if not at_bottom:
-                        self.live_follow = False
-                        self._set_follow_label(False)
-                except Exception:
-                    pass
+            first = prev_len == 0
+            key_changed = key != getattr(self, "_live_render_key", None)
+            rebuild = key_changed or len(items) < prev_len
             try:
                 if rebuild:
                     table.clear()
@@ -697,8 +729,11 @@ if _TEXTUAL:
                                       _escape_markup(str(event.get("title", ""))[:100]))
                     self._live_render_key = key
                     self._live_table_len = len(items)
-                    if self.live_follow:
-                        table.scroll_end(animate=False)
+                    if key_changed and not first:
+                        # A new filter/search starts at the first match and
+                        # stops the follow until the view is back at the tail.
+                        self._live_following = False
+                        table.release_anchor()
                 elif len(items) > prev_len:
                     # Incremental append: never clear, so scroll offset and the
                     # cursor row survive every refresh.
@@ -707,10 +742,9 @@ if _TEXTUAL:
                         table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
                                       _escape_markup(str(event.get("title", ""))[:100]))
                     self._live_table_len = len(items)
-                    if self.live_follow:
-                        table.scroll_end(animate=False)
             except Exception:
                 pass
+            self._sync_follow(table)
             try:
                 if self.live_frozen:
                     state = "[FROZEN]"
@@ -729,19 +763,11 @@ if _TEXTUAL:
             else:
                 self._refresh_frame_display()
 
-        def _set_follow_label(self, following: bool) -> None:
-            try:
-                self.query_one("#btn-live-follow", Button).label = "Follow: %s" % (
-                    "on" if following else "off")
-            except Exception:
-                pass
-
         def _jump_to_latest(self) -> None:
-            """Scroll the timeline to the newest event (and resume following)."""
-            self.live_follow = True
-            self._set_follow_label(True)
+            """Scroll the timeline to the newest event (the follow resumes)."""
+            self._live_following = True
             try:
-                self.query_one("#events-table", DataTable).scroll_end(animate=False)
+                self.query_one("#events-table", DataTable).anchor()
             except Exception:
                 pass
 
@@ -864,9 +890,7 @@ if _TEXTUAL:
             }
             if result in mapping:
                 self._goto_tab(mapping[result])
-            elif result == "cmd-live-follow":
-                self.live_follow = True
-                self._set_follow_label(True)
+            elif result == "cmd-live-jump":
                 self._jump_to_latest()
             elif result == "cmd-live-stop":
                 self._confirm_stop()
@@ -1017,6 +1041,42 @@ if _TEXTUAL:
             else:
                 self._set_text("live-head", "Stopped watching. No run was open.")
 
+        def _copy_run_json_log(self, button=None) -> None:
+            """Copy the whole run's JSON log to the clipboard (read-only).
+
+            The payload is one JSON document: the run's meta data, every
+            event of the timeline and every JSON log file of the run folder.
+            Base64 image bytes become a size note and files that could not
+            be read are listed inside the payload — nothing is dropped
+            silently.
+            """
+            if not self.live_dir:
+                self.notify("No run is open — open one from Runs first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            run_dir = str(self.live_dir)
+            events = list(self.live_events)
+
+            def _work() -> None:
+                document = runs_mod.run_json_log(run_dir, events=events)
+                text = json.dumps(document, indent=2, ensure_ascii=False)
+                message = evidence_mod.copy_to_clipboard(text)
+                self.call_from_thread(self._copy_finished, text, message)
+
+            self._run_guarded("Copying the JSON log", _work, button)
+
+        def _copy_finished(self, text: str, message: str) -> None:
+            if message.startswith("Clipboard copy failed"):
+                # Fall back to the terminal's own clipboard escape (OSC 52).
+                try:
+                    self.copy_to_clipboard(text)
+                except Exception:
+                    pass
+                self.notify(message + " — the terminal clipboard escape was used instead.",
+                            severity="warning", timeout=6, markup=False)
+                return
+            self.notify(message, timeout=4, markup=False)
+
         # -- events -------------------------------------------------------
         def _goto_tab(self, tab_id: str) -> None:
             """Switch workspace tabs without focus snapping back.
@@ -1069,12 +1129,8 @@ if _TEXTUAL:
                 self._open_live_folder()
             elif bid == "btn-live-detach":
                 self._detach_live()
-            elif bid == "btn-live-follow":
-                if self.live_follow:
-                    self.live_follow = False
-                    self._set_follow_label(False)
-                else:
-                    self._jump_to_latest()
+            elif bid == "btn-live-copy":
+                self._copy_run_json_log(button)
             elif bid == "btn-slice":
                 self._slice_preview(button)
             elif bid == "btn-volume-use":

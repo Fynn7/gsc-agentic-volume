@@ -822,6 +822,37 @@ class LiveFrameAndLabels(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class CtrlPOpensTheTuiPalette(unittest.TestCase):
+    """Ctrl+P must open the TUI palette, not Textual's system palette."""
+
+    def test_ctrl_p_is_not_taken_over_by_textual(self):
+        app = tui_app.VolumeAgentApp()
+        bindings = app._bindings.key_to_bindings.get("ctrl+p", ())
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(bindings[0].action, "app.command_palette")
+
+    def test_ctrl_p_opens_the_tui_palette(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                await pilot.press("ctrl+p")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui_app.CommandScreen)
+                # The palette runs its action when a command is picked.
+                app.screen.query_one("#cmd-go-settings", tui_app.Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                from textual.widgets import TabbedContent
+                self.assertEqual(
+                    app.query_one("#workspaces", TabbedContent).active, "tab-settings")
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
 class ModalEscape(unittest.TestCase):
     """Esc must close every modal the TUI opens (help, palette, confirm)."""
 

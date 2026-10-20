@@ -304,7 +304,11 @@ if _TEXTUAL:
         """
 
         BINDINGS = [
-            Binding("ctrl+p", "commands", "Commands"),
+            # "app.command_palette" is the name Textual looks for: declaring it
+            # stops Textual from adding its own ctrl+p binding, so Ctrl+P opens
+            # the TUI palette (the Go:/Live: list) and not the generic system
+            # palette, which Textual would otherwise bind with priority.
+            Binding("ctrl+p", "app.command_palette", "Commands", show=False),
             Binding("f1", "help", "Help"),
             Binding("t", "toggle_dark", "Theme"),
             Binding("q", "quit_confirm", "Quit"),
@@ -897,6 +901,15 @@ if _TEXTUAL:
             self.notify(message, timeout=5, markup=False)
 
         # -- actions ------------------------------------------------------
+        def action_command_palette(self):
+            """Ctrl+P (and the header icon) opens the TUI palette.
+
+            Textual binds ctrl+p to its own system palette; the binding above
+            uses the "app.command_palette" name so Textual keeps its hands off
+            it, and this override routes the key to the curated list.
+            """
+            self.action_commands()
+
         def action_commands(self):
             self.push_screen(CommandScreen(), callback=self._command_chosen)
 

@@ -130,6 +130,13 @@ class HelpScreen(DismissibleModal):
             "Ctrl+P = command palette · F1 = this help · t = theme · q = quit "
             "(asks first while a run is live)\n"
             "\n"
+            "DASHBOARD — mode, model, volume and service state at a glance\n"
+            "  New run          open the New Run tab to start an agent run\n"
+            "  Open Live view   open the Live tab; with a run selected in Runs it\n"
+            "                    follows that run\n"
+            "  Refresh status   re-read mode, model, volume, service state and the\n"
+            "                    run list from disk (nothing is written)\n"
+            "\n"
             "LIVE — watch one run while it runs\n"
             "  Stop run          ask the agent to stop now; evidence already\n"
             "                    written is kept, the launcher records 'interrupted'\n"
@@ -156,6 +163,7 @@ class HelpScreen(DismissibleModal):
             "                    starts until you press Start agent run\n"
             "  Pick as A / B     remember two runs, then Compare A vs B shows their\n"
             "                    config difference\n"
+            "  Refresh list      re-read the runs on disk (nothing is written)\n"
             "\n"
             "NEW RUN\n"
             "  Check services & settings  check the local inference service and the\n"
@@ -171,6 +179,7 @@ class HelpScreen(DismissibleModal):
             "SERVICES — only services this TUI started are ever touched\n"
             "  Start missing services  start the owned services that are down\n"
             "  Stop owned services     stop the owned services\n"
+            "  Refresh status          re-read the owned services and their logs\n"
             "  Restart owned           restart the owned services\n"
             "  Stop all services       stop the agent tree, the local Ollama and the\n"
             "                    owned services (the model unloads from VRAM)\n"
@@ -223,8 +232,10 @@ class ConfirmScreen(DismissibleModal):
         yield Static(self._message, id="confirm-message")
         yield Static("Esc = No (cancel)", id="confirm-hint")
         with Horizontal():
-            yield Button("Yes", id="confirm-yes", variant="error")
-            yield Button("No", id="confirm-no", variant="primary")
+            yield Button("Yes", id="confirm-yes", variant="error",
+                         tooltip="Do the action now. Esc is the same as No.")
+            yield Button("No", id="confirm-no", variant="primary",
+                         tooltip="Do nothing and go back. Esc does the same.")
 
     async def action_dismiss(self, result=None) -> None:
         """Esc cancels: the same as clicking No, never the Yes action."""
@@ -239,34 +250,71 @@ class ConfirmScreen(DismissibleModal):
 
 
 class CommandScreen(DismissibleModal):
-    # (label, action id) — the id is stable, the label spells out the effect.
+    # (label, action id, tooltip) — the id is stable, the label spells out the
+    # effect and the tooltip says it once more (every button carries one).
     COMMANDS = [
-        ("Go: Dashboard", "go-dashboard"),
-        ("Go: New Run", "go-newrun"),
-        ("Go: Runs", "go-runs"),
-        ("Go: Live", "go-live"),
-        ("Go: Volumes", "go-volumes"),
-        ("Go: Services", "go-services"),
-        ("Go: Settings", "go-settings"),
-        ("Live: Jump to newest event", "live-jump"),
-        ("Live: Stop the run", "live-stop"),
-        ("Live: Verify evidence (read-only)", "live-verify"),
-        ("Live: View current PNG", "live-open-png"),
-        ("Live: Open PNG folder", "live-open"),
-        ("Live: Stop watching (run keeps going)", "live-detach"),
-        ("Runs: Refresh list", "runs-refresh"),
-        ("Services: Refresh list", "services-refresh"),
-        ("Help: what every button does", "help"),
-        ("Quit the TUI", "quit"),
+        ("Go: Dashboard", "go-dashboard", "Show mode, model, volume and service state."),
+        ("Go: New Run", "go-newrun", "Open the form that starts an agent run."),
+        ("Go: Runs", "go-runs", "Show the runs already on disk."),
+        ("Go: Live", "go-live", "Watch the selected run while it runs."),
+        ("Go: Volumes", "go-volumes", "Show the prepared volumes found on this machine."),
+        ("Go: Services", "go-services", "Show the services this TUI owns."),
+        ("Go: Settings", "go-settings", "Show the form that writes runtime/tui-settings.json."),
+        ("Live: Jump to newest event", "live-jump",
+         "Scroll the event timeline back to the newest event."),
+        ("Live: Stop the run", "live-stop",
+         "Ask the agent to stop now; evidence already written is kept."),
+        ("Live: Verify evidence (read-only)", "live-verify",
+         "Check this run's evidence; writes verification.json, never calls the model."),
+        ("Live: View current PNG", "live-open-png",
+         "Open the previewed PNG in your image viewer (full size)."),
+        ("Live: Open PNG folder", "live-open",
+         "Open the file explorer at the folder that holds the PNGs."),
+        ("Live: Stop watching (run keeps going)", "live-detach",
+         "Leave the Live view; the run keeps running in the background."),
+        ("Runs: Refresh list", "runs-refresh", "Re-read the runs on disk."),
+        ("Services: Refresh list", "services-refresh",
+         "Re-read the owned services and their logs."),
+        ("Help: what every button does", "help", "Open this help screen."),
+        ("Quit the TUI", "quit",
+         "Stop everything the TUI owns, then leave. Asks first while a run is live."),
     ]
 
     def compose(self):
         yield Static("Command palette (Enter runs, Esc closes)", id="cmd-title")
-        for label, action in self.COMMANDS:
-            yield Button(label, id="cmd-%s" % action)
+        for label, action, tooltip in self.COMMANDS:
+            yield Button(label, id="cmd-%s" % action, tooltip=tooltip)
 
     async def on_button_pressed(self, event):
         self.dismiss(result=event.button.id)
+
+
+def start_owned_services(settings: dict) -> list[str]:
+    """Start the missing owned services and keep the ownership record fresh.
+
+    The heartbeat is what tells another TUI session that these services still
+    belong to a live session, so it must keep running while we own them.
+    Returns the report lines for the console.
+    """
+    if services_mod is None:
+        return []
+    print("Starting owned background services (Local loopback only)...")
+    import time as _time
+    started_at = _time.monotonic()
+    lines: list[str] = []
+    try:
+        report = services_mod.ensure_services(settings)
+        lines = list(services_mod.report_lines(report))
+        for line in lines:
+            print(line)
+        print("Service check done in %.1fs." % (_time.monotonic() - started_at))
+    except Exception as error:
+        print("Service auto-start skipped: %s" % error)
+    try:
+        services_mod.heartbeat_start()
+    except Exception:
+        pass
+    return lines
 
 
 if _TEXTUAL:
@@ -284,7 +332,7 @@ if _TEXTUAL:
         .row > Select { width: 1fr; }
         .field-label { width: 24; content-align: right middle; padding-right: 1; }
         .narrow { width: 18; }
-        #status-bar { height: 3; border: solid green; }
+        #status-bar { height: 5; border: solid green; }
         #confirm-hint { height: auto; color: $text-muted; }
         #newrun-prompt { height: 8; }
         #newrun-preflight { height: auto; min-height: 3; }
@@ -343,6 +391,7 @@ if _TEXTUAL:
             self.compare_b: str | None = None
             self._launcher_thread: threading.Thread | None = None
             self._launcher_result: dict = {}
+            self._start_locked = False
             self._busy_count = 0
 
         def _busy_inc(self) -> None:
@@ -587,6 +636,11 @@ if _TEXTUAL:
                                 yield Label(label, classes="field-label")
                                 yield Input(value, id=wid)
                         with Horizontal(classes="row"):
+                            yield Label("Think", classes="field-label")
+                            yield Select([("off", "false"), ("on", "true")],
+                                         value="true" if self.settings.get("think") else "false",
+                                         id="set-think")
+                        with Horizontal(classes="row"):
                             yield Button("Save settings", id="btn-settings-save", variant="primary",
                                          tooltip="Write these settings to runtime/tui-settings.json.")
                             yield Button("Reset to defaults", id="btn-settings-reset",
@@ -620,10 +674,26 @@ if _TEXTUAL:
                 self.runs = runs
                 running = [r for r in runs if r.get("status") == "Running"]
                 last = runs[0] if runs else None
-                text = "Mode %s · Model %s · Runs %d · Running %s · Last %s" % (
-                    self.settings.get("mode"), self.settings.get("model"), len(runs),
-                    running[0]["runId"] if running else "none",
-                    ("%s (%s)" % (last["runId"], last["status"])) if last else "none")
+                volume = None
+                try:
+                    volume = cfg.selected_volume(self.settings) if cfg else None
+                except Exception:
+                    volume = None
+                try:
+                    status = services_mod.service_status(self.settings)
+                except Exception:
+                    status = {}
+                text = (
+                    "Mode %s · Model %s\n"
+                    "Volume %s · Inference %s · Renderer %s\n"
+                    "Owned %s · Runs %d · Running %s · Last %s" % (
+                        self.settings.get("mode"), self.settings.get("model"),
+                        (str(volume)[-40:] if volume else "none"),
+                        status.get("inference", "?"), status.get("renderer", "?"),
+                        status.get("owned", "?"),
+                        len(runs),
+                        running[0]["runId"] if running else "none",
+                        ("%s (%s)" % (last["runId"], last["status"])) if last else "none"))
                 self.call_from_thread(self._set_text, "status-bar", text)
             except Exception as error:
                 self.call_from_thread(self._set_text, "status-bar", "dashboard failed: %s" % error)
@@ -1138,6 +1208,14 @@ if _TEXTUAL:
             elif bid == "btn-preflight":
                 self._run_guarded("Preflight check", self._check_preflight, button)
             elif bid == "btn-start-run":
+                # The gate probes endpoints and can take seconds: the lock is
+                # taken here, on the UI thread, so a second click cannot start
+                # a second run.
+                if self._start_locked:
+                    self.notify("A run is already starting — wait for it.",
+                                severity="warning", timeout=4, markup=False)
+                    return
+                self._start_locked = True
                 self.run_worker(self._start_run, thread=True)
             elif bid == "btn-runs-refresh":
                 self._run_guarded("Refreshing runs", self._refresh_runs, button)
@@ -1373,6 +1451,22 @@ if _TEXTUAL:
             return settings
 
         def _start_run(self):
+            """Preflight and launch. The caller already holds the start lock."""
+            self._start_locked = True
+            try:
+                self.query_one("#btn-start-run", Button).loading = True
+            except Exception:
+                pass
+            self._busy_inc()
+            self._launcher_result = {"settled": False}
+            try:
+                self._start_run_body()
+            except Exception as error:
+                self.call_from_thread(self._set_text, "newrun-preflight",
+                                      "Start failed: %s" % error)
+                self.call_from_thread(self._settle_launch)
+
+        def _start_run_body(self):
             try:
                 preset = str(self.query_one("#newrun-preset", Select).value)
                 prompt = self.query_one("#newrun-prompt", TextArea).text
@@ -1402,20 +1496,16 @@ if _TEXTUAL:
                 else:
                     self.call_from_thread(self._set_text, "newrun-preflight",
                                           "Temporary Ollama failed: %s. Fix your Ollama manually." % started.get("error"))
+                    self.call_from_thread(self._settle_launch)
                     return
             problems = list(problems) + list(gate)
             if problems:
                 self.call_from_thread(self._set_text, "newrun-preflight",
                                       "Blocked:\n" + "\n".join("- %s" % p if isinstance(p, str) else "- %s" % p.get("name") for p in problems[:8]))
+                self.call_from_thread(self._settle_launch)
                 return
             config_path = flows_mod.write_config(effective, preset, cfg)
             self.call_from_thread(self._set_text, "newrun-preflight", "Launching %s..." % config_path.name)
-            try:
-                self.query_one("#btn-start-run", Button).loading = True
-            except Exception:
-                pass
-            self._busy_inc()
-            self._launcher_result = {"settled": False}
             thread = threading.Thread(target=self._launch_blocking, args=(str(config_path),), daemon=True)
             self._launcher_thread = thread
             thread.start()
@@ -1425,6 +1515,7 @@ if _TEXTUAL:
             if self._launcher_result.get("settled"):
                 return
             self._launcher_result["settled"] = True
+            self._start_locked = False
             try:
                 self.query_one("#btn-start-run", Button).loading = False
             except Exception:
@@ -1621,6 +1712,11 @@ if _TEXTUAL:
                 raw_temp = self.query_one("#set-temp", Input).value.strip()
                 if raw_temp:
                     self.settings["temperature"] = float(raw_temp)
+                try:
+                    self.settings["think"] = str(
+                        self.query_one("#set-think", Select).value) == "true"
+                except Exception:
+                    pass
                 problems = cfg.validate_settings(self.settings)
                 if problems:
                     self._set_text("settings-status", "Invalid:\n" + "\n".join("- " + p for p in problems))
@@ -1634,13 +1730,38 @@ if _TEXTUAL:
                 self.notify("Save failed: %s" % error, severity="error", timeout=5, markup=False)
 
         def _reset_settings(self):
-            self.settings = dict(cfg.DEFAULTS)
+            """Fill the form with the built-in defaults. Writes nothing.
+
+            The button label, its tooltip and the F1 help all promise that
+            nothing is written here, so the file is only written by
+            "Save settings".
+            """
+            defaults = dict(cfg.DEFAULTS)
+            self.settings = dict(defaults)
+            for key, widget in (("mode", "set-mode"), ("model", "set-model"),
+                                ("endpoint", "set-endpoint"), ("h200Endpoint", "set-h200"),
+                                ("rendererService", "set-renderer")):
+                self._set_input(widget, str(defaults.get(key, "")))
+            for key, widget in (("contextSize", "set-context"), ("renderBudget", "set-budget"),
+                                ("timeoutSeconds", "set-timeout"), ("taskTimeoutSeconds", "set-tasktimeout"),
+                                ("maxOutputTokens", "set-maxtokens")):
+                self._set_input(widget, str(defaults.get(key, "")))
+            self._set_input("set-temp", str(defaults.get("temperature", "")))
             try:
-                cfg.save_settings(self.settings)
+                self.query_one("#set-think", Select).value = (
+                    "true" if defaults.get("think") else "false")
             except Exception:
                 pass
-            self._set_text("settings-status", "Reset to defaults.")
-            self.notify("Settings reset to defaults.", timeout=3, markup=False)
+            self._set_text("settings-status",
+                           "Form filled with the built-in defaults. Nothing was written — "
+                           "press Save settings to keep them.")
+            self.notify("Form reset to defaults (not saved yet).", timeout=4, markup=False)
+
+        def _set_input(self, widget_id: str, value: str) -> None:
+            try:
+                self.query_one("#" + widget_id, Input).value = value
+            except Exception:
+                pass
 
         def _probe_h200(self):
             import urllib.request
@@ -1661,16 +1782,7 @@ if _TEXTUAL:
             print("Run .\\Start-VolumeTUI.ps1 in Windows Terminal or PowerShell.")
             return 2
         settings = cfg.load_settings()
-        print("Starting owned background services (Local loopback only)...")
-        import time as _time
-        _svc_start = _time.monotonic()
-        try:
-            report = services_mod.ensure_services(settings)
-            for line in services_mod.report_lines(report):
-                print(line)
-            print("Service check done in %.1fs." % (_time.monotonic() - _svc_start))
-        except Exception as error:
-            print("Service auto-start skipped: %s" % error)
+        start_owned_services(settings)
         _install_termination_handlers()
         try:
             app = VolumeAgentApp()

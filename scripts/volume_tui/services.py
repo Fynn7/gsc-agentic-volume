@@ -630,6 +630,29 @@ def owned_summary() -> str:
     return "TUI-owned (%s)" % ", ".join(sorted(alive)) if alive else "TUI-owned (exited)"
 
 
+def service_status(settings: dict | None = None) -> dict:
+    """Read-only state of the local inference and renderer endpoints.
+
+    The Dashboard shows it. It never starts, stops or changes a service, and
+    it never asks the model anything.
+    """
+    settings = settings or config_mod.load_settings()
+    status = {"inference": "n/a", "renderer": "n/a", "owned": owned_summary()}
+    endpoint = str((settings.get("h200Endpoint") if settings.get("mode") == "H200"
+                    else settings.get("endpoint")) or "")
+    if endpoint:
+        status["inference"] = "up" if _endpoint_up(endpoint) else "down"
+    service = str(settings.get("rendererService") or "")
+    if service:
+        try:
+            identity = _http_get(service.rstrip("/") + "/api/service", 1.5)
+            status["renderer"] = ("up" if identity.get("service") == "gav-native-renderer"
+                                  else "foreign service")
+        except Exception:
+            status["renderer"] = "down"
+    return status
+
+
 _hb_stop = threading.Event()
 _hb_thread: threading.Thread | None = None
 

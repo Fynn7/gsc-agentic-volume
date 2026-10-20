@@ -16,6 +16,8 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
   Set `$env:GAV_TUI_WHEELHOUSE` for offline installs; `-NoBootstrap` fails fast.
 - Prints one-line settings/mode/model, probes inference + renderer (read-only),
   then runs `python -B scripts/volume_tui` inside the venv.
+- The TUI itself starts the missing **Local loopback** services on entry (see
+  "Service lifecycle"); it never downloads a model and never calls one.
 - Non-interactive shells exit 2 with guidance. `q` quits and stops every
   process the TUI owns (see "Leaving the TUI"); Ctrl+C is the hard stop and
   also stops a local Ollama the TUI did not start.
@@ -70,6 +72,23 @@ explained in the F1 help screen — stated once, never repeated on screen.
 - **Settings**: mode/model/endpoints, contextSize, renderBudget, temperature,
   think, timeouts, maxOutputTokens. Validated, saved to
   `runtime/tui-settings.json`, H200 probe honest (never silent fallback).
+
+## Service lifecycle (auto-start on entry, auto-stop on exit)
+
+- TUI entry runs `services.ensure_services`: missing **Local loopback**
+  Ollama/Renderer are started detached (logs under `runtime/tui/`) and recorded
+  in `runtime/tui/services.json` with session id + pid + image.
+- The session keeps that record fresh with a **heartbeat** (30 s tick, 90 s
+  TTL). Another TUI session may only adopt the services once this heartbeat
+  went stale — a live session's services are never taken away from it.
+- Exit runs `services.release_owned_services`: only recorded, re-verified
+  (pid alive + image name match) processes are terminated. Refused while any
+  agent run (`Running`) or launcher lock is live — services stay up instead.
+- Never auto-started: H200 tunnel/endpoint, non-loopback URLs. Never
+  downloaded: models (`ollama pull` stays manual). Never touched: foreign
+  processes.
+- The Dashboard shows the state read-only: `Inference up/down`,
+  `Renderer up/down` and `Owned TUI-owned (…) / foreign/manual`.
 
 ## Leaving the TUI leaves no process behind
 

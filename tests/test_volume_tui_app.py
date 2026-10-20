@@ -812,13 +812,17 @@ class LiveFrameAndLabels(unittest.TestCase):
         asyncio.run(_run())
 
     def test_command_palette_actions_have_stable_ids(self):
-        actions = [action for _label, action in tui_app.CommandScreen.COMMANDS]
+        actions = [action for _label, action, _tooltip in tui_app.CommandScreen.COMMANDS]
         for action in ("live-verify", "live-detach", "live-open-png", "live-open"):
             self.assertIn(action, actions)
         for action in actions:
             self.assertTrue(action.startswith("go-") or action.startswith("live-")
                             or action.startswith("runs-") or action.startswith("services-")
                             or action in ("help", "quit"))
+
+    def test_every_command_palette_button_carries_a_tooltip(self):
+        for _label, _action, tooltip in tui_app.CommandScreen.COMMANDS:
+            self.assertTrue(str(tooltip).strip())
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
@@ -849,6 +853,126 @@ class CtrlPOpensTheTuiPalette(unittest.TestCase):
                 from textual.widgets import TabbedContent
                 self.assertEqual(
                     app.query_one("#workspaces", TabbedContent).active, "tab-settings")
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class ReviewFixes(unittest.TestCase):
+    """Regressions for the code-review findings of this branch."""
+
+    def test_entry_starts_the_ownership_heartbeat(self):
+        with patch.object(tui_app.services_mod, "ensure_services",
+                          return_value={"started": [], "reused": [], "adopted": [],
+                                        "problems": [], "contested": False,
+                                        "owns": False}), \
+             patch.object(tui_app.services_mod, "heartbeat_start") as heartbeat:
+            tui_app.start_owned_services({"mode": "Local"})
+        # Without the heartbeat the record goes stale and another TUI session
+        # adopts (and stops) the services this session still owns.
+        self.assertTrue(heartbeat.called)
+
+    def test_reset_to_defaults_fills_the_form_and_writes_nothing(self):
+        import asyncio
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "settings.json"
+                with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
+                    app = tui_app.VolumeAgentApp()
+                    async with app.run_test(size=(100, 30)) as pilot:
+                        await pilot.pause()
+                        app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-settings"
+                        await pilot.pause()
+                        app.query_one("#set-model", tui_app.Input).value = "changed-model"
+                        app._reset_settings()
+                        await pilot.pause()
+                        # The form is filled with the defaults ...
+                        self.assertEqual(app.query_one("#set-model", tui_app.Input).value,
+                                         str(tui_app.cfg.DEFAULTS["model"]))
+                        self.assertEqual(app.query_one("#set-budget", tui_app.Input).value,
+                                         str(tui_app.cfg.DEFAULTS["renderBudget"]))
+                        # ... and nothing was written (label, tooltip and F1 say so).
+                        self.assertFalse(target.exists())
+        asyncio.run(_run())
+
+    def test_second_click_starts_only_one_run(self):
+        import asyncio
+        import threading
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            gate = threading.Event()
+            started = []
+
+            def _slow_gate(settings, env_mod, services_mod):
+                started.append("gate")
+                gate.wait(2.0)
+                return []
+
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-newrun"
+                await pilot.pause()
+                with patch.object(tui_app.flows_mod, "build_new_run",
+                                  return_value=({"task": "x"}, [])), \
+                     patch.object(tui_app.flows_mod, "service_gate", side_effect=_slow_gate), \
+                     patch.object(tui_app.cfg, "write_run_config",
+                                  return_value=Path("c.json")), \
+                     patch.object(tui_app.runner_mod, "launch",
+                                  return_value=tui_runner.LaunchResult()):
+                    button = app.query_one("#btn-start-run", tui_app.Button)
+                    button.focus()
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    # The gate is still running: the second click was refused.
+                    self.assertEqual(len(started), 1)
+                    self.assertTrue(app._start_locked)
+                    gate.set()
+                    for _ in range(100):
+                        await pilot.pause()
+                        if not app._start_locked:
+                            break
+                    self.assertFalse(app._start_locked)
+        asyncio.run(_run())
+
+    def test_dashboard_shows_volume_and_service_state(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                with patch.object(tui_app.services_mod, "service_status",
+                                  return_value={"inference": "up", "renderer": "down",
+                                                "owned": "TUI-owned (ollama)"}):
+                    app.run_worker(app._load_dashboard, thread=True)
+                    for _ in range(100):
+                        await pilot.pause()
+                        text = str(app.query_one("#status-bar").render())
+                        if "Inference" in text:
+                            break
+                text = str(app.query_one("#status-bar").render())
+                self.assertIn("Mode", text)
+                self.assertIn("Volume", text)
+                self.assertIn("Inference up", text)
+                self.assertIn("Renderer down", text)
+                self.assertIn("TUI-owned", text)
+        asyncio.run(_run())
+
+    def test_settings_expose_the_think_control(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-settings"
+                await pilot.pause()
+                select = app.query_one("#set-think", tui_app.Select)
+                self.assertEqual(str(select.value), "false")
         asyncio.run(_run())
 
 

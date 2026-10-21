@@ -29,29 +29,48 @@ Evidence is read-only except new runs, `verification.json`, and
 ## The screen (one screen, no workspaces)
 
 ```
- ● volume-agent  qwen3.6:35b  ·  run-20261019-131431  ·  running  ·  2/4 obs
- ▌ Set the camera rotationXYZ to [25,-35,10] degrees. …
- ✳ Thinking  in 12278, out 96 tokens  ▸ Let me inspect the current scene …
- ● render_scene  camera rotation 25,-35,10  ✓ 1.28s
-   changed: camera rotation 25,-35,10
-   why: Rotate the camera as the task asks.
- ▣ frame revision 1 · 148491 lit px · 512x512
+ ● volume-agent  qwen3.6:35b  ·  volume 246x246x221 voxels  ·  run-20261019-131431  ·  running  ·  2 of 4 observations used
+ ▌ Set the camera rotationXYZ to [25,-35,10] degrees.
+ ✓ Model answered  in 12278, out 96 tokens
+ ● Read the scene (inspect_scene)  camera, opacity window, crop box, current picture · nothing changes  ✓ 0s
+ ● Render a picture (render_scene)  camera rotation 25,-35,10 · a new PNG of the volume · the scene changes  ✓ 1s
+   » Rotate the camera as the task asks.
+   the camera turns 25° around X, then -35° around Y, then 10° around Z
+ ▣ frame revision 1 · 148491 lit px (56.6% of the picture) · 512x512
    D:/…/runtime/<session>/frame-1/image.png
    [the picture, inline]
- The camera is now rotated to [25,-35,10] …
+ » The camera is now rotated to [25,-35,10] …
  ✓ Run finished · picked frame revision 1 · task check: unverified
+   » The camera is rotated.
 ```
 
-- The **status line** names the model, the open run, its state and how much of
-  the observation budget is already spent. It carries the spinner while a
-  worker runs.
-- The **conversation** is the whole live view: the task, the thinking, the
+- The **status line** names the model, the volume, the open run, its state and
+  how much of the observation budget is already spent. It carries the spinner
+  while a worker runs.
+- **Whose words are these?** `▌` is your task, `»` is everything the model
+  itself wrote (its answer, its reason for a call, its claim at the end),
+  and `● ▣ ⚠ ✓` are facts the screen measured or recorded. The screen never
+  writes a `»` line, so the two can never be mixed up.
+- The **conversation** is the whole live view: the task, the model turns, the
   tool calls with the numbers they changed, the frames (the picture is inline,
   fitted into the panel, never cropped) and the answer. Every line says what
   happened — the wording lives in `transcript.py` and `event_text.py`.
-- The **Thinking** line holds the model's own words. **A click opens the
-  reasoning chain**, a second click closes it; the chain grows while the model
-  writes it. The arrow on that line says which way it points: ▸ closed, ▾ open.
+- Every row is **facts, not labels**: what goes in, what comes out, what
+  changes ("Render a picture  camera rotation 25,-35,10 · a new PNG of the
+  volume · the scene changes"). No parentheses of explanation, no "what that
+  does:" in front of the numbers — the numbers say themselves.
+- The **transport is hidden**: the model calls and the HTTP status are written
+  to the evidence, but they only appear on screen with **Ctrl+H**. The harness
+  notices (an under-development feature, a missing model description) are one
+  quiet row instead of a wall of jargon.
+- The **model turn** line says **Thinking** / **Thought** when the model
+  really reasoned, and **Working** / **Model answered** when it did not —
+  the Think setting is off, and the screen never claims reasoning that the
+  model did not produce. **Only reasoning opens**: the foldable block exists
+  when the model reasoned, and the words the model wrote before a tool call
+  join that reasoning. Without reasoning there is nothing to open, so the
+  words stay a `»` line of the model's own and the turn line is a plain
+  fact row.
 - The **answer is streamed**: the recorded model stream
   (`http/http-NNN.response.bin`, the raw SSE the launcher recorded while the
   model was still answering) is tailed, so the text appears word by word.
@@ -70,6 +89,8 @@ Evidence is read-only except new runs, `verification.json`, and
 | Esc | stop the running agent (the evidence already written stays) |
 | Ctrl+P | the commands (below) |
 | F1 | help |
+| F2 | the glossary: what the words of the screen mean |
+| Ctrl+H | the technical rows (the model calls, the HTTP status) |
 | Ctrl+T | light / dark |
 | Ctrl+Q | quit (asks first while a run is live) |
 | Ctrl+C | copy the selected text (the terminal default — not a hard stop) |

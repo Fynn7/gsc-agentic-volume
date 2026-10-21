@@ -10,12 +10,42 @@ without a run, a model or a renderer.
 """
 from __future__ import annotations
 
+# The marker in front of every word the model itself wrote. The screen
+# never writes such words, so the reader always knows whose voice it is.
+MODEL_MARK = "\u00bb"
+
 # What each renderer tool does, in words a newcomer can act on.
 TOOL_MEANING = {
     "inspect_scene": "read the current scene, its numbers and its PNG (changes nothing)",
     "render_scene": "render a new frame from the volume",
     "inspect_slice": "read one raw voxel slice (changes nothing)",
     "finish_task": "save an already rendered frame as the final result",
+}
+
+# The step, in three words. No parentheses, no explanation: the facts that
+# follow the verb on the row say what the call does.
+TOOL_ACTION = {
+    "inspect_scene": "Read the scene",
+    "render_scene": "Render a picture",
+    "inspect_slice": "Read one slice",
+    "finish_task": "Save the result",
+}
+DEFAULT_ACTION = "Call the renderer"
+
+# What the call hands back.
+TOOL_OUTPUT = {
+    "inspect_scene": "camera, opacity window, crop box, current picture",
+    "render_scene": "a new PNG of the volume",
+    "inspect_slice": "a grayscale PNG of one voxel layer",
+    "finish_task": "the chosen frame, as the result",
+}
+
+# What the call changes.
+TOOL_EFFECT = {
+    "inspect_scene": "nothing changes",
+    "render_scene": "the scene changes",
+    "inspect_slice": "nothing changes",
+    "finish_task": "nothing changes",
 }
 
 # Parameter name -> short human label, in the order they are shown.
@@ -89,6 +119,108 @@ def parameter_lines(parameters):
         if key not in _PARAM_KEYS:
             lines.append("%s %s" % (key, brief(parameters[key], 40)))
     return lines
+
+
+def tool_action(name, arguments=None):
+    """The step, in three words: what the agent is doing right now."""
+    return TOOL_ACTION.get(str(name or ""), DEFAULT_ACTION)
+
+
+def tool_input(name, arguments=None):
+    """What goes into the call: the numbers it changes, or its target."""
+    arguments = arguments if isinstance(arguments, dict) else {}
+    name = str(name or "")
+    if name == "inspect_slice":
+        return ["axis %s, index %s" % (arguments.get("axis", "?"),
+                                       arguments.get("index", "?"))]
+    if name == "finish_task":
+        return ["frame revision %s" % arguments.get("frameRevision", "?")]
+    return parameter_lines(arguments.get("parameters"))
+
+
+def tool_facts(name, arguments=None):
+    """Input, output and effect of one call, as one line of facts."""
+    arguments = arguments if isinstance(arguments, dict) else {}
+    facts = []
+    numbers = tool_input(name, arguments)
+    if numbers:
+        facts.append(", ".join(numbers[:2]))
+    output = TOOL_OUTPUT.get(str(name or ""))
+    if output:
+        facts.append(output)
+    effect = TOOL_EFFECT.get(str(name or ""))
+    if effect:
+        facts.append(effect)
+    return " · ".join(facts)
+
+
+def effect_lines(parameters):
+    """What the changed numbers mean, in words.
+
+    The numbers alone ("camera rotation 30,45,0") only mean something to
+    someone who knows the renderer. Each line says what the number does.
+    """
+    if not isinstance(parameters, dict):
+        return []
+    lines = []
+    rotation = parameters.get("rotationXYZ")
+    if isinstance(rotation, (list, tuple)) and len(rotation) == 3:
+        lines.append("the camera turns %s° around X, then %s° around Y, "
+                     "then %s° around Z" % tuple(number(v) for v in rotation))
+    shift = parameters.get("translation")
+    if isinstance(shift, (list, tuple)) and len(shift) == 3:
+        lines.append("the camera slides by %s,%s,%s" % tuple(number(v) for v in shift))
+    start = parameters.get("tfStart")
+    width = parameters.get("tfWidth")
+    if start is not None:
+        top = start
+        if width is not None:
+            try:
+                top = start + width
+            except TypeError:
+                top = width
+        lines.append("density below %s stays invisible, above %s is fully bright"
+                     % (number(start), number(top)))
+    crop = parameters.get("crop")
+    if isinstance(crop, (list, tuple)) and len(crop) == 6:
+        lines.append("only the voxels x %s-%s, y %s-%s, z %s-%s are shown"
+                     % tuple(number(v) for v in crop))
+    return lines
+
+
+def notice_headline(count):
+    """One line for the harness notices (they do not stop the run)."""
+    count = int(count or 0)
+    if count <= 1:
+        return "1 harness notice · Ctrl+H reads it"
+    return "%d harness notices · Ctrl+H reads them" % count
+
+
+# The words the screen uses, explained for someone who never saw this system.
+GLOSSARY = (
+    ("observation", "one look at the volume: a rendered picture or a raw slice. "
+                    "Every observation costs one step of the budget."),
+    ("budget", "how many looks the agent may take. The top line shows how many "
+               "are already used."),
+    ("frame", "one picture of the volume that the renderer wrote to disk."),
+    ("revision", "the version number of the scene. Every change makes a new one."),
+    ("lit px", "pixels of the picture that are not black - how much of the "
+               "volume is visible at all."),
+    ("camera rotation", "the direction the camera looks from, in degrees around "
+                        "X, then Y, then Z."),
+    ("camera shift", "where the camera sits, relative to the volume."),
+    ("opacity start / width", "the density window: below the start nothing is "
+                              "drawn, above start+width everything is bright."),
+    ("crop", "the part of the volume that is shown (voxel bounds, not a "
+             "percentage)."),
+    ("model call", "one request to the model. Technical detail (Ctrl+H)."),
+    ("HTTP 200", "the model answered without an error. Technical detail (Ctrl+H)."),
+    ("harness", "the program that runs the model and hands it the renderer tools."),
+    ("renderer", "the program that draws a picture from the volume."),
+    ("loopback", "a service on this computer only (127.0.0.1), not the internet."),
+    ("run id", "the name of one attempt. Its log, its pictures and its evidence "
+               "live in the folder of that name."),
+)
 
 
 # -- model turns ---------------------------------------------------------
@@ -185,7 +317,7 @@ def tool_call(name, arguments):
 
 def tool_return(name, seconds):
     if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-        elapsed = "returned in %.2fs" % seconds
+        elapsed = "returned in %ds" % int(seconds + 0.5)
     else:
         elapsed = "returned"
     return {
@@ -313,7 +445,7 @@ def infer_response(meta):
     index = meta.get("index", "?")
     status = meta.get("status", "?")
     seconds = meta.get("seconds")
-    elapsed = ("%.2fs" % seconds) if isinstance(seconds, (int, float)) else "?"
+    elapsed = ("%ds" % int(seconds + 0.5)) if isinstance(seconds, (int, float)) else "?"
     method = meta.get("method", "?")
     path = meta.get("path", "?")
     failed = bool(meta.get("error")) or (isinstance(status, int) and status >= 400)

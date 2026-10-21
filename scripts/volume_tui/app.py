@@ -133,12 +133,22 @@ SETTINGS_ROWS = (
 IMAGE_PREVIEW_MAX_ROWS = 14
 IMAGE_PREVIEW_MAX_COLS = 64
 
+# Two clocks. The screen ticks fast, so the spinner and the seconds stay
+# alive; the backend is read at its own pace, so the evidence is not
+# re-read ten times a second.
+UI_TICK_SECONDS = 0.1
+BACKEND_TICK_SECONDS = 0.5
+
 # The spinner the thinking block and the status line share.
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+# In front of every word the model wrote itself (event_text owns the mark).
+MODEL_MARK = "»"
+
+
 def _spinner_frame() -> str:
-    return SPINNER[int(time.time() * 5) % len(SPINNER)]
+    return SPINNER[int(time.time() * 10) % len(SPINNER)]
 
 
 def render_block(block: dict):
@@ -167,11 +177,16 @@ def render_block(block: dict):
     if kind == transcript_mod.THINKING:
         return render_thinking(block, False)
     if kind == transcript_mod.ASSISTANT:
+        # The model's own words, marked as such.
+        text.append("%s " % MODEL_MARK, style=ACCENT)
         text.append(title)
         return text
     if kind == transcript_mod.TOOL:
         text.append("● ", style=ACCENT)
         text.append(title, style="bold %s" % ACCENT)
+        tool_name = str(data.get("tool") or "")
+        if tool_name and tool_name != title:
+            text.append(" (%s)" % tool_name, style="dim")
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
         if status == "running":
@@ -180,7 +195,7 @@ def render_block(block: dict):
             text.append("  ✓", style="green")
             seconds = data.get("seconds")
             if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-                text.append(" %.2fs" % seconds, style="dim")
+                text.append(" %ds" % int(seconds + 0.5), style="dim")
         elif status == "failed":
             text.append("  ✗", style="red")
         if body:
@@ -191,6 +206,13 @@ def render_block(block: dict):
         text.append(title, style="green")
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
+        return text
+    if kind == transcript_mod.NOTICES:
+        # The harness notices: one row, quiet, with the text behind Ctrl+H.
+        text.append("⚠ ", style="yellow")
+        text.append(title, style="yellow")
+        if body and data.get("plumbing_visible"):
+            text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.WARN:
         text.append("⚠ ", style="yellow")
@@ -206,7 +228,7 @@ def render_block(block: dict):
         text.append("✓ ", style="green")
         text.append(title, style="green")
         if body:
-            text.append("\n  %s" % body, style="dim")
+            text.append("\n  %s %s" % (MODEL_MARK, body), style="dim")
         return text
     # Notice and meta lines stay quiet: they carry facts, not the story.
     text.append("· ", style="dim")
@@ -215,54 +237,46 @@ def render_block(block: dict):
 
 
 def render_thinking(block: dict, expanded: bool = False):
-    """The Thinking block: one line that opens into the reasoning chain.
+    """The model turn: one line that opens into the reasoning chain.
 
-    Collapsed it shows a hint that there is more; a click opens the model's
-    own thinking (the reasoning the model streamed, or - when the model does
-    not think out loud - the reason the agent states for its next call). The
-    arrow says which one it is: ▸ closed, ▾ open.
+    The line names what it is. "Thinking" / "Thought" when the model
+    really reasoned; "Working" / "Model answered" when it did not
+    (the Think setting is off, and the model obeyed it). Closed it shows
+    the arrow only - the words stay inside the chain. A click opens the
+    model's own thinking (the reasoning the model streamed, or - when the
+    model does not think out loud - the reason the agent states for its
+    next call). The arrow says which one it is: ▸ closed, ▾ open.
     """
     from rich.text import Text
 
     text = Text()
     status = block.get("status")
+    data = block.get("data") or {}
+    body = str(block.get("body") or "")
+    reasoned = bool(data.get("reasoning"))
     if status == "running":
         text.append(str(block.get("spinner") or "✳"), style=ACCENT)
-        text.append(" Thinking", style="italic dim")
+        text.append(" Thinking" if reasoned else " Working", style="italic dim")
     else:
         text.append("✓", style="green")
-        text.append(" Thinking", style="dim")
+        text.append(" Thought" if reasoned else " Model answered", style="dim")
     subtitle = str(block.get("subtitle") or "")
     if subtitle:
         text.append("  %s" % subtitle, style="dim")
-    body = str(block.get("body") or "")
-    data = block.get("data") or {}
     if not expanded:
+        # Closed: the arrow says the chain is there, the words stay inside.
         if body:
-            text.append("  ▸ %s" % _first_line(body), style="dim")
-        else:
             text.append("  ▸", style="dim")
         return text
     # Open: the arrow points down, so the line still says that it can be closed.
     text.append("  ▾", style="dim")
     if body:
-        label = ("the model's thinking" if data.get("reasoning")
-                 else "the agent's reason for the next call")
-        text.append("\n  %s:" % label, style="dim")
+        # The model's own words, marked as such - no label in front.
         for line in body.splitlines():
-            text.append("\n  %s" % line, style="italic dim")
+            text.append("\n  %s %s" % (MODEL_MARK, line), style="italic dim")
     if data.get("next"):
         text.append("\n  next: %s" % data["next"], style="dim")
     return text
-
-
-def _first_line(text: str, limit: int = 48) -> str:
-    """The first line of a text, capped - the hint on the collapsed block."""
-    line = str(text or "").strip().splitlines()
-    if not line:
-        return ""
-    head = line[0].strip()
-    return head if len(head) <= limit else head[: limit - 3] + "..."
 
 
 class DismissibleModal(ModalScreen if _TEXTUAL else object):
@@ -296,6 +310,8 @@ class HelpScreen(DismissibleModal):
                     "  Esc            stop the running agent (evidence already written stays)\n"
                     "  Ctrl+P         commands: presets, stop, verify, copy log, switch run\n"
                     "  F1             this help\n"
+                    "  F2             the glossary: what the words of the screen mean\n"
+                    "  Ctrl+H         the technical rows (model calls, HTTP status)\n"
                     "  Ctrl+T         light / dark\n"
                     "  Ctrl+Q         quit (asks first while a run is live)\n"
                     "  Ctrl+C         copy the selected text (the terminal default)\n"
@@ -308,12 +324,21 @@ class HelpScreen(DismissibleModal):
                     "\n"
                     "WHAT THE TRANSCRIPT SHOWS\n"
                     "  ▌ <task>       what you asked for\n"
-                    "  ✳ Thinking      the model's own words; the line opens the chain\n"
-                    "  ● <tool>       a renderer call with the numbers it changed,\n"
-                    "                 ✓ when it returned, ✗ when the renderer refused it\n"
+                    "  » <model>      the model's own words: its answer, its reason,\n"
+                    "                 its claim - never written by the screen\n"
+                    "  ✳ Thinking      the model reasoned; the line opens the chain\n"
+                    "  ✓ Thought       the chain is closed; click it to read it\n"
+                    "  ✳ Working       a model turn that did not reason (Think is off)\n"
+                    "  ✓ Model answered the turn is over, there is nothing to open\n"
+                    "  ● <step>       what the agent does now, then what goes in,\n"
+                    "                 what comes out and what changes; ✓ when it\n"
+                    "                 returned, ✗ when the renderer refused it\n"
                     "  ▣ frame        a PNG the renderer wrote (the picture is inline)\n"
                     "  ✓ Run finished what the agent picked and what it claims\n"
                     "  ⚠ / ✗          a notice and a failure\n"
+                    "\n"
+                    "  The model calls and the HTTP status are technical detail:\n"
+                    "  Ctrl+H shows them, the evidence always has them.\n"
                     "\n"
                     "EVIDENCE\n"
                     "  Evidence is read-only except new runs, verification.json and\n"
@@ -329,6 +354,33 @@ class HelpScreen(DismissibleModal):
                     id="help-text",
                     markup=False,
                 )
+
+
+class GlossaryScreen(DismissibleModal):
+    """The words of the screen, explained (F2).
+
+    Someone who never saw this pipeline reads the run: the words the
+    screen uses are the ones the glossary explains.
+    """
+
+    def compose(self):
+        lines = ["WHAT THE WORDS MEAN\n"]
+        for term, meaning in _glossary_entries():
+            lines.append("  %-24s %s" % (term, meaning))
+        lines.append("")
+        lines.append("Press Esc to close.")
+        with Vertical(classes="dlg"):
+            with VerticalScroll():
+                yield Static("\n".join(lines), id="help-text", markup=False)
+
+
+def _glossary_entries():
+    """The glossary of event_text, or nothing if the module is missing."""
+    try:
+        import event_text as glossary_mod
+    except Exception:  # pragma: no cover - the module always loads
+        return []
+    return list(getattr(glossary_mod, "GLOSSARY", []))
 
 
 class ConfirmScreen(DismissibleModal):
@@ -709,6 +761,8 @@ class ThinkingBlock(SafeSelection, Static if _TEXTUAL else object):
 
     def on_click(self, event=None) -> None:
         """A click opens the reasoning chain, a second click closes it."""
+        if not self._can_open():
+            return
         self.expanded = not self.expanded
         self.update(render_thinking(self.block, self.expanded))
         if event is not None:
@@ -719,8 +773,14 @@ class ThinkingBlock(SafeSelection, Static if _TEXTUAL else object):
 
     def action_toggle(self) -> None:
         """The same, from the keyboard."""
+        if not self._can_open():
+            return
         self.expanded = not self.expanded
         self.update(render_thinking(self.block, self.expanded))
+
+    def _can_open(self) -> bool:
+        """Only reasoning opens: without it the line is a plain fact row."""
+        return bool(str((self.block.get("body") or "")).strip())
 
 
 class ImageBlock(Vertical if _TEXTUAL else object):
@@ -871,6 +931,8 @@ if _TEXTUAL:
             # palette, which Textual would otherwise bind with priority.
             Binding("ctrl+p", "app.command_palette", "Commands", show=False),
             Binding("f1", "help", "Help"),
+            Binding("f2", "glossary", "Glossary"),
+            Binding("ctrl+h", "toggle_plumbing", "Technical"),
             Binding("ctrl+t", "toggle_dark", "Theme"),
             Binding("ctrl+q", "quit", "Quit"),
             Binding("escape", "interrupt_run", "Stop"),
@@ -909,6 +971,9 @@ if _TEXTUAL:
             self._busy_count = 0
             self.transcript = transcript_mod.Transcript() if transcript_mod else None
             self._widgets: list[tuple[dict, object]] = []
+            # The technical rows (model calls, HTTP status) stay hidden until
+            # Ctrl+H asks for them: the steps of the run are the story.
+            self.show_plumbing = False
 
         # -- busy feedback --------------------------------------------------
         def _busy_inc(self) -> None:
@@ -1010,7 +1075,9 @@ if _TEXTUAL:
 
         # -- lifecycle ----------------------------------------------------
         async def on_mount(self):
-            self.set_interval(0.5, self._tick)
+            # The screen has its own fast clock; the backend keeps its own.
+            self.set_interval(UI_TICK_SECONDS, self._animate_thinking)
+            self.set_interval(BACKEND_TICK_SECONDS, self._tick)
             self._say_welcome()
 
         def _say_welcome(self) -> None:
@@ -1018,8 +1085,10 @@ if _TEXTUAL:
             if self.transcript is None:
                 return
             self.transcript.add(transcript_mod.NOTICE, title=(
-                "Volume Agent - type a task below and press Enter to start a run. "
-                "Ctrl+P for the commands, F1 for the keys."))
+                "Volume Agent - you write a task, the model asks the renderer for\n"
+                "pictures and picks one as the result.\n"
+                "Each picture costs one observation (the top line shows the budget).\n"
+                "F2 the words - Ctrl+P the commands - Ctrl+H the technical rows"))
             self._sync_transcript()
 
         # -- the conversation ----------------------------------------------
@@ -1031,9 +1100,13 @@ if _TEXTUAL:
                 container = self.query_one("#blocks", Vertical)
             except Exception:
                 return
-            known = {id(block) for block, _widget in self._widgets}
             live = {id(block) for block in self.transcript.blocks}
             added = False
+            for block in self.transcript.blocks:
+                # The technical view is a screen setting: every block follows it.
+                data = block.get("data")
+                if isinstance(data, dict):
+                    data["plumbing_visible"] = self.show_plumbing
             for block, widget in list(self._widgets):
                 if id(block) not in live:
                     # The block was reclassified (the words before a tool call
@@ -1043,12 +1116,17 @@ if _TEXTUAL:
                     except Exception:
                         pass
                     self._widgets.remove((block, widget))
+            # The mounted widget of a block is the one that is on screen: a
+            # new instance would update nothing the reader sees.
+            mounted = {id(block): widget for block, widget in self._widgets}
             for block in self.transcript.blocks:
-                widget = self._widget_for(block)
-                if id(block) not in known:
+                widget = mounted.get(id(block))
+                if widget is None:
+                    widget = self._widget_for(block)
                     container.mount(widget)
                     self._widgets.append((block, widget))
                     added = True
+                self._set_visible(widget, self._block_visible(block))
                 try:
                     # The content is pushed to every block: the height follows
                     # the text, so a growing answer is never clipped.
@@ -1071,6 +1149,27 @@ if _TEXTUAL:
             if kind == transcript_mod.IMAGE:
                 return ImageBlock(block)
             return TranscriptBlock(block)
+
+        def _block_visible(self, block: dict) -> bool:
+            """Is this row part of the story?
+
+            The transport (the model calls, the HTTP status) is plumbing: it
+            is written to the evidence, but it only appears on screen when
+            Ctrl+H asks for the technical view.
+            """
+            if str(block.get("kind")) != transcript_mod.META:
+                return True
+            return bool(self.show_plumbing)
+
+        def _set_visible(self, widget, visible: bool) -> None:
+            """Show or hide one row (the plumbing rows are hidden by default)."""
+            try:
+                widget.display = bool(visible)
+            except Exception:
+                try:
+                    widget.styles.display = "block" if visible else "none"
+                except Exception:
+                    pass
 
         def _refresh_block_widget(self, block: dict) -> None:
             for known, widget in self._widgets:
@@ -1161,18 +1260,21 @@ if _TEXTUAL:
                 self._tail_scroll_pending = False
 
         def _tick(self) -> None:
-            """Poll the run, animate the thinking block, refresh the status."""
+            """Read the backend: the run, the status line, the button.
+
+            The screen animation does not wait for this: it has its own
+            fast clock, so a slow backend never freezes the spinner.
+            """
             if self.live_dir and not self.live_frozen:
                 try:
                     self._poll_live()
                 except Exception:
                     pass
-            self._animate_thinking()
             self._render_status()
             self._sync_send_button()
 
         def _animate_thinking(self) -> None:
-            """The thinking block breathes while the model works."""
+            """The screen's own clock: the spinner and the seconds."""
             if self.transcript is None:
                 return
             block = self.transcript.find(transcript_mod.THINKING)
@@ -1180,7 +1282,7 @@ if _TEXTUAL:
                 return
             started = block.get("ts") or time.time()
             block["spinner"] = _spinner_frame()
-            block["subtitle"] = "%.1fs" % max(0.0, time.time() - started)
+            block["subtitle"] = "%ds" % int(max(0.0, time.time() - started) + 0.5)
             self._refresh_block_widget(block)
 
         # -- live ---------------------------------------------------------
@@ -1318,21 +1420,30 @@ if _TEXTUAL:
                 text.append("  ·  %s" % self._run_state(), style="dim")
             used, budget = self._budget()
             if budget:
-                text.append("  ·  %s/%s obs" % (used, budget), style="dim")
+                text.append("  ·  %s of %s observations used" % (used, budget),
+                           style="dim")
             try:
                 self.query_one("#status-bar", Static).update(text)
             except Exception:
                 pass
 
         def _volume_name(self) -> str:
-            """The volume the agent works on (the file name, not the path)."""
+            """The volume the agent works on, in words.
+
+            A file name like present246x246x221.dat means nothing to a
+            newcomer; "246x246x221 voxels" does.
+            """
             try:
                 selected = cfg.selected_volume(self.settings) if cfg else None
             except Exception:
                 selected = None
-            if selected:
-                return Path(selected).name
-            return ""
+            if not selected:
+                return ""
+            name = Path(selected).name
+            match = _re.search(r"(\d+)x(\d+)x(\d+)", name)
+            if match:
+                return "volume %sx%sx%s voxels" % match.groups()
+            return name
 
         def _run_state(self) -> str:
             """What the open run is doing.
@@ -1446,6 +1557,21 @@ if _TEXTUAL:
 
         def action_help(self):
             self.push_screen(HelpScreen())
+
+        def action_glossary(self) -> None:
+            """F2: the words the screen uses, explained."""
+            self.push_screen(GlossaryScreen())
+
+        def action_toggle_plumbing(self) -> None:
+            """Ctrl+H: the technical rows (model calls, HTTP status).
+
+            The steps of the run are the default view. The transport is one
+            key press away, for whoever needs it.
+            """
+            self.show_plumbing = not self.show_plumbing
+            self._sync_transcript()
+            self.notify("Technical rows: %s" % ("on" if self.show_plumbing else "off"),
+                        timeout=3, markup=False)
 
         def action_toggle_dark(self) -> None:
             """Ctrl+T switches between the light and the dark theme."""

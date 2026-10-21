@@ -407,7 +407,7 @@ class EventTail:
             event = text_mod.infer_response(meta)
             failed = "FAILED" in event["title"]
             seconds = meta.get("seconds")
-            elapsed = ("%.2fs" % seconds) if isinstance(seconds, (int, float)) else "?"
+            elapsed = ("%ds" % int(seconds + 0.5)) if isinstance(seconds, (int, float)) else "?"
             out.append({"cat": "ERROR" if failed else "INFER",
                         "kind": "error" if failed else "meta",
                         "title": event["title"], "detail": event["detail"],

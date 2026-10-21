@@ -378,6 +378,83 @@ class CodingAgentScreen(unittest.TestCase):
                 self.assertNotIn("thinking", status.lower())
         asyncio.run(_run())
 
+    def test_the_status_line_explains_the_observation_budget(self):
+        import asyncio
+        import types
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.live_run_id = "run-demo"
+                app.live_tail = types.SimpleNamespace(meta={"used": 2, "budget": 4})
+                app._render_status()
+                await pilot.pause()
+                status = str(app.query_one("#status-bar").render())
+                self.assertIn("2 of 4 observations used", status)
+                self.assertNotIn("obs", status.replace("observations", ""))
+        asyncio.run(_run())
+
+    def test_the_volume_is_named_in_voxels(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                volume = Path(tmp) / "present246x246x221.dat"
+                volume.write_text("volume")
+                app = tui_app.VolumeAgentApp()
+                app.settings["volumePath"] = str(volume)
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app._render_status()
+                    await pilot.pause()
+                    status = str(app.query_one("#status-bar").render())
+                    self.assertIn("246x246x221 voxels", status)
+        asyncio.run(_run())
+
+    def test_the_transport_rows_stay_hidden_until_ctrl_h(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([
+                    {"kind": "meta", "text": "model call #1"},
+                    {"kind": "tool_call", "name": "render_scene", "source": "service",
+                     "arguments": {"parameters": {"rotationXYZ": [25, -35, 10]}}},
+                ])
+                await pilot.pause()
+                text = _conversation_text(app)
+                # The step is the story; the transport is behind a key press.
+                self.assertIn("Render a picture", text)
+                self.assertIn("render_scene", text)
+                rows = [widget for widget in app.query(".block")
+                        if "model call #1" in str(widget.render())]
+                self.assertTrue(rows)
+                self.assertFalse(rows[0].display)
+                app.action_toggle_plumbing()
+                await pilot.pause()
+                self.assertTrue(rows[0].display)
+        asyncio.run(_run())
+
+    def test_f2_opens_the_glossary(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.press("f2")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, tui_app.GlossaryScreen)
+                text = str(app.screen.query_one("#help-text").render())
+                self.assertIn("observation", text)
+                await pilot.press("escape")
+                await pilot.pause()
+        asyncio.run(_run())
+
     def test_ctrl_t_switches_the_theme(self):
         import asyncio
 
@@ -440,9 +517,14 @@ class Conversation(unittest.TestCase):
                 ])
                 await pilot.pause()
                 text = _conversation_text(app)
-                self.assertIn("Thinking", text)
+                # The turn carried the agent's reason, not reasoning.
+                self.assertIn("Working", text)
                 self.assertIn("render_scene", text)
+                self.assertIn("Render a picture", text)
                 self.assertIn("camera rotation 25,-35,10", text)
+                self.assertIn("a new PNG of the volume", text)
+                # The model's own words are marked, the screen's are not.
+                self.assertIn("\u00bb The camera is rotated now.", text)
                 self.assertIn("The camera is rotated now.", text)
                 # The tool call is done, so it is marked as such.
                 self.assertIn("✓", text)
@@ -524,7 +606,8 @@ class Conversation(unittest.TestCase):
                 app._animate_thinking()
                 await pilot.pause()
                 self.assertIn("s", str(thinking.get("subtitle")))
-                self.assertIn("Thinking", _conversation_text(app))
+                # No reasoning yet: the line does not claim thinking.
+                self.assertIn("Working", _conversation_text(app))
         asyncio.run(_run())
 
     def test_the_thinking_block_stops_spinning_when_the_run_is_over(self):
@@ -586,6 +669,93 @@ class Conversation(unittest.TestCase):
                 await pilot.pause()
                 self.assertFalse(widget.expanded)
                 self.assertIn("▸", str(widget.render()))
+        asyncio.run(_run())
+
+    def test_the_thinking_line_says_thought_when_the_model_is_done(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([
+                    {"kind": "thinking_start"},
+                    {"kind": "reasoning_done", "text": "I'll inspect the scene."},
+                    {"kind": "thinking_end",
+                     "usage": {"input_tokens": 12211, "output_tokens": 449}},
+                ])
+                await pilot.pause()
+                widget = list(app.query(tui_app.ThinkingBlock))[0]
+                line = str(widget.render())
+                self.assertIn("Thought", line)
+                self.assertNotIn("Thinking", line)
+                # Closed: no preview of the words, only the arrow.
+                self.assertIn("▸", line)
+                self.assertNotIn("I'll inspect the scene", line)
+        asyncio.run(_run())
+
+    def test_a_turn_without_reasoning_is_not_called_thinking(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                # The Think setting is off: the model answers without reasoning.
+                app._ingest_events([
+                    {"kind": "thinking_start"},
+                    {"kind": "thinking_end",
+                     "usage": {"input_tokens": 12211, "output_tokens": 449}},
+                ])
+                await pilot.pause()
+                widget = list(app.query(tui_app.ThinkingBlock))[0]
+                line = str(widget.render())
+                self.assertIn("Model answered", line)
+                self.assertNotIn("Thinking", line)
+                self.assertNotIn("Thought", line)
+                # Nothing to open: no arrow.
+                self.assertNotIn("▸", line)
+        asyncio.run(_run())
+
+    def test_a_turn_with_reasoning_is_called_thinking(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([
+                    {"kind": "thinking_start"},
+                    {"kind": "reasoning_delta", "delta": "I look at the scene."},
+                    {"kind": "thinking_end",
+                     "usage": {"input_tokens": 12211, "output_tokens": 449}},
+                ])
+                await pilot.pause()
+                widget = list(app.query(tui_app.ThinkingBlock))[0]
+                line = str(widget.render())
+                self.assertIn("Thought", line)
+                self.assertNotIn("Model answered", line)
+                self.assertIn("▸", line)
+        asyncio.run(_run())
+
+    def test_the_screen_ticks_faster_than_the_backend(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                # The screen has its own fast clock; the backend keeps its.
+                self.assertLess(tui_app.UI_TICK_SECONDS, tui_app.BACKEND_TICK_SECONDS)
+                app._ingest_events([{"kind": "thinking_start"}])
+                await pilot.pause()
+                app._animate_thinking()
+                await pilot.pause()
+                block = app.transcript.find(tui_app.transcript_mod.THINKING)
+                subtitle = str(block.get("subtitle"))
+                # Whole seconds, no decimals.
+                self.assertTrue(subtitle.endswith("s"), subtitle)
+                self.assertNotIn(".", subtitle)
         asyncio.run(_run())
 
     def test_the_model_stream_reaches_the_conversation(self):

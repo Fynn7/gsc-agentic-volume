@@ -14,6 +14,51 @@ sys.path.insert(0, str(ROOT / "scripts" / "volume_tui"))
 import event_text
 
 
+class ToolActions(unittest.TestCase):
+    """The step in words: what the agent is doing right now."""
+
+    def test_every_tool_has_a_short_verb(self):
+        self.assertEqual(event_text.tool_action("render_scene", {}), "Render a picture")
+        self.assertEqual(event_text.tool_action("inspect_scene", {}), "Read the scene")
+        self.assertEqual(event_text.tool_action("inspect_slice", {}), "Read one slice")
+
+    def test_the_facts_say_input_output_and_effect(self):
+        facts = event_text.tool_facts("render_scene", {
+            "parameters": {"rotationXYZ": [25, -35, 10]}})
+        self.assertIn("camera rotation 25,-35,10", facts)
+        self.assertIn("a new PNG of the volume", facts)
+        self.assertIn("the scene changes", facts)
+        read = event_text.tool_facts("inspect_scene", {})
+        self.assertIn("camera, opacity window, crop box, current picture", read)
+        self.assertIn("nothing changes", read)
+
+    def test_the_numbers_are_explained_in_words(self):
+        lines = event_text.effect_lines({
+            "rotationXYZ": [30, 45, 0],
+            "tfStart": 0.1, "tfWidth": 0.12,
+            "crop": [0, 246, 0, 246, 0, 221]})
+        text = "\n".join(lines)
+        self.assertIn("the camera turns 30° around X, then 45° around Y, then 0° around Z",
+                      text)
+        self.assertIn("density below 0.1 stays invisible", text)
+        self.assertIn("only the voxels x 0-246", text)
+
+    def test_a_call_without_parameters_explains_nothing(self):
+        self.assertEqual(event_text.effect_lines({}), [])
+        self.assertEqual(event_text.effect_lines(None), [])
+
+    def test_the_notices_are_one_line(self):
+        self.assertIn("1 harness notice", event_text.notice_headline(1))
+        self.assertIn("2 harness notices", event_text.notice_headline(2))
+
+    def test_the_glossary_explains_the_words_of_the_screen(self):
+        terms = [term for term, _meaning in event_text.GLOSSARY]
+        for term in ("observation", "lit px", "camera rotation", "run id"):
+            self.assertIn(term, terms)
+        for _term, meaning in event_text.GLOSSARY:
+            self.assertTrue(meaning.strip())
+
+
 class Numbers(unittest.TestCase):
     def test_number_is_compact_and_never_prints_none(self):
         self.assertEqual(event_text.number(148491.0), "148491")
@@ -49,7 +94,8 @@ class ToolCalls(unittest.TestCase):
 
     def test_return_does_not_claim_success(self):
         event = event_text.tool_return("render_scene", 2.94)
-        self.assertIn("2.94s", event["title"])
+        self.assertIn("3s", event["title"])
+        self.assertNotIn(".", event["title"])
         self.assertNotIn("Success", event["title"])
 
     def test_error_carries_the_rejection_reason(self):
@@ -137,7 +183,7 @@ class EndOfRun(unittest.TestCase):
         event = event_text.infer_response({"index": 1, "method": "POST", "path": "/v1/responses",
                                            "status": 200, "seconds": 1.2})
         self.assertIn("200", event["title"])
-        self.assertIn("1.20s", event["title"])
+        self.assertIn("1s", event["title"])
         failed = event_text.infer_response({"index": 2, "method": "POST", "path": "/v1/responses",
                                              "status": 500, "error": "boom"})
         self.assertIn("FAILED", failed["title"])

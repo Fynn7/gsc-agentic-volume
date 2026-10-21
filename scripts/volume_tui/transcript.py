@@ -31,18 +31,14 @@ ASSISTANT = "assistant"
 TOOL = "tool"
 IMAGE = "image"
 NOTICE = "notice"
+NOTICES = "notices"
 WARN = "warn"
 ERROR = "error"
 FINISH = "finish"
 META = "meta"
 
-# What the agent says when it calls the renderer, in one line.
-TOOL_MEANING = {
-    "inspect_scene": "read the scene",
-    "render_scene": "render a frame",
-    "inspect_slice": "read a slice",
-    "finish_task": "save the result",
-}
+# The wording of every tool call lives in event_text, so the screen and the
+# event log can never drift apart.
 
 
 def brief(text, limit=200) -> str:
@@ -51,35 +47,34 @@ def brief(text, limit=200) -> str:
 
 
 def tool_summary(name: str, arguments: dict) -> str:
-    """The one-line summary of a tool call: what it changed, in numbers."""
+    """The facts of the call: what goes in, what comes out, what changes."""
     arguments = arguments if isinstance(arguments, dict) else {}
-    if name == "inspect_slice":
-        return "axis %s, index %s" % (arguments.get("axis", "?"),
-                                      arguments.get("index", "?"))
-    if name == "finish_task":
-        return "frame revision %s" % arguments.get("frameRevision", "?")
-    changed = text_mod.parameter_lines(arguments.get("parameters"))
-    if changed:
-        return ", ".join(changed[:2])
+    facts = text_mod.tool_facts(name, arguments)
+    if facts:
+        return facts
     rest = {key: value for key, value in arguments.items()
             if key not in ("parameters", "reason")}
     if rest:
         return brief(json.dumps(rest, ensure_ascii=False, sort_keys=True), 120)
-    return TOOL_MEANING.get(name, "call the renderer")
+    return ""
 
 
 def tool_detail(name: str, arguments: dict) -> str:
-    """The lines under a tool call: the agent's reason and the change."""
+    """The lines under a tool call: the model's own words, then the facts.
+
+    The row above already says what the call does; the body only adds what
+    the model said and what the changed numbers mean.
+    """
     arguments = arguments if isinstance(arguments, dict) else {}
     lines = []
-    changed = text_mod.parameter_lines(arguments.get("parameters"))
-    if changed:
-        lines.append("changed: %s" % ", ".join(changed))
     reason = arguments.get("reason")
     if reason:
-        lines.append("why: %s" % brief(reason, 300))
+        # The marker says: these words are the model's, not the screen's.
+        lines.append("%s %s" % (text_mod.MODEL_MARK, brief(reason, 300)))
+    lines.extend(text_mod.effect_lines(arguments.get("parameters")))
     if name == "finish_task" and arguments.get("summary"):
-        lines.append("summary: %s" % brief(arguments.get("summary"), 300))
+        lines.append("%s %s" % (text_mod.MODEL_MARK,
+                                 brief(arguments.get("summary"), 300)))
     return "\n".join(lines)
 
 
@@ -101,10 +96,27 @@ def image_caption(source: str, revision, lit, size) -> str:
         return "slice %s=%s" % (revision, lit)
     parts = ["frame revision %s" % revision]
     if lit not in (None, "?"):
-        parts.append("%s lit px" % lit)
+        share = _lit_share(lit, size)
+        if share:
+            parts.append("%s lit px (%s of the picture)" % (lit, share))
+        else:
+            parts.append("%s lit px" % lit)
     if size and size != "?":
         parts.append(str(size))
     return " · ".join(parts)
+
+
+def _lit_share(lit, size) -> str:
+    """How much of the picture is not black, in percent ("56.6%")."""
+    try:
+        lit_value = float(lit)
+        width, height = str(size).lower().split("x", 1)
+        total = float(width) * float(height)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+    if total <= 0:
+        return ""
+    return "%.1f%%" % (100.0 * lit_value / total)
 
 
 class Transcript:
@@ -120,6 +132,7 @@ class Transcript:
         self._thinking = None      # the open "Thinking" block
         self._tools: dict[str, dict] = {}   # tool name -> open tool block
         self._answer_text = ""    # the answer as the model stream delivers it
+        self._notices: list[str] = []   # the harness notices, one row for all
 
     # -- block helpers ---------------------------------------------------
     def clear(self) -> None:
@@ -127,6 +140,7 @@ class Transcript:
         self._thinking = None
         self._tools = {}
         self._answer_text = ""
+        self._notices = []
 
     def add(self, kind: str, title: str = "", subtitle: str = "", body: str = "",
             status: str | None = None, ts: float | None = None,
@@ -151,8 +165,16 @@ class Transcript:
         return None
 
     def last_tool(self, name: str) -> dict | None:
+        """The open (or last) block of one tool call.
+
+        The title is the step in words, so the tool name lives in the data.
+        """
         for block in reversed(self.blocks):
-            if block["kind"] == TOOL and block["title"] == name:
+            if block["kind"] != TOOL:
+                continue
+            if (block.get("data") or {}).get("tool") == name:
+                return block
+            if block.get("title") == name:  # a block from before the rewrite
                 return block
         return None
 
@@ -165,7 +187,8 @@ class Transcript:
 
     def _tool_blocks(self, name: str, source: str) -> list[dict]:
         return [block for block in self.blocks
-                if block["kind"] == TOOL and block["title"] == name
+                if block["kind"] == TOOL
+                and (block.get("data") or {}).get("tool") == name
                 and (block.get("data") or {}).get("source") == source]
 
     def _has_tool(self, name: str, source: str) -> bool:
@@ -208,17 +231,19 @@ class Transcript:
         return [block]
 
     def _ingest_thinking(self, event: dict) -> list[dict]:
-        """The model's own reason for the next call (its reasoning)."""
+        """The agent's reason for the next call: the model's own words.
+
+        It is not reasoning, so it does not go into the foldable block: it
+        is a line of the model's own, like its answer.
+        """
         reason = str(event.get("reason") or "").strip()
-        block = self._thinking_block(event.get("ts"))
-        if reason and not block.get("data", {}).get("reasoning"):
-            # The real reasoning (when the model streams it) wins over the
-            # reason the agent states for the next call.
-            block["body"] = brief(reason, 600)
         tool = event.get("tool")
-        if tool:
+        block = self.find(THINKING)
+        if block is not None and tool:
             block["data"]["next"] = tool
-        return [block]
+        if not reason:
+            return []
+        return [self.add(ASSISTANT, title=reason, ts=event.get("ts"))]
 
     def _thinking_block(self, ts=None) -> dict:
         """The open Thinking block (created when the model starts working)."""
@@ -290,11 +315,12 @@ class Transcript:
         return [block]
 
     def _move_open_answer_to_thinking(self) -> None:
-        """The words before a tool call are the model's thinking.
+        """The words the model wrote before it called a tool.
 
-        The model says what it is about to do ("let me inspect the scene")
-        and then calls the tool. Those words are its thinking, not its
-        answer, so they belong in the Thinking block.
+        When the model really reasoned, those words join the reasoning:
+        the foldable block is the only place they belong. When it did not
+        (Think is off) there is no foldable block - the words stay a line
+        of the model's own, right where they were written.
         """
         last = self._last_assistant()
         if last is None:
@@ -304,11 +330,15 @@ class Transcript:
         text = (last.get("title") or "").strip()
         if not text:
             return
-        self.blocks.remove(last)
-        self._answer_text = ""
-        block = self._thinking_block()
-        block["body"] = ((block.get("body") or "") + text).strip()
-        block["data"]["reasoning"] = True
+        block = self._thinking
+        if block is not None and (block.get("data") or {}).get("reasoning"):
+            self.blocks.remove(last)
+            self._answer_text = ""
+            block["body"] = ((block.get("body") or "") + text).strip()
+            block["data"]["preamble"] = True
+            return
+        # No reasoning: the line stays, closed - there is nothing to open.
+        last["data"]["open"] = False
 
     def _ingest_message_done(self, event: dict) -> list[dict]:
         """The finished answer: the streamed block is complete."""
@@ -388,7 +418,11 @@ class Transcript:
             else:
                 block = self.add(TOOL, title=name, status="running", ts=event.get("ts"))
         block["data"]["source"] = source
+        block["data"]["tool"] = name
         self._tools[name] = block
+        # The row leads with the step in words; the tool name stays in the
+        # data, so the screen can show it quietly next to the sentence.
+        block["title"] = text_mod.tool_action(name, arguments)
         block["subtitle"] = tool_summary(name, arguments)
         block["body"] = tool_detail(name, arguments)
         block["data"]["changes"] = text_mod.parameter_lines(arguments.get("parameters"))
@@ -406,7 +440,9 @@ class Transcript:
         if block is None:
             block = self.last_tool(name)
         if block is None:
-            block = self.add(TOOL, title=name, status="done", ts=event.get("ts"))
+            block = self.add(TOOL, title=text_mod.tool_action(name),
+                             status="done", ts=event.get("ts"))
+            block["data"]["tool"] = name
         block["status"] = "done"
         if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
             block["data"]["seconds"] = seconds
@@ -424,7 +460,9 @@ class Transcript:
         if block is None:
             block = self.last_tool(name)
         if block is None:
-            block = self.add(TOOL, title=name, status="failed", ts=event.get("ts"))
+            block = self.add(TOOL, title=text_mod.tool_action(name),
+                             status="failed", ts=event.get("ts"))
+            block["data"]["tool"] = name
         block["status"] = "failed"
         block["body"] = tool_error_detail(message, block.get("data", {}).get("changes"))
         self._tools.pop(name, None)
@@ -444,8 +482,24 @@ class Transcript:
                          ts=event.get("ts"))]
 
     def _ingest_warn(self, event: dict) -> list[dict]:
-        return [self.add(WARN, title=str(event.get("message") or ""),
-                         ts=event.get("ts"))]
+        """The harness notices: one row for all of them.
+
+        The harness reports its own housekeeping (an under-development
+        feature, a missing model description). Those are not errors and they
+        do not stop the run, so they get one quiet row instead of a wall of
+        jargon at the top of the screen.
+        """
+        message = str(event.get("message") or "")
+        if not message:
+            return []
+        self._notices.append(message)
+        block = self.find(NOTICES)
+        if block is None:
+            block = self.add(NOTICES, ts=event.get("ts"))
+        block["title"] = text_mod.notice_headline(len(self._notices))
+        block["body"] = "\n".join(text_mod.brief(item, 300) for item in self._notices)
+        block["data"]["notices"] = list(self._notices)
+        return [block]
 
     def _ingest_error(self, event: dict) -> list[dict]:
         return [self.add(ERROR, title=str(event.get("message") or ""),
@@ -459,13 +513,20 @@ class Transcript:
         body = ""
         claim = str(event.get("claim") or "").strip()
         if claim:
-            body = "the agent's claim: %s" % brief(claim, 400)
+            body = brief(claim, 400)
         return [self.add(FINISH, title=title, body=body, status="done",
                          ts=event.get("ts"))]
 
     def _ingest_meta(self, event: dict) -> list[dict]:
-        return [self.add(META, title=str(event.get("text") or ""),
-                         ts=event.get("ts"))]
+        """Plumbing (the model calls, the HTTP status).
+
+        The evidence stays complete, but the screen hides it by default: a
+        reader who never saw this system reads the steps, not the transport.
+        """
+        block = self.add(META, title=str(event.get("text") or ""),
+                         ts=event.get("ts"))
+        block["data"]["plumbing"] = True
+        return [block]
 
     def _ingest_done(self, event: dict) -> list[dict]:
         """The model call is over: the next stream starts a new answer."""

@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import chat_log as chat_log_mod
     import config as cfg
     import env as env_mod
     import event_text as event_text_mod
@@ -36,6 +37,7 @@ try:
     import imaging as imaging_mod
     import telemetry as telemetry_mod
 except Exception:  # pragma: no cover - import path for tests
+    chat_log_mod = None  # type: ignore
     cfg = None  # type: ignore
     env_mod = None  # type: ignore
     event_text_mod = None  # type: ignore
@@ -173,18 +175,18 @@ def render_block(block: dict):
 
     text = Text()
     if kind == transcript_mod.USER:
-        text.append("▌ ", style="bold %s" % ACCENT)
+        text.append("%s " % transcript_mod.block_mark(kind), style="bold %s" % ACCENT)
         text.append(title, style="bold")
         return text
     if kind == transcript_mod.THINKING:
         return render_thinking(block, False)
     if kind == transcript_mod.ASSISTANT:
         # The model's own words, marked as such.
-        text.append("%s " % MODEL_MARK, style=ACCENT)
+        text.append("%s " % transcript_mod.block_mark(kind), style=ACCENT)
         text.append(title)
         return text
     if kind == transcript_mod.TOOL:
-        text.append("● ", style=ACCENT)
+        text.append("%s " % transcript_mod.block_mark(kind), style=ACCENT)
         text.append(title, style="bold %s" % ACCENT)
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
@@ -201,36 +203,36 @@ def render_block(block: dict):
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.IMAGE:
-        text.append("▣ ", style="green")
+        text.append("%s " % transcript_mod.block_mark(kind), style="green")
         text.append(title, style="green")
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
         return text
     if kind == transcript_mod.NOTICES:
         # The harness notices: one row, quiet, with the text behind Ctrl+H.
-        text.append("⚠ ", style="yellow")
+        text.append("%s " % transcript_mod.block_mark(kind), style="yellow")
         text.append(title, style="yellow")
         if body and data.get("plumbing_visible"):
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.WARN:
-        text.append("⚠ ", style="yellow")
+        text.append("%s " % transcript_mod.block_mark(kind), style="yellow")
         text.append(title, style="yellow")
         return text
     if kind == transcript_mod.ERROR:
-        text.append("✗ ", style="red")
+        text.append("%s " % transcript_mod.block_mark(kind), style="red")
         text.append(title, style="red")
         if body:
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.FINISH:
-        text.append("✓ ", style="green")
+        text.append("%s " % transcript_mod.block_mark(kind), style="green")
         text.append(title, style="green")
         if body:
             text.append("\n  %s %s" % (MODEL_MARK, body), style="dim")
         return text
     # Notice and meta lines stay quiet: they carry facts, not the story.
-    text.append("· ", style="dim")
+    text.append("%s " % transcript_mod.block_mark(kind), style="dim")
     text.append(title, style="dim")
     return text
 
@@ -250,15 +252,14 @@ def render_thinking(block: dict, expanded: bool = False):
 
     text = Text()
     status = block.get("status")
-    data = block.get("data") or {}
     body = str(block.get("body") or "")
-    reasoned = bool(data.get("reasoning"))
+    head_mark, words = transcript_mod.thinking_headline(block)
     if status == "running":
-        text.append(str(block.get("spinner") or "✳"), style=ACCENT)
-        text.append(" Thinking" if reasoned else " Working", style="italic dim")
+        text.append(str(block.get("spinner") or head_mark), style=ACCENT)
+        text.append(" %s" % words, style="italic dim")
     else:
-        text.append("✓", style="green")
-        text.append(" Thought" if reasoned else " Model answered", style="dim")
+        text.append(head_mark, style="green")
+        text.append(" %s" % words, style="dim")
     subtitle = str(block.get("subtitle") or "")
     if subtitle:
         text.append("  %s" % subtitle, style="dim")
@@ -305,7 +306,8 @@ class HelpScreen(DismissibleModal):
                     "  Enter          send the composer text: it starts a new run\n"
                     "  Ctrl+Up/Down   scroll the conversation (the composer keeps the cursor)\n"
                     "  Esc            stop the running agent (evidence already written stays)\n"
-                    "  Ctrl+P         commands: presets, stop, verify, copy log, switch run\n"
+                    "  Ctrl+P         commands: presets, stop, verify, copy log,\n"
+                    "                 chat log, switch run\n"
                     "  F1             this help\n"
                     "  F2             the glossary: what the words of the screen mean\n"
                     "  Ctrl+H         the technical rows (model calls, HTTP status)\n"
@@ -420,6 +422,12 @@ class CommandScreen(DismissibleModal):
          "Check this run's evidence; writes verification.json, never calls the model."),
         ("Live: copy the JSON log", "live-copy",
          "Copy the whole run's JSON log to the clipboard (read-only)."),
+        ("Live: copy the chat log", "live-copy-chat",
+         "Copy the conversation of this run as plain text (the task, the "
+         "model's thinking, the tool calls, the frames and the answer)."),
+        ("Live: export the chat log", "live-export-chat",
+         "Write the conversation of this run to runtime/tui/chat-logs/ as a "
+         ".log file (the run folder stays read-only)."),
         ("Live: view the current PNG", "live-open-png",
          "Open the previewed PNG in your image viewer (full size)."),
         ("Live: open the PNG folder", "live-open",
@@ -1620,6 +1628,10 @@ if _TEXTUAL:
                 self._verify_live()
             elif result == "cmd-live-copy":
                 self._copy_run_json_log()
+            elif result == "cmd-live-copy-chat":
+                self._copy_chat_log()
+            elif result == "cmd-live-export-chat":
+                self._export_chat_log()
             elif result == "cmd-live-open-png":
                 self._open_live_png()
             elif result == "cmd-live-open":
@@ -1840,6 +1852,67 @@ if _TEXTUAL:
                             severity="warning", timeout=6, markup=False)
                 return
             self.notify(message, timeout=4, markup=False)
+
+        # -- the chat record as a log ---------------------------------------
+        def _chat_log_blocks(self) -> list[dict]:
+            """The conversation as it is on screen (the chat record)."""
+            if self.transcript is None:
+                return []
+            return list(self.transcript.blocks)
+
+        def _chat_log_text(self) -> str:
+            """The chat record as plain text - the words the screen shows.
+
+            The same blocks, without the markup: the task, the model's
+            thinking, the tool calls, the frames and the answer.
+            """
+            return chat_log_mod.chat_log_text(
+                self._chat_log_blocks(),
+                run_id=self.live_run_id,
+                model=self.settings.get("model"),
+                run_dir=str(self.live_dir) if self.live_dir else None)
+
+        def _copy_chat_log(self, button=None) -> None:
+            """Copy the chat record to the clipboard (read-only).
+
+            The conversation in plain text: the task, the model's thinking,
+            the tool calls with their numbers, the frames and the answer.
+            """
+            text = self._chat_log_text()
+            if not text.strip():
+                self.notify("Nothing to copy - the conversation is empty.",
+                            severity="warning", timeout=4, markup=False)
+                return
+
+            def _work() -> None:
+                message = evidence_mod.copy_to_clipboard(text)
+                self.call_from_thread(self._copy_finished, text, message)
+
+            self._run_guarded("Copying the chat log", _work, button)
+
+        def _export_chat_log(self, button=None) -> None:
+            """Write the chat record to a log file (the run folder stays read-only).
+
+            The file lands in runtime/tui/chat-logs/, one file per export.
+            """
+            blocks = self._chat_log_blocks()
+            if not blocks:
+                self.notify("Nothing to export - the conversation is empty.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            run_id = self.live_run_id
+            model = self.settings.get("model")
+            run_dir = str(self.live_dir) if self.live_dir else None
+
+            def _work() -> None:
+                path = chat_log_mod.export_chat_log(
+                    blocks, run_id=run_id, model=model, run_dir=run_dir)
+                self.call_from_thread(self._chat_log_exported, path)
+
+            self._run_guarded("Exporting the chat log", _work, button)
+
+        def _chat_log_exported(self, path) -> None:
+            self.notify("Chat log written: %s" % path, timeout=6, markup=False)
 
         # -- where the frames live -----------------------------------------
         def _live_png_path(self) -> Path | None:

@@ -40,6 +40,42 @@ META = "meta"
 # The wording of every tool call lives in event_text, so the screen and the
 # event log can never drift apart.
 
+# The mark in front of every row: the task is the user's, the words are the
+# model's, the rest are facts the screen measured. The screen and the chat
+# log use the same marks, so a line of the log can be read on the screen.
+MARKS = {
+    USER: "▌",
+    ASSISTANT: text_mod.MODEL_MARK,
+    TOOL: "●",
+    IMAGE: "▣",
+    NOTICES: "⚠",
+    WARN: "⚠",
+    ERROR: "✗",
+    FINISH: "✓",
+    NOTICE: "·",
+    META: "·",
+}
+
+
+def block_mark(kind: str) -> str:
+    """The mark in front of a row (never empty, never a guess)."""
+    return MARKS.get(str(kind), "·")
+
+
+def thinking_headline(block: dict) -> tuple[str, str]:
+    """The mark and the words of a model turn.
+
+    "Thinking" / "Thought" when the model really reasoned, "Working" /
+    "Model answered" when it did not (the Think setting is off, and the
+    screen never claims reasoning the model did not produce). The screen
+    and the chat log say the same thing.
+    """
+    status = block.get("status")
+    reasoned = bool((block.get("data") or {}).get("reasoning"))
+    if status == "running":
+        return ("✳", "Thinking" if reasoned else "Working")
+    return ("✓", "Thought" if reasoned else "Model answered")
+
 
 def brief(text, limit=200) -> str:
     """One line, capped - the transcript never wraps a single line twice."""
@@ -109,6 +145,45 @@ def _lit_share(lit, size) -> str:
     if total <= 0:
         return ""
     return "%.1f%%" % (100.0 * lit_value / total)
+
+
+def _as_epoch(value) -> float | None:
+    """The value as epoch seconds; None when it is neither a number nor a time."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(text).timestamp()
+        except (ValueError, OSError):
+            return None
+    return None
+
+
+def _with_event_time(event: dict) -> dict:
+    """The event with the time the step happened, when the evidence knows it.
+
+    The service log writes it ("time", a number or an ISO timestamp); "ts"
+    is only the moment the TUI read the event. The chat log shows this
+    time, so a run that is opened again still says when its steps ran.
+    """
+    if "time" not in event:
+        return event
+    stamp = _as_epoch(event.get("time"))
+    if stamp is None:
+        return event
+    stamped = dict(event)
+    stamped["ts"] = stamp
+    return stamped
 
 
 class Transcript:
@@ -198,7 +273,7 @@ class Transcript:
         if handler is None:
             return []
         try:
-            return handler(event) or []
+            return handler(_with_event_time(event)) or []
         except Exception:
             return []
 

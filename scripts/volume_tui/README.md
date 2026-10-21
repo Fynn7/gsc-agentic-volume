@@ -3,8 +3,8 @@
 One screen, like a coding agent app (Codex CLI, OpenCode): the task at the
 top, then the model's thinking, its tool calls, the frames it rendered and its
 answer. Control/display only over the Codex CLI — no agent loop lives here.
-Evidence is read-only except new runs, `verification.json`, and
-`tui-settings.json`.
+Evidence is read-only except new runs, `verification.json`,
+`tui-settings.json` and the exported chat logs (`runtime/tui/chat-logs/`).
 
 ## Entry
 
@@ -133,6 +133,8 @@ back to the bottom resumes it (there is no Follow button).
 | Run: stop the agent | cooperative stop; the launcher records `interrupted` |
 | Live: verify the evidence | read-only check → `verification.json` |
 | Live: copy the JSON log | the run's meta data, every event and every JSON log file |
+| Live: copy the chat log | the conversation as plain text: the task, the model's thinking, the tool calls, the frames and the answer |
+| Live: export the chat log | the same conversation written to `runtime/tui/chat-logs/<runId>-<time>.log` (the run folder stays read-only) |
 | Live: view the current PNG | opens the previewed PNG in the system viewer |
 | Live: open the PNG folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
 | Runs: open another run | picks one of the runs on this machine and opens it here |
@@ -206,7 +208,8 @@ the window.
 - The status line carries a spinner while any background worker is active;
   the pressed button shows its own spinner and locks against double clicks;
   worker failures surface as error toasts.
-- Covered: preflight, run start, verify evidence, copy log, settings probe.
+- Covered: preflight, run start, verify evidence, copy log, chat log, settings
+  probe.
   The status line animates while the model thinks; the startup service check
   prints elapsed time.
 - Static text and table cells escape literal `[...]` (terminal markup would
@@ -258,6 +261,14 @@ the window.
   `Set-Clipboard` over stdin on Windows, `pbcopy`/`wl-copy`/`xclip` elsewhere,
   the terminal's own OSC 52 escape as the fallback). Read-only, nothing is
   written into the run folder.
+- Chat log: `chat_log.chat_log_text` folds the transcript blocks into the
+  conversation as plain text — the same marks as the screen (`▌` the task,
+  `»` the model's words, `● ▣ ⚠ ✓` the facts), every row with its time, the
+  reasoning chain open (the screen folds it away). The transport (the model
+  calls, the HTTP status) stays out: it belongs to the JSON log.
+  `chat_log.export_chat_log` writes it to
+  `runtime/tui/chat-logs/<runId>-<time>.log`, one file per export; the run
+  folder is never written to.
 - Verify: `runs.run_verify` subprocess + three-way summary
   (execution / image transport / visual-quality UNVERIFIED).
 - Services: `services.ensure_services` (Local-loopback only: the H200 tunnel is
@@ -282,15 +293,16 @@ services); `tests/test_transcript.py` covers the coding-agent transcript
 of every row (the same pure functions); `tests/test_stream.py` covers the
 recorded model stream (SSE parsing and the live tail);
 `tests/test_run_lifecycle.py` covers the launcher, the stop before the agent
-starts and the evidence; `tests/test_volume_tui_app.py` covers the screen (the
-conversation, the thinking chain, the composer, the dialogs, the busy
-feedback). No test starts a model, renderer, or network
+starts and the evidence; `tests/test_chat_log.py` covers the chat record as a
+log (the plain text, the marks, the export); `tests/test_volume_tui_app.py`
+covers the screen (the conversation, the thinking chain, the composer, the
+dialogs, the busy feedback). No test starts a model, renderer, or network
 service. Run them with the TUI venv Python (has NumPy/Pillow/Textual). With a
 bare Python lacking NumPy, `test_capabilities`/`test_external_tools` fail at
 import (pre-existing, untouched: they exercise `src/` which requires NumPy);
 the Textual smoke and NumPy slice tests skip cleanly instead of erroring.
 Real acceptance is one live Task A run: send a task, watch the conversation,
-open the thinking chain, stop, verify, switch runs.
+open the thinking chain, copy the chat log, stop, verify, switch runs.
 
 ### CI
 

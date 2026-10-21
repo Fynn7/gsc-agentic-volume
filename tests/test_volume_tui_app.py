@@ -1380,6 +1380,120 @@ class BusyFeedback(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class ChatLog(unittest.TestCase):
+    """The chat record can be copied and exported as a log."""
+
+    def test_copy_the_chat_log_copies_the_conversation(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    (run_dir / "run.json").write_text(json.dumps({"runId": "run-demo"}))
+                    (run_dir / "config.json").write_text(json.dumps(
+                        {"task": "Set the camera rotationXYZ to [25,-35,10] degrees."}))
+                    app.start_live(run_dir, "run-demo")
+                    copied = {}
+
+                    def _fake_copy(text):
+                        copied["text"] = text
+                        return "Copied %d characters to the clipboard." % len(text)
+
+                    with patch.object(tui_app.evidence_mod, "copy_to_clipboard", _fake_copy):
+                        app._copy_chat_log()
+                        for _ in range(200):
+                            await pilot.pause()
+                            if "text" in copied and app._busy_count == 0:
+                                break
+                    self.assertIn("text", copied)
+                    self.assertIn("Set the camera rotationXYZ", copied["text"])
+                    self.assertIn("# run: run-demo", copied["text"])
+                    self.assertEqual(app._busy_count, 0)
+        asyncio.run(_run())
+
+    def test_export_the_chat_log_writes_a_file(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp) / "run-demo"
+                    run_dir.mkdir()
+                    (run_dir / "run.json").write_text(json.dumps({"runId": "run-demo"}))
+                    (run_dir / "config.json").write_text(json.dumps(
+                        {"task": "Set the camera rotationXYZ to [25,-35,10] degrees."}))
+                    app.start_live(run_dir, "run-demo")
+                    log_dir = Path(tmp) / "chat-logs"
+                    with patch.object(tui_app.chat_log_mod, "LOG_DIR", log_dir):
+                        app._export_chat_log()
+                        for _ in range(200):
+                            await pilot.pause()
+                            if app._busy_count == 0:
+                                break
+                    logs = sorted(log_dir.glob("*.log"))
+                    self.assertEqual(len(logs), 1)
+                    written = logs[0].read_text(encoding="utf-8")
+                    self.assertIn("Set the camera rotationXYZ", written)
+                    # The run folder keeps its evidence: the log is not in it.
+                    self.assertEqual(sorted(p.name for p in run_dir.iterdir()),
+                                     ["config.json", "run.json"])
+                    self.assertEqual(app._busy_count, 0)
+        asyncio.run(_run())
+
+    def test_an_empty_conversation_is_not_exported(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app.transcript.clear()
+                with tempfile.TemporaryDirectory() as tmp:
+                    log_dir = Path(tmp) / "chat-logs"
+                    with patch.object(tui_app.chat_log_mod, "LOG_DIR", log_dir):
+                        app._export_chat_log()
+                        await pilot.pause()
+                    self.assertFalse(log_dir.exists())
+        asyncio.run(_run())
+
+    def test_the_palette_exports_the_chat_log(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    log_dir = Path(tmp) / "chat-logs"
+                    with patch.object(tui_app.chat_log_mod, "LOG_DIR", log_dir):
+                        await pilot.press("ctrl+p")
+                        await pilot.pause()
+                        self.assertIsInstance(app.screen, tui_app.CommandScreen)
+                        app.screen.query_one("#cmd-live-export-chat",
+                                             tui_app.Button).focus()
+                        await pilot.pause()
+                        await pilot.press("enter")
+                        await pilot.pause()
+                        for _ in range(200):
+                            await pilot.pause()
+                            if app._busy_count == 0 and list(log_dir.glob("*.log")):
+                                break
+                    logs = list(log_dir.glob("*.log"))
+                    self.assertEqual(len(logs), 1)
+                    self.assertIn("# Volume Agent chat log", logs[0].read_text(encoding="utf-8"))
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
 class CtrlPOpensTheTuiPalette(unittest.TestCase):
     """Ctrl+P must open the TUI palette, not Textual's system palette."""
 
@@ -1414,7 +1528,8 @@ class CtrlPOpensTheTuiPalette(unittest.TestCase):
     def test_the_palette_knows_the_run_commands(self):
         actions = [action for _label, action, _tooltip in tui_app.CommandScreen.COMMANDS]
         for action in ("run-task-a", "run-task-b", "live-stop", "live-verify",
-                       "live-copy", "live-open-png", "live-open", "runs-open",
+                       "live-copy", "live-copy-chat", "live-export-chat",
+                       "live-open-png", "live-open", "runs-open",
                        "settings", "theme", "help", "hard-stop", "quit"):
             self.assertIn(action, actions)
 

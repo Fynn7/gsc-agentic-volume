@@ -304,5 +304,37 @@ class TranscriptBlocks(unittest.TestCase):
         self.assertEqual(self.transcript.blocks, [])
 
 
+class BlockTime(unittest.TestCase):
+    """A block knows when its step happened, not only when it was read."""
+
+    def setUp(self):
+        self.transcript = tui_transcript.Transcript()
+
+    def test_the_time_of_the_event_is_the_time_of_the_block(self):
+        self.transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                                "ts": 999.0, "time": 1700000000.0})
+        block = self.transcript.find(tui_transcript.TOOL)
+        self.assertEqual(block["ts"], 1700000000.0)
+
+    def test_an_iso_time_is_understood(self):
+        self.transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                                "ts": 999.0,
+                                "time": "2026-10-20T17:24:03.624844+00:00"})
+        block = self.transcript.find(tui_transcript.TOOL)
+        self.assertNotEqual(block["ts"], 999.0)
+
+    def test_a_time_that_is_neither_a_number_nor_a_date_is_ignored(self):
+        self.transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                                "ts": 999.0, "time": "later"})
+        block = self.transcript.find(tui_transcript.TOOL)
+        self.assertEqual(block["ts"], 999.0)
+
+    def test_an_event_without_a_time_keeps_the_read_time(self):
+        self.transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                                "ts": 999.0})
+        block = self.transcript.find(tui_transcript.TOOL)
+        self.assertEqual(block["ts"], 999.0)
+
+
 if __name__ == "__main__":
     unittest.main()

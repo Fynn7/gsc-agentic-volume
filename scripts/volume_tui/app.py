@@ -219,7 +219,8 @@ def render_thinking(block: dict, expanded: bool = False):
 
     Collapsed it shows a hint that there is more; a click opens the model's
     own thinking (the reasoning the model streamed, or - when the model does
-    not think out loud - the reason the agent states for its next call).
+    not think out loud - the reason the agent states for its next call). The
+    arrow says which one it is: ▸ closed, ▾ open.
     """
     from rich.text import Text
 
@@ -242,6 +243,8 @@ def render_thinking(block: dict, expanded: bool = False):
         else:
             text.append("  ▸", style="dim")
         return text
+    # Open: the arrow points down, so the line still says that it can be closed.
+    text.append("  ▾", style="dim")
     if body:
         label = ("the model's thinking" if data.get("reasoning")
                  else "the agent's reason for the next call")

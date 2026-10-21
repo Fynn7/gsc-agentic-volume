@@ -51,7 +51,7 @@ Evidence is read-only except new runs, `verification.json`, and
   happened — the wording lives in `transcript.py` and `event_text.py`.
 - The **Thinking** line holds the model's own words. **A click opens the
   reasoning chain**, a second click closes it; the chain grows while the model
-  writes it.
+  writes it. The arrow on that line says which way it points: ▸ closed, ▾ open.
 - The **answer is streamed**: the recorded model stream
   (`http/http-NNN.response.bin`, the raw SSE the launcher recorded while the
   model was still answering) is tailed, so the text appears word by word.

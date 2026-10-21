@@ -571,6 +571,7 @@ class Conversation(unittest.TestCase):
                 self.assertFalse(widget.expanded)
                 collapsed = str(widget.render())
                 self.assertIn("Thinking", collapsed)
+                self.assertIn("▸", collapsed)
                 self.assertNotIn(chain, collapsed)
                 # A click opens the chain.
                 widget.on_click()
@@ -578,10 +579,13 @@ class Conversation(unittest.TestCase):
                 self.assertTrue(widget.expanded)
                 opened = str(widget.render())
                 self.assertIn(chain, opened)
+                # Open, the arrow points down: the line still says it can close.
+                self.assertIn("▾", opened)
                 # A second click closes it again.
                 widget.on_click()
                 await pilot.pause()
                 self.assertFalse(widget.expanded)
+                self.assertIn("▸", str(widget.render()))
         asyncio.run(_run())
 
     def test_the_model_stream_reaches_the_conversation(self):

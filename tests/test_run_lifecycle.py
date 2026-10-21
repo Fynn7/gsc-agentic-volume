@@ -465,5 +465,88 @@ class LauncherIntegration(unittest.TestCase):
         self.assertEqual(config_path.read_bytes(), raw)
 
 
+class CooperativeStopBeforeTheAgentStarts(unittest.TestCase):
+    """A stop that arrives before the agent starts must not start it."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.volume = self.root / 'volume.dat'; self.volume.write_text('unit-test-header')
+        self.lock_directory = self.root / 'locks'
+        patcher = patch.object(launcher, 'LOCK_DIRECTORY', self.lock_directory)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _config(self):
+        return {'harness': 'codex', 'model': 'qwen3.6:35b', 'endpoint': 'http://127.0.0.1:11434',
+                'rendererService': 'http://127.0.0.1:8765', 'contextSize': 16384, 'timeoutSeconds': 300,
+                'taskTimeoutSeconds': 900, 'temperature': 0, 'maxOutputTokens': 1200,
+                'volumePath': str(self.volume), 'renderBudget': 4, 'task': 'unit task',
+                'resultDirectory': str(self.root / 'results')}
+
+    @staticmethod
+    def _fake_http(base, path, body=None, timeout=120):
+        if path == '/api/version':
+            return {'version': '0.0'}
+        if path == '/api/tags':
+            return {'models': []}
+        if path == '/api/show':
+            return {'capabilities': ['vision'], 'remote_host': None}
+        if path == '/api/service':
+            return {'service': 'gav-native-renderer'}
+        if path == '/api/tools/open' or path.startswith('/api/session/'):
+            return {'id': 'session-1', 'state': 'running'}
+        return {}
+
+    class _Recorder:
+        def __init__(self, *args, **kwargs):
+            self.count = 0
+
+        def handler(self):
+            return lambda *args, **kwargs: None
+
+    class _Server:
+        def __init__(self, *args, **kwargs):
+            self.server_port = 0
+
+        def serve_forever(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    def test_the_agent_is_never_started_and_the_run_records_the_stop(self):
+        config_path = self.root / 'config.json'
+        config_path.write_text(json.dumps(self._config(), indent=2), encoding='utf-8')
+        started = []
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(launcher, 'http', side_effect=self._fake_http), \
+             patch.object(launcher, 'InferenceRecorder', self._Recorder), \
+             patch.object(launcher, 'ThreadingHTTPServer', self._Server), \
+             patch.object(launcher, 'monitor', lambda *args, **kwargs: None), \
+             patch.object(launcher.subprocess, 'check_output', return_value='codex 1.0'), \
+             patch.object(launcher.subprocess, 'Popen',
+                          side_effect=lambda *args, **kwargs: started.append(args)), \
+             patch.object(launcher, 'stop_requested', return_value=True):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = launcher.main(['--config', str(config_path)])
+        # The harness was never launched.
+        self.assertEqual(started, [])
+        self.assertNotEqual(code, 0)
+        base = self.root / 'results'
+        directories = sorted(path for path in base.iterdir() if path.is_dir())
+        self.assertEqual(len(directories), 1)
+        run = json.loads((directories[0] / 'run.json').read_text())
+        self.assertEqual(run['status'], 'failed')
+        self.assertTrue(run['interrupted'])
+        failure = json.loads((directories[0] / 'failure.json').read_text())
+        self.assertEqual(failure['status'], 'interrupted')
+
+
 if __name__ == '__main__':
     unittest.main()

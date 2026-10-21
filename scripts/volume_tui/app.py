@@ -1,7 +1,11 @@
-"""Textual IDE-style TUI: Dashboard / New Run / Runs / Live / Volumes / Services / Settings.
+"""Coding-agent style TUI for the Volume Agent.
+
+One screen, like a coding agent app: a status line, the conversation with the
+run (the task, the model's thinking, its tool calls, the frames it rendered and
+its answer) and a composer that starts the next task.
 
 Control/display only: runs start via scripts/run_local_agent.py, evidence is
-read-only except new runs + verification.json + tui-settings.json.
+read-only except new runs, verification.json and tui-settings.json.
 """
 from __future__ import annotations
 
@@ -22,7 +26,8 @@ try:
     import runner as runner_mod
     import services as services_mod
     import trace_events as trace_mod
-    import volumes as volumes_mod
+    import transcript as transcript_mod
+    import stream as stream_mod
     from context import AppContext
     import evidence as evidence_mod
     import flows as flows_mod
@@ -35,7 +40,8 @@ except Exception:  # pragma: no cover - import path for tests
     runner_mod = None  # type: ignore
     services_mod = None  # type: ignore
     trace_mod = None  # type: ignore
-    volumes_mod = None  # type: ignore
+    transcript_mod = None  # type: ignore
+    stream_mod = None  # type: ignore
     AppContext = None  # type: ignore
     evidence_mod = None  # type: ignore
     flows_mod = None  # type: ignore
@@ -76,20 +82,19 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.geometry import Offset
+    from textual.message import Message
     from textual.screen import ModalScreen
+    from textual.selection import Selection
     from textual.widgets import (
         Button,
         DataTable,
         Footer,
-        Header,
         Input,
         Label,
         LoadingIndicator,
-        RichLog,
         Select,
         Static,
-        TabbedContent,
-        TabPane,
         TextArea,
     )
     _TEXTUAL = True
@@ -97,11 +102,11 @@ except Exception:
     _TEXTUAL = False
     App = object  # type: ignore
     ComposeResult = None  # type: ignore
+    Message = object  # type: ignore
 
-CATEGORIES = ["ALL", "MODEL", "TOOL", "IMAGE", "INFER", "ERROR", "WARN", "FINISH"]
-HINT_TEXT = ("F1 = what every button does | Ctrl+Up/Down = scroll window | "
-             "wheel scrolls outside text boxes")
-TASK_PRESETS = ["task-a", "task-b", "custom"]
+# The accent colour of the whole app: the model, the task and the tool names
+# are drawn with it, exactly like a coding agent app marks its own output.
+ACCENT = "cyan"
 
 # Settings form fields: (label, widget id, setting key, kind). One list, used
 # by the form, by "Save settings" and by "Reset to defaults", so they cannot
@@ -120,9 +125,139 @@ SETTINGS_ROWS = (
     ("Max output tokens", "set-maxtokens", "maxOutputTokens", "int"),
 )
 
-# Preview budget: the frame is fitted into this many text rows, so the whole
-# image is visible at once (never a cut-off corner).
-LIVE_PREVIEW_MAX_ROWS = 48
+# Preview budget: a frame in the conversation is fitted into this many text
+# rows and this many columns, so the whole picture is visible at once (never
+# a cut-off corner) and never swallows the conversation.
+IMAGE_PREVIEW_MAX_ROWS = 14
+IMAGE_PREVIEW_MAX_COLS = 64
+
+# The spinner the thinking block and the status line share.
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _spinner_frame() -> str:
+    return SPINNER[int(time.time() * 5) % len(SPINNER)]
+
+
+def render_block(block: dict):
+    """One transcript entry as a Rich renderable.
+
+    The transcript is the app's voice: the task is the user's, the tool calls
+    and the answers are the agent's, and every line says what happened.
+    """
+    from rich.text import Text
+
+    if transcript_mod is None:  # pragma: no cover - the transcript always loads
+        return Text(str(block.get("title") or ""))
+
+    kind = str(block.get("kind") or "")
+    title = str(block.get("title") or "")
+    subtitle = str(block.get("subtitle") or "")
+    body = str(block.get("body") or "")
+    status = block.get("status")
+    data = block.get("data") or {}
+
+    text = Text()
+    if kind == transcript_mod.USER:
+        text.append("▌ ", style="bold %s" % ACCENT)
+        text.append(title, style="bold")
+        return text
+    if kind == transcript_mod.THINKING:
+        return render_thinking(block, False)
+    if kind == transcript_mod.ASSISTANT:
+        text.append(title)
+        return text
+    if kind == transcript_mod.TOOL:
+        text.append("● ", style=ACCENT)
+        text.append(title, style="bold %s" % ACCENT)
+        if subtitle:
+            text.append("  %s" % subtitle, style="dim")
+        if status == "running":
+            text.append("  …", style="dim")
+        elif status == "done":
+            text.append("  ✓", style="green")
+            seconds = data.get("seconds")
+            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+                text.append(" %.2fs" % seconds, style="dim")
+        elif status == "failed":
+            text.append("  ✗", style="red")
+        if body:
+            text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
+        return text
+    if kind == transcript_mod.IMAGE:
+        text.append("▣ ", style="green")
+        text.append(title, style="green")
+        if subtitle:
+            text.append("  %s" % subtitle, style="dim")
+        return text
+    if kind == transcript_mod.WARN:
+        text.append("⚠ ", style="yellow")
+        text.append(title, style="yellow")
+        return text
+    if kind == transcript_mod.ERROR:
+        text.append("✗ ", style="red")
+        text.append(title, style="red")
+        if body:
+            text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
+        return text
+    if kind == transcript_mod.FINISH:
+        text.append("✓ ", style="green")
+        text.append(title, style="green")
+        if body:
+            text.append("\n  %s" % body, style="dim")
+        return text
+    # Notice and meta lines stay quiet: they carry facts, not the story.
+    text.append("· ", style="dim")
+    text.append(title, style="dim")
+    return text
+
+
+def render_thinking(block: dict, expanded: bool = False):
+    """The Thinking block: one line that opens into the reasoning chain.
+
+    Collapsed it shows a hint that there is more; a click opens the model's
+    own thinking (the reasoning the model streamed, or - when the model does
+    not think out loud - the reason the agent states for its next call).
+    """
+    from rich.text import Text
+
+    text = Text()
+    status = block.get("status")
+    if status == "running":
+        text.append(str(block.get("spinner") or "✳"), style=ACCENT)
+        text.append(" Thinking", style="italic dim")
+    else:
+        text.append("✓", style="green")
+        text.append(" Thinking", style="dim")
+    subtitle = str(block.get("subtitle") or "")
+    if subtitle:
+        text.append("  %s" % subtitle, style="dim")
+    body = str(block.get("body") or "")
+    data = block.get("data") or {}
+    if not expanded:
+        if body:
+            text.append("  ▸ %s" % _first_line(body), style="dim")
+        else:
+            text.append("  ▸", style="dim")
+        return text
+    if body:
+        label = ("the model's thinking" if data.get("reasoning")
+                 else "the agent's reason for the next call")
+        text.append("\n  %s:" % label, style="dim")
+        for line in body.splitlines():
+            text.append("\n  %s" % line, style="italic dim")
+    if data.get("next"):
+        text.append("\n  next: %s" % data["next"], style="dim")
+    return text
+
+
+def _first_line(text: str, limit: int = 48) -> str:
+    """The first line of a text, capped - the hint on the collapsed block."""
+    line = str(text or "").strip().splitlines()
+    if not line:
+        return ""
+    head = line[0].strip()
+    return head if len(head) <= limit else head[: limit - 3] + "..."
 
 
 class DismissibleModal(ModalScreen if _TEXTUAL else object):
@@ -140,114 +275,55 @@ class DismissibleModal(ModalScreen if _TEXTUAL else object):
 
 class HelpScreen(DismissibleModal):
     def compose(self):
-        yield Static(
-            "Volume Agent TUI — what every button does\n"
-            "\n"
-            "Tabs: Dashboard / New Run / Runs / Live / Volumes / Services / Settings\n"
-            "Ctrl+P = command palette · F1 = this help · t = theme · q = quit "
-            "(asks first while a run is live)\n"
-            "\n"
-            "DASHBOARD — mode, model, volume and service state at a glance\n"
-            "  New run          open the New Run tab to start an agent run\n"
-            "  Open Live view   open the Live tab; with a run selected in Runs it\n"
-            "                    follows that run\n"
-            "  Refresh status   re-read mode, model, volume, service state and the\n"
-            "                    run list from disk (nothing is written)\n"
-            "\n"
-            "LIVE — watch one run while it runs\n"
-            "  Stop run          ask the agent to stop now; evidence already\n"
-            "                    written is kept, the launcher records 'interrupted'\n"
-            "  Verify evidence   read-only check of this run: did it finish, and was\n"
-            "                    a PNG really sent to the model? Writes\n"
-            "                    verification.json. Never calls the model.\n"
-            "  View PNG          open the previewed PNG in your image viewer (full size)\n"
-            "  Open folder       open the file explorer at the folder that holds the\n"
-            "                    PNGs — the run log folder itself has no images\n"
-            "  Copy JSON log     copy the whole run's JSON log to the clipboard: the\n"
-            "                    run's meta data, every event and every JSON log file\n"
-            "                    of the run folder. Read-only.\n"
-            "  Stop watching     leave the Live view; the run keeps running in the\n"
-            "                    background (open it again from Runs)\n"
-            "\n"
-            "  The event timeline follows the newest event on its own while it is\n"
-            "  scrolled to the bottom; scroll up to read the history and it stops\n"
-            "  following until you scroll back down.\n"
-            "\n"
-            "  How to read an event row (each row says what happened and with which\n"
-            "  numbers; selecting it shows the full detail):\n"
-            "    MODEL   the model is working; the answer row carries its own words\n"
-            "    TOOL    the agent called the renderer: what changed and why\n"
-            "    IMAGE   a PNG frame was written to disk (revision, lit pixels, size)\n"
-            "    INFER   one call to the model service: what was sent, what came back\n"
-            "    WARN    a notice from the codex harness; the run continued\n"
-            "    ERROR   something failed; the row says what and where\n"
-            "    FINISH  the agent stopped and picked a frame as the result\n"
-            "\n"
-            "RUNS — runs already on disk\n"
-            "  Open Live view    follow the selected run in the Live tab\n"
-            "  Verify evidence   same read-only check as in Live, for the selected run\n"
-            "  Rerun as new run   copy the selected run's task into New Run; nothing\n"
-            "                    starts until you press Start agent run\n"
-            "  Pick as A / B     remember two runs, then Compare A vs B shows their\n"
-            "                    config difference\n"
-            "  Refresh list      re-read the runs on disk (nothing is written)\n"
-            "\n"
-            "NEW RUN\n"
-            "  Check services & settings  check the local inference service and the\n"
-            "                    render settings; nothing is written\n"
-            "  Start agent run   write the run config and launch the agent; the Live\n"
-            "                    tab opens by itself\n"
-            "\n"
-            "VOLUMES\n"
-            "  Preview slice     render one slice of the selected prepared volume\n"
-            "                    (read-only, no render budget)\n"
-            "  Use this volume   use the selected volume for the next run\n"
-            "\n"
-            "SERVICES — only services this TUI started are ever touched\n"
-            "  Start missing services  start the owned services that are down\n"
-            "  Stop owned services     stop the owned services\n"
-            "  Refresh status          re-read the owned services and their logs\n"
-            "  Restart owned           restart the owned services\n"
-            "  Stop all services       stop the agent tree, the local Ollama this TUI\n"
-            "                    started and the owned services (the model unloads\n"
-            "                    from VRAM)\n"
-            "\n"
-            "SETTINGS\n"
-            "  Save settings     write the form to runtime/tui-settings.json\n"
-            "  Reset to defaults fill the form with the built-in defaults (writes nothing)\n"
-            "  Test H200 endpoint send one small probe request; never falls back silently\n"
-            "\n"
-            "Evidence is read-only except new runs, verification.json and\n"
-            "tui-settings.json. Ctrl+C is the hard stop (agent tree + local Ollama +\n"
-            "owned services, confirmed).\n"
-            "\n"
-            "LEAVING THE TUI leaves no process behind: the live agent run is stopped\n"
-            "(its evidence stays complete), the services this TUI started are\n"
-            "stopped with it, and anything that survives is killed. Ctrl+C does the\n"
-            "same and additionally stops a local Ollama that this TUI did not start.\n"
-            "\n"
-            "Press Esc to close.",
-            id="help-text",
-        )
-
-
-class FramePreview(Static if _TEXTUAL else object):
-    """Preview pane for the current frame PNG.
-
-    The frame is drawn as half-block cells whose width must match the widget
-    exactly, otherwise the terminal folds the row and the picture is cut in
-    half. The widget therefore asks the app to re-fit the frame whenever its
-    own size changes (window resize, scrollbar appearing).
-    """
-
-    def on_resize(self, event) -> None:
-        try:
-            app = self.app
-        except Exception:
-            return
-        refresh = getattr(app, "_refresh_frame_display", None)
-        if refresh is not None:
-            refresh()
+        with Vertical(classes="dlg"):
+            with VerticalScroll():
+                yield Static(
+                    "Volume Agent — a coding agent for one volume\n"
+                    "\n"
+                    "The screen is one conversation with the run: your task at the top,\n"
+                    "then the model's thinking, its tool calls, the frames it rendered\n"
+                    "and its answer. The status line above says which run is open and\n"
+                    "how much of the observation budget is already spent.\n"
+                    "\n"
+                    "KEYS\n"
+                    "  Enter          send the composer text: it starts a new run\n"
+                    "  Ctrl+Up/Down   scroll the conversation (the composer keeps the cursor)\n"
+                    "  Esc            stop the running agent (evidence already written stays)\n"
+                    "  Ctrl+P         commands: presets, stop, verify, copy log, switch run\n"
+                    "  F1             this help\n"
+                    "  Ctrl+T         light / dark\n"
+                    "  Ctrl+Q         quit (asks first while a run is live)\n"
+                    "  Ctrl+C         copy the selected text (the terminal default)\n"
+                    "\n"
+                    "  While the agent works the Send button turns into a red Stop;\n"
+                    "  it stops the run the same way Esc does.\n"
+                    "\n"
+                    "  Click a line that starts with ✳ Thinking to open the model's\n"
+                    "  reasoning chain; click it again to close it.\n"
+                    "\n"
+                    "WHAT THE TRANSCRIPT SHOWS\n"
+                    "  ▌ <task>       what you asked for\n"
+                    "  ✳ Thinking      the model's own words; the line opens the chain\n"
+                    "  ● <tool>       a renderer call with the numbers it changed,\n"
+                    "                 ✓ when it returned, ✗ when the renderer refused it\n"
+                    "  ▣ frame        a PNG the renderer wrote (the picture is inline)\n"
+                    "  ✓ Run finished what the agent picked and what it claims\n"
+                    "  ⚠ / ✗          a notice and a failure\n"
+                    "\n"
+                    "EVIDENCE\n"
+                    "  Evidence is read-only except new runs, verification.json and\n"
+                    "  tui-settings.json.\n"
+                    "\n"
+                    "LEAVING\n"
+                    "  Ctrl+Q stops the agent run, the local Ollama and the services\n"
+                    "  this TUI started, then leaves. The hard stop (Ctrl+P ->\n"
+                    "  'Hard stop...') also stops a local Ollama this TUI did not start.\n"
+                    "  Closing the window stops everything as well.\n"
+                    "\n"
+                    "Press Esc to close.",
+                    id="help-text",
+                    markup=False,
+                )
 
 
 class ConfirmScreen(DismissibleModal):
@@ -257,13 +333,14 @@ class ConfirmScreen(DismissibleModal):
         self._on_yes = on_yes
 
     def compose(self):
-        yield Static(self._message, id="confirm-message")
-        yield Static("Esc = No (cancel)", id="confirm-hint")
-        with Horizontal():
-            yield Button("Yes", id="confirm-yes", variant="error",
-                         tooltip="Do the action now. Esc is the same as No.")
-            yield Button("No", id="confirm-no", variant="primary",
-                         tooltip="Do nothing and go back. Esc does the same.")
+        with Vertical(classes="dlg"):
+            yield Static(self._message, id="confirm-message", markup=False)
+            yield Static("Esc = No (cancel)", id="confirm-hint")
+            with Horizontal():
+                yield Button("Yes", id="confirm-yes", variant="error",
+                             tooltip="Do the action now. Esc is the same as No.")
+                yield Button("No", id="confirm-no", variant="primary",
+                             tooltip="Do nothing and go back. Esc does the same.")
 
     async def action_dismiss(self, result=None) -> None:
         """Esc cancels: the same as clicking No, never the Yes action."""
@@ -281,40 +358,390 @@ class CommandScreen(DismissibleModal):
     # (label, action id, tooltip) — the id is stable, the label spells out the
     # effect and the tooltip says it once more (every button carries one).
     COMMANDS = [
-        ("Go: Dashboard", "go-dashboard", "Show mode, model, volume and service state."),
-        ("Go: New Run", "go-newrun", "Open the form that starts an agent run."),
-        ("Go: Runs", "go-runs", "Show the runs already on disk."),
-        ("Go: Live", "go-live", "Watch the selected run while it runs."),
-        ("Go: Volumes", "go-volumes", "Show the prepared volumes found on this machine."),
-        ("Go: Services", "go-services", "Show the services this TUI owns."),
-        ("Go: Settings", "go-settings", "Show the form that writes runtime/tui-settings.json."),
-        ("Live: Jump to newest event", "live-jump",
-         "Scroll the event timeline back to the newest event."),
-        ("Live: Stop the run", "live-stop",
+        ("Run: the audited Task A", "run-task-a",
+         "Start the audited Task A prompt (rotate the camera, save the frame)."),
+        ("Run: the audited Task B", "run-task-b",
+         "Start the audited Task B prompt (find a more informative view)."),
+        ("Run: stop the agent", "live-stop",
          "Ask the agent to stop now; evidence already written is kept."),
-        ("Live: Verify evidence (read-only)", "live-verify",
+        ("Live: verify the evidence (read-only)", "live-verify",
          "Check this run's evidence; writes verification.json, never calls the model."),
-        ("Live: View current PNG", "live-open-png",
+        ("Live: copy the JSON log", "live-copy",
+         "Copy the whole run's JSON log to the clipboard (read-only)."),
+        ("Live: view the current PNG", "live-open-png",
          "Open the previewed PNG in your image viewer (full size)."),
-        ("Live: Open PNG folder", "live-open",
+        ("Live: open the PNG folder", "live-open",
          "Open the file explorer at the folder that holds the PNGs."),
-        ("Live: Stop watching (run keeps going)", "live-detach",
-         "Leave the Live view; the run keeps running in the background."),
-        ("Runs: Refresh list", "runs-refresh", "Re-read the runs on disk."),
-        ("Services: Refresh list", "services-refresh",
-         "Re-read the owned services and their logs."),
-        ("Help: what every button does", "help", "Open this help screen."),
+        ("Runs: open another run", "runs-open",
+         "Pick one of the runs on this machine and open it here."),
+        ("Settings: model, endpoints, budget", "settings",
+         "Show the form that writes runtime/tui-settings.json."),
+        ("Theme: light or dark", "theme",
+         "Switch the colour theme of the whole app."),
+        ("Help: what every key does", "help",
+         "Open this help screen."),
+        ("Hard stop: kill everything this TUI owns", "hard-stop",
+         "Stop the agent tree, the local Ollama and the owned services now, "
+         "then leave. The hard stop also stops a local Ollama this TUI did not start."),
         ("Quit the TUI", "quit",
          "Stop everything the TUI owns, then leave. Asks first while a run is live."),
     ]
 
     def compose(self):
-        yield Static("Command palette (Enter runs, Esc closes)", id="cmd-title")
-        for label, action, tooltip in self.COMMANDS:
-            yield Button(label, id="cmd-%s" % action, tooltip=tooltip)
+        with Vertical(classes="dlg"):
+            yield Static("Command palette (Enter runs, Esc closes)", id="cmd-title")
+            with VerticalScroll():
+                for label, action, tooltip in self.COMMANDS:
+                    yield Button(label, id="cmd-%s" % action, tooltip=tooltip)
 
     async def on_button_pressed(self, event):
         self.dismiss(result=event.button.id)
+
+
+class RunsScreen(DismissibleModal):
+    """The runs on this machine; one opens in the conversation."""
+
+    def __init__(self, runs: list[dict]):
+        super().__init__()
+        self._runs = list(runs or [])
+
+    def compose(self):
+        with Vertical(classes="dlg"):
+            yield Static("Runs on this machine (Enter opens one, Esc closes)",
+                         id="runs-title")
+            # cursor_type="row": Enter picks the run, not a single cell.
+            yield DataTable(id="runs-modal-table", cursor_type="row")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#runs-modal-table", DataTable)
+        table.add_columns("run", "status", "model", "frames", "task")
+        for run in self._runs:
+            table.add_row(_escape_markup(str(run.get("runId", "?"))),
+                          _escape_markup(str(run.get("status", "?"))),
+                          _escape_markup(str(run.get("model", "?"))),
+                          str(run.get("frames", "?")),
+                          _escape_markup(str(run.get("task", "?"))[:60]))
+
+    async def on_data_table_row_selected(self, event):
+        row = event.cursor_row
+        if 0 <= row < len(self._runs):
+            self.dismiss(result=self._runs[row])
+
+
+class SettingsScreen(DismissibleModal):
+    """The settings form (model, endpoints, budget, timeouts).
+
+    It is a dialog, not a page: the app is one screen, like a coding agent
+    app, and the settings live behind one command.
+    """
+
+    def __init__(self, settings: dict):
+        super().__init__()
+        self.settings = dict(settings or {})
+
+    def compose(self):
+        with Vertical(classes="dlg"):
+            with VerticalScroll():
+                with Vertical(classes="panel"):
+                    yield Static("Saved to runtime/tui-settings.json (Save settings writes it)",
+                                 classes="scroll-hint")
+                    for label, wid, key, _kind in SETTINGS_ROWS:
+                        with Horizontal(classes="row"):
+                            yield Label(label, classes="field-label")
+                            yield Input(str(self.settings.get(key, "")), id=wid)
+                    with Horizontal(classes="row"):
+                        yield Label("Think", classes="field-label")
+                        yield Select([("off", "false"), ("on", "true")],
+                                     value="true" if self.settings.get("think") else "false",
+                                     id="set-think")
+                    with Horizontal(classes="row"):
+                        yield Button("Save settings", id="btn-settings-save", variant="primary",
+                                     tooltip="Write these settings to runtime/tui-settings.json.")
+                        yield Button("Reset to defaults", id="btn-settings-reset",
+                                     tooltip="Fill the form with the built-in defaults. Nothing is written yet.")
+                        yield Button("Test H200 endpoint", id="btn-h200-probe",
+                                     tooltip="Send one small probe request to the H200 endpoint. "
+                                             "Never falls back silently.")
+                    yield Static("", id="settings-status", markup=False)
+
+    # -- the form --------------------------------------------------------
+    def _collect(self) -> dict:
+        settings = dict(self.settings)
+        for _label, widget, key, kind in SETTINGS_ROWS:
+            raw = self.query_one("#" + widget, Input).value.strip()
+            if kind == "int":
+                if raw:
+                    settings[key] = int(raw)
+            elif kind == "float":
+                if raw:
+                    settings[key] = float(raw)
+            else:
+                settings[key] = raw
+        try:
+            settings["think"] = str(self.query_one("#set-think", Select).value) == "true"
+        except Exception:
+            pass
+        return settings
+
+    async def on_button_pressed(self, event):
+        bid = event.button.id
+        if bid == "btn-settings-save":
+            self._save()
+        elif bid == "btn-settings-reset":
+            self._reset()
+        elif bid == "btn-h200-probe":
+            self._probe()
+
+    def _status(self, text: str) -> None:
+        try:
+            self.query_one("#settings-status", Static).update(text)
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            settings = self._collect()
+        except ValueError as error:
+            self._status("Invalid: %s" % error)
+            return
+        problems = cfg.validate_settings(settings) if cfg else []
+        if problems:
+            self._status("Invalid:\n" + "\n".join("- %s" % p for p in problems))
+            return
+        if cfg:
+            cfg.save_settings(settings)
+        self.settings = settings
+        self._status("Saved to runtime/tui-settings.json.")
+        self.dismiss(result=settings)
+
+    def _reset(self) -> None:
+        """Fill the form with the built-in defaults. Writes nothing."""
+        defaults = dict(cfg.DEFAULTS) if cfg else {}
+        for _label, widget, key, _kind in SETTINGS_ROWS:
+            try:
+                self.query_one("#" + widget, Input).value = str(defaults.get(key, ""))
+            except Exception:
+                pass
+        try:
+            self.query_one("#set-think", Select).value = (
+                "true" if defaults.get("think") else "false")
+        except Exception:
+            pass
+        self._status("Form filled with the built-in defaults. Nothing was written — "
+                     "press Save settings to keep them.")
+
+    def _probe(self) -> None:
+        import urllib.request
+        endpoint = str(self.settings.get("h200Endpoint", "")).rstrip("/")
+        try:
+            with urllib.request.urlopen(endpoint + "/api/version", timeout=5) as response:
+                version = json.load(response)
+            self._status("H200 OK: %s" % str(version)[:120])
+        except Exception as error:
+            self._status("H200 DOWN: %s" % error)
+
+
+class TranscriptScroll(VerticalScroll if _TEXTUAL else object):
+    """The conversation scroller.
+
+    It tells the app when the view moves, so a user who scrolls up to read
+    the history is not yanked back to the newest entry.
+    """
+
+    if _TEXTUAL:
+        def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+            super().watch_scroll_y(old_value, new_value)
+            try:
+                app = self.app
+            except Exception:
+                return
+            notify = getattr(app, "_user_scrolled", None)
+            if notify is not None:
+                notify()
+
+
+class SafeSelection:
+    """A text selection that never points past the content.
+
+    A block can be one layout behind its content - the answer grows while the
+    model writes it - and Textual's own extraction then reads past the last
+    line, which crashes the copy. The selection is clipped to the lines the
+    block really has, so copying always works.
+    """
+
+    def get_selection(self, selection):
+        try:
+            return super().get_selection(selection)
+        except IndexError:
+            pass
+        try:
+            text = str(self.visual)
+        except Exception:
+            return None
+        lines = text.splitlines()
+        if not lines:
+            return ""
+        start_y, start_x = selection.start.transpose
+        end_y, end_x = selection.end.transpose
+        start_y = min(max(start_y, 0), len(lines) - 1)
+        end_y = min(max(end_y, 0), len(lines) - 1)
+        if end_y < start_y:
+            return None
+        clipped = Selection(start=Offset(start_x, start_y), end=Offset(end_x, end_y))
+        try:
+            return clipped.extract(text), "\n"
+        except IndexError:
+            return None
+
+
+class SafeStatic(SafeSelection, Static if _TEXTUAL else object):
+    """A plain static whose selection never points past its content."""
+
+
+class FramePreview(SafeSelection, Static if _TEXTUAL else object):
+    """Preview pane for a frame in the conversation.
+
+    The frame is drawn as half-block cells whose width must match the widget
+    exactly, otherwise the terminal folds the row and the picture is cut in
+    half. The widget therefore asks the app to re-fit the frame whenever its
+    own size changes (window resize, scrollbar appearing).
+    """
+
+    def on_resize(self, event) -> None:
+        try:
+            app = self.app
+        except Exception:
+            return
+        refresh = getattr(app, "_refresh_frame_display", None)
+        if refresh is not None:
+            refresh()
+
+
+class TranscriptBlock(SafeSelection, Static if _TEXTUAL else object):
+    """One entry of the conversation.
+
+    The content is pushed with update(), so the block grows with the text
+    (the answer arrives word by word).
+    """
+
+    def __init__(self, block: dict):
+        super().__init__()
+        self.block = block
+        self.add_class("block")
+        self.add_class(str(block.get("kind") or "note"))
+
+    def set_block(self, block: dict) -> None:
+        self.block = block
+        self.update(render_block(block))
+
+
+class ThinkingBlock(SafeSelection, Static if _TEXTUAL else object):
+    """The model's thinking: one line, a click opens the reasoning chain.
+
+    The block is the same one the model streams its reasoning into, so the
+    chain grows while the model works - open or closed.
+    """
+
+    def __init__(self, block: dict):
+        super().__init__()
+        self.block = block
+        self.expanded = False
+        self.add_class("block")
+        self.add_class("thinking")
+
+    def set_block(self, block: dict) -> None:
+        self.block = block
+        self.update(render_thinking(block, self.expanded))
+
+    def on_click(self, event=None) -> None:
+        """A click opens the reasoning chain, a second click closes it."""
+        self.expanded = not self.expanded
+        self.update(render_thinking(self.block, self.expanded))
+        if event is not None:
+            try:
+                event.stop()
+            except Exception:
+                pass
+
+    def action_toggle(self) -> None:
+        """The same, from the keyboard."""
+        self.expanded = not self.expanded
+        self.update(render_thinking(self.block, self.expanded))
+
+
+class ImageBlock(Vertical if _TEXTUAL else object):
+    """A frame in the conversation: the caption, the path and the picture."""
+
+    def __init__(self, block: dict):
+        super().__init__(classes="image-block block")
+        self.block = block
+        self._preview_key = None
+
+    def compose(self):
+        yield SafeStatic("", classes="image-caption")
+        yield FramePreview("(no preview)", classes="image-preview")
+
+    def on_mount(self) -> None:
+        self.set_block(self.block)
+
+    def set_block(self, block: dict) -> None:
+        self.block = block
+        try:
+            self.query_one(".image-caption", SafeStatic).update(render_block(block))
+        except Exception:
+            pass
+        self.refresh_preview()
+
+    def refresh_preview(self) -> None:
+        """Fit the whole frame into the widget (never a cut-off corner)."""
+        try:
+            preview = self.query_one(".image-preview", FramePreview)
+        except Exception:
+            return
+        width = preview.size.width or 0
+        if width < 8:
+            return  # not laid out yet; the resize handler comes later
+        width = min(width, IMAGE_PREVIEW_MAX_COLS)
+        rows = IMAGE_PREVIEW_MAX_ROWS
+        image = (self.block.get("data") or {}).get("image")
+        key = (str(image), width, rows)
+        if key == self._preview_key:
+            return
+        self._preview_key = key
+        try:
+            preview.update(imaging_mod.preview_fitted_or_message(
+                image, width=width, height=rows))
+        except Exception:
+            pass
+
+
+class Composer(TextArea if _TEXTUAL else object):
+    """The chat input: Enter sends the task, Shift+Enter adds a line."""
+
+    if _TEXTUAL:
+        class Submitted(Message):
+            """The user pressed Enter in the composer."""
+
+            def __init__(self, value: str) -> None:
+                super().__init__()
+                self.value = value
+
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("soft_wrap", True)
+            super().__init__(*args, **kwargs)
+
+        async def _on_key(self, event) -> None:
+            if event.key == "enter":
+                event.stop()
+                event.prevent_default()
+                self.post_message(self.Submitted(self.text))
+                return
+            if event.key == "shift+enter":
+                event.stop()
+                event.prevent_default()
+                self.insert("\n")
+                return
+            await super()._on_key(event)
 
 
 def start_owned_services(settings: dict) -> None:
@@ -342,47 +769,59 @@ def start_owned_services(settings: dict) -> None:
 
 if _TEXTUAL:
     class VolumeAgentApp(App):
-        TITLE = "Volume Agent TUI"
+        TITLE = "Volume Agent"
         CSS = """
-        TabbedContent { height: 1fr; }
-        TabPane { height: 1fr; }
-        VerticalScroll { height: 1fr; }
-        #busy-spinner { height: 1; display: none; }
+        Screen { layout: vertical; }
+        ModalScreen { align: center middle; background: $background 80%; }
+        .dlg {
+            width: 90%;
+            max-width: 100;
+            height: auto;
+            max-height: 92%;
+            border: round $accent;
+            background: $surface;
+            padding: 1 2;
+        }
+        #status-row { height: 1; }
+        #busy-spinner { width: 3; height: 1; display: none; }
         #busy-spinner.busy { display: block; }
+        #status-bar { height: 1; content-align: left middle; }
+        #transcript { height: 1fr; }
+        #blocks { height: auto; padding: 0 2; }
+        .block { height: auto; margin-bottom: 1; }
+        #composer-row { height: auto; padding: 0 1; }
+        #composer { height: 3; border: round $accent; }
+        #btn-send { height: 3; min-width: 10; }
         .panel { height: auto; padding: 1 2; }
         .row { height: 3; }
         .row > Input { width: 1fr; }
         .row > Select { width: 1fr; }
         .field-label { width: 24; content-align: right middle; padding-right: 1; }
-        .narrow { width: 18; }
-        #status-bar { height: 5; border: solid green; }
-        #confirm-hint { height: auto; color: $text-muted; }
-        #newrun-prompt { height: 8; }
-        #newrun-preflight { height: auto; min-height: 3; }
-        .scroll-hint { color: gray; }
-        #runs-table { height: 12; }
-        #runs-detail { height: auto; min-height: 3; }
-        #events-table { height: 10; }
-        #live-detail { height: 7; border: solid gray; }
-        #live-image-path { height: auto; color: $text-muted; }
-        #live-image { height: auto; min-height: 3; border: solid cyan; }
-        #volumes-table { height: 10; }
-        #volumes-detail { height: auto; min-height: 3; }
-        #slice-preview { height: 14; border: solid cyan; }
-        #services-table { height: 8; }
-        #service-logs { height: 10; }
-        #settings-status { height: auto; min-height: 3; }
+        .scroll-hint { color: $text-muted; }
+        #help-text { height: auto; padding: 1 2; }
+        #cmd-title { height: auto; padding: 1 2; }
+        #confirm-message { height: auto; padding: 1 2; }
+        #confirm-hint { height: auto; color: $text-muted; padding: 0 2; }
+        #runs-title { height: auto; padding: 1 2; }
+        #runs-modal-table { height: 20; }
+        #settings-status { height: auto; min-height: 3; padding: 1 2; }
+        .image-caption { height: auto; }
+        .image-preview { height: auto; }
+        .image-block { height: auto; }
         """
 
         BINDINGS = [
             # "app.command_palette" is the name Textual looks for: declaring it
             # stops Textual from adding its own ctrl+p binding, so Ctrl+P opens
-            # the TUI palette (the Go:/Live: list) and not the generic system
+            # the TUI palette (the curated list) and not the generic system
             # palette, which Textual would otherwise bind with priority.
             Binding("ctrl+p", "app.command_palette", "Commands", show=False),
             Binding("f1", "help", "Help"),
-            Binding("t", "toggle_dark", "Theme"),
-            Binding("q", "quit_confirm", "Quit"),
+            Binding("ctrl+t", "toggle_dark", "Theme"),
+            Binding("ctrl+q", "quit", "Quit"),
+            Binding("escape", "interrupt_run", "Stop"),
+            Binding("ctrl+up", "scroll_history", "Scroll up", show=False),
+            Binding("ctrl+down", "scroll_history_down", "Scroll down", show=False),
         ]
 
         def __init__(self, context=None):
@@ -397,26 +836,27 @@ if _TEXTUAL:
             except Exception:
                 pass
             self.runs: list[dict] = []
-            self.volumes: list[dict] = []
-            self.services_report: dict = {}
             self.live_run_id: str | None = None
             self.live_dir: Path | None = None
             self.live_tail = None
+            self.stream_tail = None
             self.live_events: list[dict] = []
             self.live_frozen = False
             self._live_following = True
-            self.live_filter = "ALL"
-            self.live_search = ""
+            self._programmatic_scroll = False
+            self._tail_scroll_pending = False
+            self._stop_requested_for: str | None = None
+            self._end_announced = False
             self.live_image_path: str | None = None
             self.live_image_revision = None
-            self._preview_key: tuple | None = None
-            self.compare_a: str | None = None
-            self.compare_b: str | None = None
             self._launcher_thread: threading.Thread | None = None
             self._launcher_result: dict = {}
             self._start_locked = False
             self._busy_count = 0
+            self.transcript = transcript_mod.Transcript() if transcript_mod else None
+            self._widgets: list[tuple[dict, object]] = []
 
+        # -- busy feedback --------------------------------------------------
         def _busy_inc(self) -> None:
             self._busy_count += 1
             self._refresh_busy()
@@ -447,8 +887,9 @@ if _TEXTUAL:
             """Run a blocking callable in a worker with visible feedback.
 
             The pressed button (if given) shows its spinner and locks against
-            double clicks; the top spinner animates while any worker is active;
-            failures surface as error toasts instead of vanishing silently.
+            double clicks; the status line spinner animates while any worker
+            is active; failures surface as error toasts instead of vanishing
+            silently.
             """
             if button is not None:
                 try:
@@ -500,266 +941,228 @@ if _TEXTUAL:
             except Exception:
                 return []
 
-        def discover_volumes(self) -> list[dict]:
-            if self.ctx is not None and getattr(self.ctx, "discover_volumes", None):
-                try:
-                    return list(self.ctx.discover_volumes())
-                except Exception:
-                    return []
-            try:
-                current = cfg.selected_volume(self.settings) if cfg else None
-                return list(volumes_mod.discover_volumes(current))
-            except Exception:
-                return []
-
         # -- layout -------------------------------------------------------
         def compose(self) -> ComposeResult:
-            yield Header()
-            yield LoadingIndicator(id="busy-spinner")
-            with TabbedContent(id="workspaces"):
-                with TabPane("Dashboard", id="tab-dashboard"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static("Loading…", id="status-bar")
-                            with Horizontal(classes="row"):
-                                yield Button("New run", id="btn-goto-newrun", variant="primary",
-                                             tooltip="Open the New Run tab to start a new agent run.")
-                                yield Button("Open Live view", id="btn-goto-live",
-                                             tooltip="Open the Live tab. With a run selected in Runs it follows that run.")
-                                yield Button("Refresh status", id="btn-refresh",
-                                             tooltip="Re-read mode, model and the run list from disk.")
-                with TabPane("New Run", id="tab-newrun"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield Label("Task preset")
-                            yield Select([(p, p) for p in TASK_PRESETS], value="task-a", id="newrun-preset")
-                            yield Label("Prompt (editable; A/B presets load audited text)")
-                            yield TextArea("", id="newrun-prompt")
-                            yield Label("Volume header path (empty = current selection)")
-                            yield Input("", placeholder="D:/path/to/render.dat", id="newrun-volume")
-                            for label, wid, value in (
-                                ("Model", "newrun-model", str(self.settings.get("model", ""))),
-                                ("Render budget", "newrun-budget", str(self.settings.get("renderBudget", 4))),
-                                ("Context size", "newrun-context", str(self.settings.get("contextSize", 16384))),
-                                ("Temperature", "newrun-temp", str(self.settings.get("temperature", 0)))):
-                                with Horizontal(classes="row"):
-                                    yield Label(label, classes="field-label")
-                                    yield Input(value, id=wid)
-                            yield Static("", id="newrun-preflight")
-                            with Horizontal(classes="row"):
-                                yield Button("Check services & settings", id="btn-preflight",
-                                             tooltip="Check the local inference service and the render settings "
-                                                     "before starting. Nothing is written.")
-                                yield Button("Start agent run", id="btn-start-run", variant="success",
-                                             tooltip="Write the run config and launch the agent. The Live tab opens by itself.")
-                with TabPane("Runs", id="tab-runs"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield Input("", placeholder="/ filter runId/status/model/task", id="runs-filter")
-                            yield DataTable(id="runs-table")
-                            with Horizontal(classes="row"):
-                                yield Button("Open Live view", id="btn-runs-follow", variant="primary",
-                                             tooltip="Open the Live tab and follow the selected run.")
-                                yield Button("Verify evidence", id="btn-runs-verify",
-                                             tooltip="Read-only check of the selected run: did it finish, and was a PNG "
-                                                     "really sent to the model? Writes verification.json, never calls the model.")
-                                yield Button("Rerun as new run", id="btn-runs-rerun",
-                                             tooltip="Copy the selected run's task into New Run. Nothing starts until "
-                                                     "you press Start agent run.")
-                                yield Button("Refresh list", id="btn-runs-refresh",
-                                             tooltip="Re-scan the run folders on disk.")
-                            with Horizontal(classes="row"):
-                                yield Button("Pick as A", id="btn-compare-a",
-                                             tooltip="Remember the selected run as comparison A.")
-                                yield Button("Pick as B", id="btn-compare-b",
-                                             tooltip="Remember the selected run as comparison B.")
-                                yield Button("Compare A vs B", id="btn-compare-show",
-                                             tooltip="Show the config difference of the two picked runs.")
-                            yield Static("", id="runs-detail")
-                with TabPane("Live", id="tab-live"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield Static("No live run. Start one from New Run or open a run from Runs.", id="live-head")
-                            yield Static("", id="live-resources")
-                            with Horizontal(classes="row"):
-                                yield Input("", placeholder="/ search events", id="live-search")
-                                yield Select([(c, c) for c in CATEGORIES], value="ALL", id="live-category", classes="narrow")
-                                yield Button("Copy JSON log", id="btn-live-copy",
-                                             tooltip="Copy the whole run's JSON log to the clipboard: the run's "
-                                                     "meta data, every event and every JSON log file of the run "
-                                                     "folder. Read-only.")
-                            yield DataTable(id="events-table")
-                            yield Static("(select an event for details)", id="live-detail")
-                            yield Static("Current frame PNG: (none yet)", id="live-image-path")
-                            yield FramePreview("(no frame yet)", id="live-image")
-                            with Horizontal(classes="row"):
-                                yield Button("Stop run", id="btn-live-stop", variant="error",
-                                             tooltip="Ask the agent to stop now. Evidence already written is kept.")
-                                yield Button("Verify evidence", id="btn-live-verify",
-                                             tooltip="Read-only check of this run: did it finish, and was a PNG really "
-                                                     "sent to the model? Writes verification.json, never calls the model.")
-                                yield Button("View PNG", id="btn-live-open-png",
-                                             tooltip="Open the previewed PNG in your image viewer, full size.")
-                                yield Button("Open folder", id="btn-live-open",
-                                             tooltip="Open the file explorer at the folder that holds the PNGs "
-                                                     "(the run log folder itself has no images).")
-                                yield Button("Stop watching", id="btn-live-detach",
-                                             tooltip="Leave the Live view. The run keeps going until the TUI is "
-                                                     "closed (closing stops it); open it again from Runs.")
-                            yield Static("Verify evidence: (not run yet — read-only check of this run)",
-                                         id="live-verify")
-                with TabPane("Volumes", id="tab-volumes"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield Input("", placeholder="/ filter path/dims", id="volumes-filter")
-                            yield DataTable(id="volumes-table")
-                            yield Static("", id="volumes-detail")
-                            with Horizontal(classes="row"):
-                                yield Label("Axis", classes="field-label")
-                                yield Select([("x", "x"), ("y", "y"), ("z", "z")], value="z", id="slice-axis", classes="narrow")
-                                yield Label("Index", classes="field-label")
-                                yield Input("0", placeholder="index", id="slice-index")
-                            with Horizontal(classes="row"):
-                                yield Button("Preview slice", id="btn-slice",
-                                             tooltip="Render one slice of the selected prepared volume (read-only, "
-                                                     "uses no render budget).")
-                                yield Button("Use this volume", id="btn-volume-use", variant="primary",
-                                             tooltip="Use the selected volume for the next run.")
-                            yield Static("(no slice yet)", id="slice-preview")
-                with TabPane("Services", id="tab-services"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield DataTable(id="services-table")
-                            with Horizontal(classes="row"):
-                                yield Button("Start missing services", id="btn-svc-start", variant="success",
-                                             tooltip="Start the services this TUI owns that are not running.")
-                                yield Button("Stop owned services", id="btn-svc-stop",
-                                             tooltip="Stop only the services this TUI started. Foreign processes are never touched.")
-                                yield Button("Refresh status", id="btn-svc-refresh",
-                                             tooltip="Re-check which services are alive.")
-                            with Horizontal(classes="row"):
-                                yield Button("Restart owned", id="btn-svc-restart",
-                                             tooltip="Restart the owned services one by one.")
-                                yield Button("Stop all services", id="btn-svc-stopall", variant="error",
-                                             tooltip="Stop the agent tree, the local Ollama this TUI started and the owned "
-                                                     "services. The model unloads from VRAM.")
-                            yield RichLog(id="service-logs", max_lines=200)
-                with TabPane("Settings", id="tab-settings"):
-                    with VerticalScroll():
-                        with Vertical(classes="panel"):
-                            yield Static(HINT_TEXT, classes="scroll-hint")
-                            yield Label("Settings (saved to runtime/tui-settings.json on Save)")
-                        for label, wid, key, _kind in SETTINGS_ROWS:
-                            with Horizontal(classes="row"):
-                                yield Label(label, classes="field-label")
-                                yield Input(str(self.settings.get(key, "")), id=wid)
-                        with Horizontal(classes="row"):
-                            yield Label("Think", classes="field-label")
-                            yield Select([("off", "false"), ("on", "true")],
-                                         value="true" if self.settings.get("think") else "false",
-                                         id="set-think")
-                        with Horizontal(classes="row"):
-                            yield Button("Save settings", id="btn-settings-save", variant="primary",
-                                         tooltip="Write these settings to runtime/tui-settings.json.")
-                            yield Button("Reset to defaults", id="btn-settings-reset",
-                                         tooltip="Fill the form with the built-in defaults. Nothing is written yet.")
-                            yield Button("Test H200 endpoint", id="btn-h200-probe",
-                                         tooltip="Send one small probe request to the H200 endpoint. Never falls back silently.")
-                        yield Static("", id="settings-status")
+            with Horizontal(id="status-row"):
+                yield LoadingIndicator(id="busy-spinner")
+                yield Static("", id="status-bar")
+            with TranscriptScroll(id="transcript"):
+                yield Vertical(id="blocks")
+            with Horizontal(id="composer-row"):
+                yield Composer(id="composer")
+                yield Button("Send", id="btn-send", variant="primary",
+                             tooltip="Start a run with this task (Enter does the same).")
             yield Footer()
 
         # -- lifecycle ----------------------------------------------------
         async def on_mount(self):
-            for table_id, cols in (
-                ("runs-table", ["run", "status", "model", "frames", "task"]),
-                ("events-table", ["#", "cat", "title"]),
-                ("volumes-table", ["path", "dims", "flags"]),
-                ("services-table", ["service", "pid", "state"]),
-            ):
-                try:
-                    table = self.query_one("#" + table_id, DataTable)
-                    table.clear(columns=True)
-                    for col in cols:
-                        table.add_column(col)
-                except Exception:
-                    pass
-            self.set_interval(0.5, self._tick_live)
-            self._run_guarded("Loading dashboard", self._load_dashboard)
+            self.set_interval(0.5, self._tick)
+            self._say_welcome()
 
-        def _load_dashboard(self):
-            try:
-                runs = self.discover_runs()
-                self.runs = runs
-                running = [r for r in runs if r.get("status") == "Running"]
-                last = runs[0] if runs else None
-                volume = None
-                try:
-                    volume = cfg.selected_volume(self.settings) if cfg else None
-                except Exception:
-                    volume = None
-                try:
-                    status = services_mod.service_status(self.settings)
-                except Exception:
-                    status = {}
-                text = (
-                    "Mode %s · Model %s\n"
-                    "Volume %s · Inference %s · Renderer %s\n"
-                    "Owned %s · Runs %d · Running %s · Last %s" % (
-                        self.settings.get("mode"), self.settings.get("model"),
-                        (str(volume)[-40:] if volume else "none"),
-                        status.get("inference", "?"), status.get("renderer", "?"),
-                        status.get("owned", "?"),
-                        len(runs),
-                        running[0]["runId"] if running else "none",
-                        ("%s (%s)" % (last["runId"], last["status"])) if last else "none"))
-                self.call_from_thread(self._set_text, "status-bar", text)
-            except Exception as error:
-                self.call_from_thread(self._set_text, "status-bar", "dashboard failed: %s" % error)
+        def _say_welcome(self) -> None:
+            """The empty state: what this screen is and how to use it."""
+            if self.transcript is None:
+                return
+            self.transcript.add(transcript_mod.NOTICE, title=(
+                "Volume Agent - type a task below and press Enter to start a run. "
+                "Ctrl+P for the commands, F1 for the keys."))
+            self._sync_transcript()
 
-        def _set_text(self, widget_id: str, text: str):
-            # Static parses [..] as markup and drops unknown tags, so escape
-            # every dynamic text (task text, paths, errors all reach here).
-            try:
-                self.query_one("#" + widget_id, Static).update(_escape_markup(text))
-            except Exception:
-                pass
-
-        def _tick_live(self):
-            if not self.live_dir or self.live_frozen:
-                # No polling, but the window may have been resized: keep the
-                # preview fitted so the whole frame stays visible.
-                self._refresh_frame_display()
+        # -- the conversation ----------------------------------------------
+        def _sync_transcript(self) -> None:
+            """Mount a widget per block and re-render the ones that changed."""
+            if self.transcript is None:
                 return
             try:
-                self._poll_live()
+                container = self.query_one("#blocks", Vertical)
+            except Exception:
+                return
+            known = {id(block) for block, _widget in self._widgets}
+            live = {id(block) for block in self.transcript.blocks}
+            added = False
+            for block, widget in list(self._widgets):
+                if id(block) not in live:
+                    # The block was reclassified (the words before a tool call
+                    # moved into the Thinking block): its widget goes away.
+                    try:
+                        widget.remove()
+                    except Exception:
+                        pass
+                    self._widgets.remove((block, widget))
+            for block in self.transcript.blocks:
+                widget = self._widget_for(block)
+                if id(block) not in known:
+                    container.mount(widget)
+                    self._widgets.append((block, widget))
+                    added = True
+                try:
+                    # The content is pushed to every block: the height follows
+                    # the text, so a growing answer is never clipped.
+                    widget.set_block(block)
+                except Exception:
+                    pass
+            if added and self._live_following:
+                # The new widgets are laid out after this call, so the tail is
+                # reached once the screen knows how tall the conversation is.
+                self._tail_scroll_pending = True
+                try:
+                    self.call_after_refresh(self._scroll_to_tail)
+                except Exception:
+                    self._scroll_to_tail()
+
+        def _widget_for(self, block: dict):
+            kind = str(block.get("kind"))
+            if kind == transcript_mod.THINKING:
+                return ThinkingBlock(block)
+            if kind == transcript_mod.IMAGE:
+                return ImageBlock(block)
+            return TranscriptBlock(block)
+
+        def _refresh_block_widget(self, block: dict) -> None:
+            for known, widget in self._widgets:
+                if known is block:
+                    try:
+                        widget.set_block(block)
+                    except Exception:
+                        pass
+                    return
+
+        def _clear_transcript(self) -> None:
+            self.transcript.clear() if self.transcript is not None else None
+            self._widgets = []
+            try:
+                self.query_one("#blocks", Vertical).remove_children()
             except Exception:
                 pass
+
+        def _say(self, kind: str, title: str, body: str = "") -> None:
+            """Put one line into the conversation (system notices)."""
+            if self.transcript is None:
+                return
+            self.transcript.add(kind, title=title, body=body)
+            self._sync_transcript()
+
+        def _follow_tail(self) -> None:
+            """Follow the newest entry while the view sits at the bottom.
+
+            The decision is made before the new entry is mounted: the content
+            grows under the view, and a view that was at the tail stays there.
+            """
+            try:
+                scroller = self.query_one("#transcript", VerticalScroll)
+            except Exception:
+                return
+            if not self._at_bottom():
+                self._live_following = False
+                return
+            self._live_following = True
+            self._scroll_to_tail()
+
+        def _at_bottom(self) -> bool:
+            """Is the view still at the tail of the conversation?"""
+            try:
+                scroller = self.query_one("#transcript", TranscriptScroll)
+                return scroller.scroll_offset.y >= scroller.max_scroll_y - 1
+            except Exception:
+                return True
+
+        def _user_scrolled(self) -> None:
+            """The user moved the view: the follow follows the new position.
+
+            Scrolling up to read the history stops the follow; scrolling back
+            to the tail starts it again (there is no Follow button).
+            """
+            if self._programmatic_scroll:
+                return
+            self._tail_scroll_pending = False
+            self._live_following = self._at_bottom()
+
+        def _scroll_to_tail(self, retries: int = 4) -> None:
+            """Scroll to the newest entry once the screen knows its height.
+
+            The conversation is built from widgets, so the height of a new
+            entry is only known after the next layout. The scroll therefore
+            runs again after every refresh until the view has settled - unless
+            the user scrolls away, which ends the run of scrolls.
+            """
+            if not self._tail_scroll_pending:
+                return
+            try:
+                scroller = self.query_one("#transcript", TranscriptScroll)
+                self._programmatic_scroll = True
+                try:
+                    # immediate=True: the scroll must not wait for another
+                    # refresh, or a user scroll in between would be lost.
+                    scroller.scroll_end(animate=False, immediate=True)
+                finally:
+                    self._programmatic_scroll = False
+            except Exception:
+                return
+            if retries > 0:
+                try:
+                    self.call_after_refresh(self._scroll_to_tail, retries - 1)
+                except Exception:
+                    pass
+            else:
+                self._tail_scroll_pending = False
+
+        def _tick(self) -> None:
+            """Poll the run, animate the thinking block, refresh the status."""
+            if self.live_dir and not self.live_frozen:
+                try:
+                    self._poll_live()
+                except Exception:
+                    pass
+            self._animate_thinking()
+            self._render_status()
+            self._sync_send_button()
+
+        def _animate_thinking(self) -> None:
+            """The thinking block breathes while the model works."""
+            if self.transcript is None:
+                return
+            block = self.transcript.find(transcript_mod.THINKING)
+            if block is None or block.get("status") != "running":
+                return
+            started = block.get("ts") or time.time()
+            block["spinner"] = _spinner_frame()
+            block["subtitle"] = "%.1fs" % max(0.0, time.time() - started)
+            self._refresh_block_widget(block)
 
         # -- live ---------------------------------------------------------
         def start_live(self, run_dir: str | Path, run_id: str | None = None):
+            """Open a run: the conversation starts with the task again."""
             self.live_dir = Path(run_dir)
             self.live_run_id = run_id or self.live_dir.name
-            self.live_tail = trace_mod.EventTail(self.live_dir, trace_mod.resolve_session_dir(self.live_dir))
+            self.live_tail = trace_mod.EventTail(self.live_dir,
+                                                trace_mod.resolve_session_dir(self.live_dir))
+            self.stream_tail = stream_mod.StreamTail(self.live_dir) if stream_mod else None
             self.live_events = []
             self.live_frozen = False
             self._live_following = True
+            self._stop_requested_for = None
+            self._end_announced = False
             self.live_image_path = None
             self.live_image_revision = None
-            self._preview_key = None
+            self._clear_transcript()
+            if self.transcript is None:
+                return
+            task = self._task_text(self.live_dir)
+            if task:
+                self.transcript.add(transcript_mod.USER, title=task)
+            self._sync_transcript()
+            self._sync_send_button()
+            self._render_status()
+
+        def _task_text(self, run_dir: Path | None) -> str:
+            """What the run was asked to do (the task of its config)."""
+            if run_dir is None:
+                return ""
             try:
-                self.query_one("#live-head", Static).update("Live: %s" % self.live_dir.name)
-            except Exception:
-                pass
-            # Follow the newest event until the user scrolls up.
-            try:
-                self.query_one("#events-table", DataTable).anchor()
-            except Exception:
-                pass
+                config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return ""
+            return str(config.get("task") or "").strip()
 
         def _poll_live(self):
             assert self.live_tail is not None and self.live_dir is not None
@@ -771,6 +1174,14 @@ if _TEXTUAL:
             fresh = self.live_tail.poll()
             if fresh:
                 self.live_events.extend(fresh)
+            # The recorded model stream: the answer and the reasoning arrive
+            # while the model is still writing them.
+            streamed = []
+            if self.stream_tail is not None:
+                try:
+                    streamed = self.stream_tail.poll()
+                except Exception:
+                    streamed = []
             # Finished/failed freezes the view (no more polling).
             try:
                 status = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8")).get("status")
@@ -782,194 +1193,378 @@ if _TEXTUAL:
                     if extra:
                         self.live_events.extend(extra)
                 self.live_frozen = True
+                self._close_thinking()
+                self._announce_the_end()
+            self._ingest_events(fresh)
+            self._ingest_events(streamed)
             self._render_live()
-            try:
-                self.query_one("#live-resources", Static).update(telemetry_mod.resource_line(self.live_dir))
-            except Exception:
-                pass
+            # The poll learned the state of the run: the line and the button
+            # follow it right away, not at the next tick.
+            self._render_status()
+            self._sync_send_button()
 
-        def _live_progress_line(self) -> str:
-            """What the run is for and how much of its budget is already spent.
+        def _announce_the_end(self) -> None:
+            """Say how the run ended - a stop must be visible, not guessed."""
+            if self._end_announced:
+                return
+            self._end_announced = True
+            state = self._run_state()
+            if state == "stopped":
+                self._say(transcript_mod.NOTICE,
+                          "Run stopped - the harness and its children were terminated, "
+                          "the evidence stays on disk.")
+            elif state == "failed":
+                self._say(transcript_mod.NOTICE, "Run failed - see failure.json in the run folder.")
 
-            Without this the log is a list of tool names; with it the rows
-            can be read against the task the agent was given.
-            """
-            meta = getattr(self.live_tail, "meta", None) or {}
-            goal = str(meta.get("goal") or "").strip()
-            used = meta.get("used")
-            budget = meta.get("budget")
-            if not goal and self.live_dir is not None:
-                try:
-                    config = json.loads((self.live_dir / "config.json").read_text(encoding="utf-8"))
-                    goal = str(config.get("task") or "").strip()
-                    if not isinstance(budget, (int, float)):
-                        budget = config.get("renderBudget")
-                except (OSError, ValueError):
-                    goal = ""
-            parts = []
-            if goal:
-                parts.append("Task: %s" % (goal if len(goal) <= 90 else goal[:87] + "..."))
-            if isinstance(used, (int, float)) and isinstance(budget, (int, float)):
-                parts.append("%s of %s observations used (renders or slices)" % (used, budget))
-            return "  ·  ".join(parts)
+        def _close_thinking(self) -> None:
+            """The run is over: the thinking block does not spin any more."""
+            if self.transcript is None:
+                return
+            block = self.transcript.find(transcript_mod.THINKING)
+            if block is not None and block.get("status") == "running":
+                block["status"] = "done"
+                self._refresh_block_widget(block)
 
-        def _filtered_events(self) -> list[dict]:
-            items = self.live_events
-            if self.live_filter != "ALL":
-                items = [e for e in items if e.get("cat") == self.live_filter]
-            if self.live_search:
-                needle = self.live_search.lower()
-                items = [e for e in items if needle in (e.get("title", "") + " " + e.get("detail", "")).lower()]
-            return items
-
-        @staticmethod
-        def _at_bottom(table) -> bool:
-            """True when the event table shows its last row."""
-            try:
-                return table.scroll_offset.y >= table.max_scroll_y - 1
-            except Exception:
-                return True
-
-        def _sync_follow(self, table) -> None:
-            """Follow the newest event while the timeline sits at the bottom.
-
-            The anchor keeps the table pinned to the last row. Scrolling up
-            releases it (Textual does that on its own), so the history stays
-            readable; scrolling back to the bottom anchors it again.
-            """
-            at_bottom = self._at_bottom(table)
-            if at_bottom and not self._live_following:
-                self._live_following = True
-                try:
-                    table.anchor()
-                except Exception:
-                    pass
-            elif not at_bottom and self._live_following:
-                self._live_following = False
-                try:
-                    table.release_anchor()
-                except Exception:
-                    pass
+        def _ingest_events(self, events: list[dict]) -> None:
+            """Fold the new evidence into the conversation."""
+            if self.transcript is None or not events:
+                return
+            changed: list[dict] = []
+            for event in events:
+                changed.extend(self.transcript.ingest(event))
+            if not changed:
+                return
+            for block in changed:
+                if block.get("kind") == transcript_mod.IMAGE:
+                    self.live_image_path = (block.get("data") or {}).get("image")
+                    self.live_image_revision = (block.get("data") or {}).get("revision")
+            self._sync_transcript()
 
         def _render_live(self):
+            """The conversation is the live view: nothing else to paint."""
+            self._sync_transcript()
+
+        def _render_status(self) -> None:
+            """The status line: which run, which model, how much budget is spent.
+
+            The model works in the conversation, not here: the Thinking block
+            inside it says that, so the line stays a plain status line.
+            """
+            from rich.text import Text
+
+            text = Text()
+            text.append("● ", style="bold %s" % ACCENT)
+            text.append("volume-agent", style="bold")
+            text.append("  %s" % self.settings.get("model", "?"), style="dim")
+            if self.live_run_id:
+                text.append("  ·  %s" % self.live_run_id, style="dim")
+                text.append("  ·  %s" % self._run_state(), style="dim")
+            used, budget = self._budget()
+            if budget:
+                text.append("  ·  %s/%s obs" % (used, budget), style="dim")
             try:
-                table = self.query_one("#events-table", DataTable)
+                self.query_one("#status-bar", Static).update(text)
+            except Exception:
+                pass
+
+        def _run_state(self) -> str:
+            """What the open run is doing.
+
+            Read from the run's own run.json, so the line never claims that a
+            stopped run is still running: running / stopping / stopped /
+            finished / failed / idle.
+            """
+            if self.live_dir is None:
+                return "idle"
+            record = {}
+            try:
+                record = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                record = {}
+            if record:
+                if record.get("interrupted"):
+                    return "stopped"
+                status = str(record.get("status") or "running")
+                if status != "running":
+                    return status
+            if self._stop_requested_for == self.live_run_id:
+                return "stopping"
+            return "running"
+
+        def _run_is_live(self) -> bool:
+            """Is the agent still working? (a stop on its way counts as not)"""
+            if not self.live_run_id:
+                return False
+            if self._stop_requested_for == self.live_run_id:
+                return False
+            return self._run_state() == "running"
+
+        def _sync_send_button(self) -> None:
+            """While the agent works the button stops it instead of sending."""
+            try:
+                button = self.query_one("#btn-send", Button)
             except Exception:
                 return
-            items = self._filtered_events()
-            key = (self.live_filter, self.live_search)
-            prev_len = getattr(self, "_live_table_len", 0)
-            first = prev_len == 0
-            key_changed = key != getattr(self, "_live_render_key", None)
-            rebuild = key_changed or len(items) < prev_len
-            try:
-                if rebuild:
-                    table.clear()
-                    for i, event in enumerate(items):
-                        table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
-                                      _escape_markup(str(event.get("title", ""))[:120]))
-                    self._live_render_key = key
-                    self._live_table_len = len(items)
-                    if key_changed and not first:
-                        # A new filter/search starts at the first match and
-                        # stops the follow until the view is back at the tail.
-                        self._live_following = False
-                        table.release_anchor()
-                elif len(items) > prev_len:
-                    # Incremental append: never clear, so scroll offset and the
-                    # cursor row survive every refresh.
-                    for i in range(prev_len, len(items)):
-                        event = items[i]
-                        table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
-                                      _escape_markup(str(event.get("title", ""))[:120]))
-                    self._live_table_len = len(items)
-            except Exception:
-                pass
-            self._sync_follow(table)
-            try:
-                if self.live_frozen:
-                    state = "[FROZEN]"
-                else:
-                    frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 5) % 10]
-                    state = "[live %s]" % frame
-                head = "Live: %s  ·  %d events  ·  %s" % (
-                    self.live_dir.name if self.live_dir else "?", len(self.live_events), state)
-                self._set_text("live-head", head + "\n" + self._live_progress_line())
-            except Exception:
-                pass
-            # Newest frame preview.
-            images = [e for e in self.live_events if e.get("image")]
-            if images:
-                newest = images[-1]
-                self._show_frame(newest.get("image"), newest.get("revision"))
+            state = self._run_state()
+            if state == "running":
+                label, variant = "Stop", "error"
+                tooltip = "Stop the running agent now (Esc does the same)."
+            elif state == "stopping":
+                label, variant = "Stopping…", "error"
+                tooltip = "The agent is stopping; the evidence stays on disk."
             else:
-                self._refresh_frame_display()
+                label, variant = "Send", "primary"
+                tooltip = "Start a run with this task (Enter does the same)."
+            if str(button.label) != label:
+                button.label = label
+                button.variant = variant
+                button.tooltip = tooltip
 
-        def _jump_to_latest(self) -> None:
-            """Scroll the timeline to the newest event (the follow resumes)."""
-            self._live_following = True
-            try:
-                self.query_one("#events-table", DataTable).anchor()
-            except Exception:
-                pass
-
-        def _show_frame(self, image: str | None, revision=None):
-            self.live_image_path = image
-            self.live_image_revision = revision
-            self._refresh_frame_display()
-
-        def _preview_box(self) -> tuple[int, int]:
-            """Cell box for the frame preview: (columns, rows) of the widget.
-
-            The box follows the window width so a wide frame uses the whole
-            panel; the row budget keeps the preview on one screen. The frame is
-            fitted into this box, never cropped.
-            """
-            width = 0
-            try:
-                width = self.query_one("#live-image", Static).size.width
-            except Exception:
-                width = 0
-            if width < 16:
-                width = 80  # not laid out yet
-            rows = LIVE_PREVIEW_MAX_ROWS
-            try:
-                screen_height = self.screen.size.height
-                if screen_height:
-                    rows = max(16, min(LIVE_PREVIEW_MAX_ROWS, screen_height - 14))
-            except Exception:
-                pass
-            return (int(width), int(rows))
-
-        def _refresh_frame_display(self) -> None:
-            """Show the current frame: its path plus a preview of the whole PNG.
-
-            The path is always visible so the PNG can be found on disk, and the
-            preview is re-fitted whenever the window size changed.
-            """
-            image = getattr(self, "live_image_path", None)
-            if image:
-                revision = getattr(self, "live_image_revision", None)
-                self._set_text("live-image-path", "Current frame PNG (revision %s): %s" % (
-                    revision if revision is not None else "?", image))
-            else:
-                self._set_text("live-image-path", "Current frame PNG: (none yet)")
-                self._preview_key = None
+        def _budget(self) -> tuple[int, int]:
+            """Observations used and allowed, read from the run's own session."""
+            meta = getattr(self.live_tail, "meta", None) or {}
+            used = meta.get("used")
+            budget = meta.get("budget")
+            if not isinstance(budget, (int, float)) and self.live_dir is not None:
                 try:
-                    self.query_one("#live-image", Static).update("(no frame yet)")
+                    config = json.loads((self.live_dir / "config.json").read_text(encoding="utf-8"))
+                    budget = config.get("renderBudget")
+                except (OSError, ValueError):
+                    budget = None
+            return (int(used) if isinstance(used, (int, float)) else 0,
+                    int(budget) if isinstance(budget, (int, float)) else 0)
+
+        # -- actions ------------------------------------------------------
+        def action_command_palette(self):
+            """Ctrl+P (and the header icon) opens the TUI palette.
+
+            Textual binds ctrl+p to its own system palette; the binding above
+            uses the "app.command_palette" name so Textual keeps its hands off
+            it, and this override routes the key to the curated list.
+            """
+            self.action_commands()
+
+        def action_commands(self):
+            self.push_screen(CommandScreen(), callback=self._command_chosen)
+
+        def _command_chosen(self, result):
+            if not result:
+                return
+            if result == "cmd-run-task-a":
+                self._start_run("task-a", "")
+            elif result == "cmd-run-task-b":
+                self._start_run("task-b", "")
+            elif result == "cmd-live-stop":
+                self._stop_run()
+            elif result == "cmd-live-verify":
+                self._verify_live()
+            elif result == "cmd-live-copy":
+                self._copy_run_json_log()
+            elif result == "cmd-live-open-png":
+                self._open_live_png()
+            elif result == "cmd-live-open":
+                self._open_live_folder()
+            elif result == "cmd-runs-open":
+                self._open_runs()
+            elif result == "cmd-settings":
+                self._open_settings()
+            elif result == "cmd-theme":
+                self.action_toggle_dark()
+            elif result == "cmd-help":
+                self.action_help()
+            elif result == "cmd-hard-stop":
+                self._hard_stop()
+            elif result == "cmd-quit":
+                self.action_quit_confirm()
+
+        def action_help(self):
+            self.push_screen(HelpScreen())
+
+        def action_toggle_dark(self) -> None:
+            """Ctrl+T switches between the light and the dark theme."""
+            try:
+                self.theme = ("textual-light" if self.current_theme.dark
+                              else "textual-dark")
+            except Exception:
+                self.dark = not getattr(self, "dark", True)
+
+        def action_scroll_history(self) -> None:
+            self._scroll_transcript(-8)
+
+        def action_scroll_history_down(self) -> None:
+            self._scroll_transcript(8)
+
+        def _scroll_transcript(self, delta: int) -> None:
+            try:
+                scroller = self.query_one("#transcript", TranscriptScroll)
+            except Exception:
+                return
+            scroller.scroll_relative(y=delta, animate=False, immediate=True)
+            # The user moved the view: the follow follows the new position, so
+            # reading the history is not interrupted by the next entry.
+            self._live_following = self._at_bottom()
+
+        def action_interrupt_run(self) -> None:
+            """Esc stops the agent: the evidence written so far stays."""
+            self._stop_run()
+
+        def action_quit(self) -> None:
+            """Ctrl+Q asks first while a run is live, then leaves."""
+            self.action_quit_confirm()
+
+        def action_quit_confirm(self):
+            """Quit: stop every process this TUI owns, then leave."""
+            live = self._live_run_ids()
+            if live:
+                self.push_screen(ConfirmScreen(
+                    "Quit the TUI and stop everything it owns?\n\n"
+                    "  - agent run(s): %s (launcher, harness, MCP children)\n"
+                    "  - the renderer service this TUI started\n"
+                    "  - the local Ollama this TUI started (model unloaded from VRAM)\n\n"
+                    "Nothing is left running. The run keeps its evidence on disk."
+                    % ", ".join(live),
+                    on_yes=self._quit_and_stop))
+            else:
+                self._quit_and_stop()
+
+        def _live_run_ids(self) -> list[str]:
+            """Run ids that are still running (the runs on disk and the open one)."""
+            ids = []
+            for entry in self.runs:
+                if runs_mod and runs_mod.is_live(entry) and entry.get("runId"):
+                    ids.append(str(entry["runId"]))
+            if self.live_run_id and self.live_run_id not in ids:
+                ids.append(str(self.live_run_id))
+            return ids
+
+        def _hard_stop(self) -> None:
+            """The hard stop: kill the agent tree, the local Ollama, the services.
+
+            Textual uses Ctrl+C for copying the selection, so the hard stop
+            lives in the command palette (and in closing the window).
+            """
+            self._busy_inc()
+            try:
+                services_mod.block_interrupts()
+            except Exception:
+                pass
+
+            def _work():
+                try:
+                    services_mod.shutdown_all(self.settings, hard=True, cache=False)
                 except Exception:
                     pass
-                return
-            columns, rows = self._preview_box()
-            key = (str(image), columns, rows)
-            if key == getattr(self, "_preview_key", None):
-                return
-            self._preview_key = key
+                try:
+                    self.call_from_thread(self._busy_dec)
+                    self.call_from_thread(self.exit, 0)
+                except Exception:
+                    pass
+
+            self.run_worker(_work, thread=True)
+
+        def _quit_and_stop(self) -> None:
+            """Leave no process behind, then exit.
+
+            The agent run is stopped cooperatively first (the launcher still
+            records interrupted/failure.json), everything that survives is
+            killed, and the services this TUI started are stopped with it.
+            """
+            self._busy_inc()
+            # The cleanup runs in a worker, so SIGINT is ignored up front (main
+            # thread) — a second Ctrl+C must not leave half the tree running.
             try:
-                self.query_one("#live-image", Static).update(
-                    imaging_mod.preview_or_message(image, width=columns, height=rows))
+                services_mod.block_interrupts()
             except Exception:
                 pass
+
+            def _work():
+                try:
+                    services_mod.shutdown_all()
+                except Exception:
+                    pass
+                try:
+                    self.call_from_thread(self._busy_dec)
+                    self.call_from_thread(self.exit, 0)
+                except Exception:
+                    pass
+
+            self.run_worker(_work, thread=True)
+
+        def _stop_run(self) -> None:
+            """Ask the agent to stop now; the evidence already written stays."""
+            if not self.live_run_id:
+                self.notify("No run is open.", severity="warning", timeout=4, markup=False)
+                return
+            run_id = self.live_run_id
+            if self._stop_requested_for == run_id:
+                # Stop asked for this run already: one request, one line.
+                return
+            self._stop_requested_for = run_id
+            try:
+                runner_mod.request_stop(run_id)
+                self._say(transcript_mod.NOTICE,
+                          "Stop requested for %s - the harness and its children are "
+                          "terminated now, the evidence stays on disk." % run_id)
+            except Exception as error:
+                self._stop_requested_for = None
+                self._say(transcript_mod.ERROR, "Stop failed: %s" % error)
+            self._sync_send_button()
+            self._render_status()
+
+        def _verify_live(self, button=None):
+            if not self.live_dir:
+                self._say(transcript_mod.NOTICE,
+                          "Verify evidence: no run is open - open one first.")
+                return
+            run_dir = str(self.live_dir)
+            self._run_guarded("Verifying evidence", lambda: self._run_verify(run_dir), button)
+
+        def _run_verify(self, run_dir: str):
+            try:
+                result = runs_mod.run_verify(run_dir)
+                lines = runs_mod.verify_summary(result.get("report"))
+                text = "Verify evidence (read-only) for %s:\n%s" % (
+                    Path(run_dir).name, "\n".join(lines[:6]))
+                self.call_from_thread(self._say, transcript_mod.NOTICE, text)
+            except Exception as error:
+                self.call_from_thread(self._say, transcript_mod.ERROR,
+                                      "Verify evidence failed: %s" % error)
+
+        def _copy_run_json_log(self, button=None) -> None:
+            """Copy the whole run's JSON log to the clipboard (read-only).
+
+            The payload is one JSON document: the run's meta data, every
+            event of the timeline and every JSON log file of the run folder.
+            Base64 image bytes become a size note and files that could not
+            be read are listed inside the payload — nothing is dropped
+            silently.
+            """
+            if not self.live_dir:
+                self.notify("No run is open - open one first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            run_dir = str(self.live_dir)
+            events = list(self.live_events)
+
+            def _work() -> None:
+                document = runs_mod.run_json_log(run_dir, events=events)
+                text = json.dumps(document, indent=2, ensure_ascii=False)
+                message = evidence_mod.copy_to_clipboard(text)
+                self.call_from_thread(self._copy_finished, text, message)
+
+            self._run_guarded("Copying the JSON log", _work, button)
+
+        def _copy_finished(self, text: str, message: str) -> None:
+            if message.startswith("Clipboard copy failed"):
+                # Fall back to the terminal's own clipboard escape (OSC 52).
+                try:
+                    self.copy_to_clipboard(text)
+                except Exception:
+                    pass
+                self.notify(message + " - the terminal clipboard escape was used instead.",
+                            severity="warning", timeout=6, markup=False)
+                return
+            self.notify(message, timeout=4, markup=False)
 
         # -- where the frames live -----------------------------------------
         def _live_png_path(self) -> Path | None:
@@ -1004,7 +1599,7 @@ if _TEXTUAL:
         def _open_live_png(self) -> None:
             png = self._live_png_path()
             if png is None:
-                self.notify("No frame PNG yet — wait for the first render.",
+                self.notify("No frame PNG yet - wait for the first render.",
                             severity="warning", timeout=4, markup=False)
                 return
             message = evidence_mod.open_path(str(png))
@@ -1013,530 +1608,106 @@ if _TEXTUAL:
         def _open_live_folder(self) -> None:
             folder = self._live_frames_folder()
             if folder is None:
-                self.notify("No folder to open yet — start or open a run first.",
+                self.notify("No folder to open yet - start or open a run first.",
                             severity="warning", timeout=4, markup=False)
                 return
             message = evidence_mod.open_path(str(folder))
             self.notify(message, timeout=5, markup=False)
 
-        # -- actions ------------------------------------------------------
-        def action_command_palette(self):
-            """Ctrl+P (and the header icon) opens the TUI palette.
-
-            Textual binds ctrl+p to its own system palette; the binding above
-            uses the "app.command_palette" name so Textual keeps its hands off
-            it, and this override routes the key to the curated list.
-            """
-            self.action_commands()
-
-        def action_commands(self):
-            self.push_screen(CommandScreen(), callback=self._command_chosen)
-
-        def _command_chosen(self, result):
-            mapping = {
-                "cmd-go-dashboard": "tab-dashboard", "cmd-go-newrun": "tab-newrun",
-                "cmd-go-runs": "tab-runs", "cmd-go-live": "tab-live",
-                "cmd-go-volumes": "tab-volumes", "cmd-go-services": "tab-services",
-                "cmd-go-settings": "tab-settings",
-            }
-            if result in mapping:
-                self._goto_tab(mapping[result])
-            elif result == "cmd-live-jump":
-                self._jump_to_latest()
-            elif result == "cmd-live-stop":
-                self._confirm_stop()
-            elif result == "cmd-live-verify":
-                self._verify_live()
-            elif result == "cmd-live-open-png":
-                self._open_live_png()
-            elif result == "cmd-live-open":
-                self._open_live_folder()
-            elif result == "cmd-live-detach":
-                self._detach_live()
-            elif result == "cmd-runs-refresh":
-                self._run_guarded("Refreshing runs", self._refresh_runs)
-            elif result == "cmd-services-refresh":
-                self._run_guarded("Refreshing services", self._refresh_services)
-            elif result == "cmd-help":
-                self.action_help()
-            elif result == "cmd-quit":
-                self.action_quit_confirm()
-
-        def action_help(self):
-            self.push_screen(HelpScreen())
-
-        def action_toggle_dark(self):
-            self.dark = not self.dark
-
-        def _active_scroller(self):
-            """The scroll container of the currently visible tab (if any)."""
-            try:
-                pane = self.query_one("#workspaces", TabbedContent).active_pane
-                return pane.query_one(VerticalScroll)
-            except Exception:
-                return None
-
-        def on_key(self, event) -> None:
-            """Window scroll that works even when a text box owns the focus.
-
-            TextArea/Input/Select consume arrows, Tab and the mouse wheel for
-            themselves, so the parent scroll container would otherwise never
-            scroll. Ctrl+Up/Down is consumed by nothing and always reaches here.
-            """
-            key = getattr(event, "key", "")
-            if key == "ctrl+down":
-                scroller = self._active_scroller()
-                if scroller is not None:
-                    scroller.scroll_relative(y=8, animate=False)
-                    event.prevent_default()
-            elif key == "ctrl+up":
-                scroller = self._active_scroller()
-                if scroller is not None:
-                    scroller.scroll_relative(y=-8, animate=False)
-                    event.prevent_default()
-
-        def action_quit_confirm(self):
-            """Quit: stop every process this TUI owns, then leave."""
-            live = self._live_run_ids()
-            if live:
-                self.push_screen(ConfirmScreen(
-                    "Quit the TUI and stop everything it owns?\n\n"
-                    "  - agent run(s): %s (launcher, harness, MCP children)\n"
-                    "  - the renderer service this TUI started\n"
-                    "  - the local Ollama this TUI started (model unloaded from VRAM)\n\n"
-                    "Nothing is left running. The run keeps its evidence on disk."
-                    % ", ".join(live),
-                    on_yes=self._quit_and_stop))
-            else:
-                self._quit_and_stop()
-
-        def _live_run_ids(self) -> list[str]:
-            """Run ids that are still running (from the table and the Live tab)."""
-            ids = []
-            for entry in self.runs:
-                if runs_mod.is_live(entry) and entry.get("runId"):
-                    ids.append(str(entry["runId"]))
-            if self.live_run_id and self.live_run_id not in ids:
-                ids.append(str(self.live_run_id))
-            return ids
-
-        def _quit_and_stop(self) -> None:
-            """Leave no process behind, then exit.
-
-            The agent run is stopped cooperatively first (the launcher still
-            records interrupted/failure.json), everything that survives is
-            killed, and the services this TUI started are stopped with it.
-            """
-            self._busy_inc()
-            self._set_text("live-head", "Stopping the agent run, the local Ollama and the "
-                                        "services this TUI started…")
-            # The cleanup runs in a worker, so SIGINT is ignored up front (main
-            # thread) — a second Ctrl+C must not leave half the tree running.
-            try:
-                services_mod.block_interrupts()
-            except Exception:
-                pass
-
-            def _work():
+        def _refresh_frame_display(self) -> None:
+            """Re-fit every frame in the conversation to its current width."""
+            for _block, widget in list(self._widgets):
                 try:
-                    services_mod.shutdown_all()
-                except Exception:
-                    pass
-                try:
-                    self.call_from_thread(self._busy_dec)
-                    self.call_from_thread(self.exit, 0)
+                    widget.refresh_preview()
                 except Exception:
                     pass
 
-            self.run_worker(_work, thread=True)
-
-        def _confirm_stop(self):
-            if not self.live_run_id:
-                return
-            run_id = self.live_run_id
-            self.push_screen(ConfirmScreen(
-                "Stop run %s cooperatively? Evidence stays; launcher records interrupted." % run_id,
-                on_yes=lambda: self._do_stop(run_id)))
-
-        def _do_stop(self, run_id: str):
-            try:
-                runner_mod.request_stop(run_id)
-                self._set_text("live-head", "Stop requested for %s — waiting for harness…" % run_id)
-            except Exception as error:
-                self._set_text("live-head", "Stop failed: %s" % error)
-
-        def _verify_live(self, button=None):
-            if not self.live_dir:
-                self._set_text("live-verify", "Verify evidence: no run is open — open one from Runs first.")
-                return
-            run_dir = str(self.live_dir)
-            self._run_guarded("Verifying evidence", lambda: self._run_verify(run_dir), button)
-
-        def _run_verify(self, run_dir: str):
-            try:
-                result = runs_mod.run_verify(run_dir)
-                lines = runs_mod.verify_summary(result.get("report"))
-                text = "Verify evidence (read-only) for %s:\n%s" % (
-                    Path(run_dir).name, "\n".join(lines[:6]))
-                self.call_from_thread(self._set_text, "live-verify", text)
-            except Exception as error:
-                self.call_from_thread(self._set_text, "live-verify", "Verify evidence failed: %s" % error)
-
-        def _detach_live(self) -> None:
-            """Leave the Live view; the run keeps running in the background."""
-            run_id = self.live_run_id
-            self.live_dir = None
-            self.live_run_id = None
-            self.live_tail = None
-            if run_id:
-                self._set_text("live-head", "Stopped watching %s. The run keeps going until the TUI is "
-                                            "closed (closing stops it) — open it again from Runs." % run_id)
-            else:
-                self._set_text("live-head", "Stopped watching. No run was open.")
-
-        def _copy_run_json_log(self, button=None) -> None:
-            """Copy the whole run's JSON log to the clipboard (read-only).
-
-            The payload is one JSON document: the run's meta data, every
-            event of the timeline and every JSON log file of the run folder.
-            Base64 image bytes become a size note and files that could not
-            be read are listed inside the payload — nothing is dropped
-            silently.
-            """
-            if not self.live_dir:
-                self.notify("No run is open — open one from Runs first.",
-                            severity="warning", timeout=4, markup=False)
-                return
-            run_dir = str(self.live_dir)
-            events = list(self.live_events)
-
-            def _work() -> None:
-                document = runs_mod.run_json_log(run_dir, events=events)
-                text = json.dumps(document, indent=2, ensure_ascii=False)
-                message = evidence_mod.copy_to_clipboard(text)
-                self.call_from_thread(self._copy_finished, text, message)
-
-            self._run_guarded("Copying the JSON log", _work, button)
-
-        def _copy_finished(self, text: str, message: str) -> None:
-            if message.startswith("Clipboard copy failed"):
-                # Fall back to the terminal's own clipboard escape (OSC 52).
-                try:
-                    self.copy_to_clipboard(text)
-                except Exception:
-                    pass
-                self.notify(message + " — the terminal clipboard escape was used instead.",
-                            severity="warning", timeout=6, markup=False)
-                return
-            self.notify(message, timeout=4, markup=False)
-
-        # -- events -------------------------------------------------------
-        def _goto_tab(self, tab_id: str) -> None:
-            """Switch workspace tabs without focus snapping back.
-
-            The pressed button lives in the tab being left; if it keeps focus
-            while its pane hides, focus reassignment re-activates the old tab.
-            Blur first, then switch.
-            """
-            try:
-                self.set_focus(None)
-            except Exception:
-                pass
-            try:
-                self.query_one("#workspaces", TabbedContent).active = tab_id
-            except Exception:
-                pass
-
-        async def on_button_pressed(self, event):
-            bid = event.button.id
-            button = event.button
-            if bid == "btn-refresh":
-                self._run_guarded("Refreshing dashboard", self._load_dashboard, button)
-            elif bid == "btn-goto-newrun":
-                self._goto_tab("tab-newrun")
-            elif bid == "btn-goto-live":
-                self._goto_tab("tab-live")
-            elif bid == "btn-preflight":
-                self._run_guarded("Preflight check", self._check_preflight, button)
-            elif bid == "btn-start-run":
-                # The gate probes endpoints and can take seconds: the lock is
-                # taken here, on the UI thread, so a second click cannot start
-                # a second run.
-                if self._start_locked:
-                    self.notify("A run is already starting — wait for it.",
-                                severity="warning", timeout=4, markup=False)
-                    return
-                self._start_locked = True
-                self.run_worker(self._start_run, thread=True)
-            elif bid == "btn-runs-refresh":
-                self._run_guarded("Refreshing runs", self._refresh_runs, button)
-            elif bid == "btn-runs-follow":
-                self._follow_selected_run(button)
-            elif bid == "btn-runs-verify":
-                self._verify_selected_run(button)
-            elif bid == "btn-runs-rerun":
-                self._rerun_selected_run()
-            elif bid in ("btn-compare-a", "btn-compare-b"):
-                self._mark_compare(bid)
-            elif bid == "btn-compare-show":
-                self._show_compare()
-            elif bid == "btn-live-stop":
-                self._confirm_stop()
-            elif bid == "btn-live-verify":
-                self._verify_live(button)
-            elif bid == "btn-live-open-png":
-                self._open_live_png()
-            elif bid == "btn-live-open":
-                self._open_live_folder()
-            elif bid == "btn-live-detach":
-                self._detach_live()
-            elif bid == "btn-live-copy":
-                self._copy_run_json_log(button)
-            elif bid == "btn-slice":
-                self._slice_preview(button)
-            elif bid == "btn-volume-use":
-                self._use_selected_volume()
-            elif bid == "btn-svc-refresh":
-                self._run_guarded("Refreshing services", self._refresh_services, button)
-            elif bid == "btn-svc-start":
-                self._run_guarded("Starting services", self._ensure_services, button)
-            elif bid == "btn-svc-stop":
-                self._run_guarded("Stopping owned services",
-                                  lambda: self._release_services(False), button)
-            elif bid == "btn-svc-stopall":
-                self.push_screen(ConfirmScreen(
-                    "Stop the agent run, the local Ollama this TUI started and the owned\n"
-                    "services? The model unloads from VRAM; the run's evidence stays on disk.",
-                    on_yes=lambda: self._run_guarded(
-                        "Stopping everything", self._stop_everything_owned, button)))
-            elif bid == "btn-svc-restart":
-                self._run_guarded("Restarting services", self._restart_services, button)
-            elif bid == "btn-settings-save":
-                self._save_settings()
-            elif bid == "btn-settings-reset":
-                self._reset_settings()
-            elif bid == "btn-h200-probe":
-                self._run_guarded("Probing H200", self._probe_h200, button)
-
-        async def on_input_changed(self, event):
-            if event.input.id == "live-search":
-                self.live_search = event.value.strip()
-                self._render_live()
-            elif event.input.id == "runs-filter":
-                self._render_runs(event.value)
-            elif event.input.id == "volumes-filter":
-                self._render_volumes(event.value)
-
-        async def on_select_changed(self, event):
-            if event.select.id == "live-category":
-                self.live_filter = str(event.value)
-                self._render_live()
-            elif event.select.id == "newrun-preset":
-                preset = str(event.value)
-                try:
-                    prompt = self.query_one("#newrun-prompt", TextArea)
-                    if preset == "task-a":
-                        prompt.load_text(cfg.TASK_A)
-                    elif preset == "task-b":
-                        prompt.load_text(cfg.TASK_B)
-                    elif preset == "custom":
-                        prompt.load_text("")
-                except Exception:
-                    pass
-
-        async def on_data_table_row_selected(self, event):
-            if event.data_table.id == "events-table":
-                items = self._filtered_events()
-                if 0 <= event.cursor_row < len(items):
-                    detail = items[event.cursor_row].get("detail", "")
-                    self._set_text("live-detail", detail[:900])
-                    if items[event.cursor_row].get("image"):
-                        self._show_frame(items[event.cursor_row]["image"], items[event.cursor_row].get("revision"))
-            elif event.data_table.id == "runs-table":
-                self._show_run_detail(event.cursor_row)
-
-        # -- runs tab ------------------------------------------------------
-        def _refresh_runs(self):
+        # -- runs -----------------------------------------------------------
+        def _open_runs(self) -> None:
+            """Open one of the runs on this machine in the conversation."""
             runs = self.discover_runs(fresh=True)
             self.runs = runs
-            # Keep the active filter: the table and _selected_run must show
-            # the same runs, or the row the cursor is on is another run.
-            needle = ""
-            try:
-                needle = self.query_one("#runs-filter", Input).value
-            except Exception:
-                pass
-            self.call_from_thread(self._render_runs, needle)
-
-        def _render_runs(self, needle: str):
-            try:
-                table = self.query_one("#runs-table", DataTable)
-            except Exception:
+            if not runs:
+                self.notify("No runs on disk yet.", severity="warning", timeout=4, markup=False)
                 return
-            needle = (needle or "").lower()
-            try:
-                table.clear()
-                for run in self.runs:
-                    text = " ".join(str(run.get(k, "")) for k in ("runId", "status", "model", "task"))
-                    if needle and needle not in text.lower():
-                        continue
-                    table.add_row(_escape_markup(str(run.get("runId", "?"))),
-                                  _escape_markup(str(run.get("status", "?"))),
-                                  _escape_markup(str(run.get("model", "?"))), str(run.get("frames")),
-                                  _escape_markup(str(run.get("task", "?"))[:60]))
-            except Exception:
-                pass
+            self.push_screen(RunsScreen(runs), callback=self._run_chosen)
 
-        def _selected_run(self) -> dict | None:
-            try:
-                table = self.query_one("#runs-table", DataTable)
-                row = table.cursor_row
-            except Exception:
-                return None
-            # Recompute filtered order (same as _render_runs with current filter).
-            try:
-                needle = self.query_one("#runs-filter", Input).value.lower()
-            except Exception:
-                needle = ""
-            visible = [r for r in self.runs
-                       if not needle or needle in " ".join(str(r.get(k, "")) for k in ("runId", "status", "model", "task")).lower()]
-            if 0 <= row < len(visible):
-                return visible[row]
-            return None
-
-        def _follow_selected_run(self, button=None):
-            run = self._selected_run()
+        def _run_chosen(self, run) -> None:
             if not run:
                 return
             self.start_live(run["directory"], run.get("runId"))
-            self._goto_tab("tab-live")
-            self._run_guarded("Following live", self._poll_live, button)
+            self._poll_live()
 
-        def _verify_selected_run(self, button=None):
-            run = self._selected_run()
-            if not run:
-                self._set_text("runs-detail", "Select a run row first, then press Verify evidence.")
-                return
-            run_dir = str(run["directory"])
-            self._run_guarded("Verifying evidence", lambda: self._run_verify_into(run_dir), button)
+        # -- settings --------------------------------------------------------
+        def _open_settings(self) -> None:
+            self.push_screen(SettingsScreen(self.settings), callback=self._settings_saved)
 
-        def _run_verify_into(self, run_dir: str):
+        def _settings_saved(self, settings) -> None:
+            if settings:
+                self.settings = dict(settings)
+
+        # -- the composer ----------------------------------------------------
+        def action_submit_task(self) -> None:
+            """Enter in the composer starts a run with that task."""
             try:
-                result = runs_mod.run_verify(run_dir)
-                lines = runs_mod.verify_summary(result.get("report"))
-                text = "Verify evidence (read-only) for %s:\n%s" % (
-                    Path(run_dir).name, "\n".join(lines[:8]))
-                self.call_from_thread(self._set_text, "runs-detail", text)
-            except Exception as error:
-                self.call_from_thread(self._set_text, "runs-detail", "Verify evidence failed: %s" % error)
-
-        def _rerun_selected_run(self):
-            run = self._selected_run()
-            if not run:
-                return
-            try:
-                prompt_widget = self.query_one("#newrun-prompt", TextArea)
-                prompt_widget.load_text(runs_mod.task_text_of(run["directory"]) or "")
-                preset = self.query_one("#newrun-preset", Select)
-                preset.value = "custom"
-                self._goto_tab("tab-newrun")
-                self._set_text("newrun-preflight", "Rerun prepared from %s — review and Start." % run.get("runId"))
+                composer = self.query_one("#composer", Composer)
             except Exception:
-                pass
-
-        def _show_run_detail(self, row: int):
-            run = self._selected_run()
-            if not run:
                 return
-            numbers = runs_mod.summary_numbers(run)
-            self._set_text("runs-detail", json.dumps(numbers, indent=1)[:800])
-
-        def _mark_compare(self, bid: str):
-            run = self._selected_run()
-            if not run:
+            task = composer.text.strip()
+            if not task:
                 return
-            if bid == "btn-compare-a":
-                self.compare_a = str(run["directory"])
+            if self._run_state() == "running":
+                # One run at a time: the agent has to stop first (Esc).
+                self.notify("The agent is still working - press Esc or Stop first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            composer.clear()
+            if self._start_locked:
+                self.notify("A run is already starting - wait for it.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            self._start_run("custom", task)
+
+        async def on_composer_submitted(self, event) -> None:
+            """The composer asked to send its text."""
+            self.action_submit_task()
+
+        async def on_button_pressed(self, event):
+            if event.button.id != "btn-send":
+                return
+            state = self._run_state()
+            if state == "running":
+                # The agent is working: the button stops it.
+                self._stop_run()
+            elif state == "stopping":
+                self.notify("The agent is stopping…", severity="warning",
+                            timeout=3, markup=False)
             else:
-                self.compare_b = str(run["directory"])
-            self._set_text("runs-detail", "Comparison A = %s\nComparison B = %s\nPress 'Compare A vs B' to see the difference."
-                           % (self.compare_a, self.compare_b))
+                self.action_submit_task()
 
-        def _show_compare(self):
-            if not (self.compare_a and self.compare_b):
-                self._set_text("runs-detail", "Pick one run with 'Pick as A' and another with 'Pick as B' first.")
+        # -- starting a run --------------------------------------------------
+        def _start_run(self, task_kind: str, prompt: str) -> None:
+            """Preflight and launch. The start lock keeps one run at a time."""
+            if self._start_locked:
+                self.notify("A run is already starting - wait for it.",
+                            severity="warning", timeout=4, markup=False)
                 return
-            try:
-                left = runs_mod.summary_numbers(runs_mod.find_run(Path(self.compare_a).name) or {"directory": self.compare_a})
-            except Exception:
-                left = {"directory": self.compare_a}
-            try:
-                diff = runs_mod.config_diff(self.compare_a, self.compare_b)
-                left_img = runs_mod.final_image_of({"directory": self.compare_a, "verification": None, "sessionId": None})
-                right_img = runs_mod.final_image_of({"directory": self.compare_b, "verification": None, "sessionId": None})
-            except Exception as error:
-                diff = ["compare failed: %s" % error]
-                left_img = right_img = None
-            self._set_text("runs-detail", "\n".join(diff[:40]))
-
-        # -- new run --------------------------------------------------------
-        def _check_preflight(self):
-            try:
-                preset = self.query_one("#newrun-preset", Select).value
-            except Exception:
-                preset = "task-a"
-            settings = self._collect_newrun_settings()
-            problems = flows_mod.service_gate(settings, env_mod, services_mod)
-            text = "Preflight: %s" % ("OK — safe to start" if not problems else "%d blocker(s)" % len(problems))
-            for item in problems[:6]:
-                text += "\n[DOWN] %s %s" % (item.get("name"), (item.get("detail") or "")[:100])
-            self.call_from_thread(self._set_text, "newrun-preflight", text)
-
-        def _collect_newrun_settings(self) -> dict:
-            settings = dict(self.settings)
-            try:
-                settings["model"] = self.query_one("#newrun-model", Input).value.strip() or settings.get("model", "")
-                settings["renderBudget"] = int(self.query_one("#newrun-budget", Input).value.strip() or settings.get("renderBudget", 4))
-                settings["contextSize"] = int(self.query_one("#newrun-context", Input).value.strip() or settings.get("contextSize", 16384))
-                try:
-                    settings["temperature"] = float(self.query_one("#newrun-temp", Input).value.strip() or settings.get("temperature", 0))
-                except ValueError:
-                    pass
-                vol = self.query_one("#newrun-volume", Input).value.strip()
-                if vol:
-                    settings["volumePath"] = vol
-            except Exception:
-                pass
-            return settings
-
-        def _start_run(self):
-            """Preflight and launch. The caller already holds the start lock."""
             self._start_locked = True
-            self.call_from_thread(self._set_start_loading, True)
+            self.run_worker(lambda: self._start_run_worker(task_kind, prompt), thread=True)
+
+        def _start_run_worker(self, task_kind: str, prompt: str) -> None:
             self._busy_inc()
             self._launcher_result = {"settled": False}
             try:
-                self._start_run_body()
+                self._start_run_body(task_kind, prompt)
             except Exception as error:
-                self.call_from_thread(self._set_text, "newrun-preflight",
+                self.call_from_thread(self._say, transcript_mod.ERROR,
                                       "Start failed: %s" % error)
                 self.call_from_thread(self._settle_launch)
 
-        def _set_start_loading(self, loading: bool) -> None:
-            """The Start button spinner is widget state: only the UI thread."""
-            try:
-                self.query_one("#btn-start-run", Button).loading = loading
-            except Exception:
-                pass
-
-        def _start_run_body(self):
-            try:
-                preset = str(self.query_one("#newrun-preset", Select).value)
-                prompt = self.query_one("#newrun-prompt", TextArea).text
-            except Exception:
-                preset, prompt = "task-a", ""
-            settings = self._collect_newrun_settings()
-            effective, problems = flows_mod.build_new_run(preset, prompt, settings, cfg)
+        def _start_run_body(self, task_kind: str, prompt: str) -> None:
+            settings = dict(self.settings)
+            effective, problems = flows_mod.build_new_run(task_kind, prompt, settings, cfg)
             gate = flows_mod.service_gate(settings, env_mod, services_mod)
             offer = flows_mod.temporary_context_offer(settings, gate)
             if offer is not None:
@@ -1544,42 +1715,50 @@ if _TEXTUAL:
                     want = cfg.example_config().get("contextSize", 16384)
                 except Exception:
                     want = 16384
-                self.call_from_thread(self._set_text, "newrun-preflight",
-                                      "Starting temporary Ollama (context %s)…" % want)
+                self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                      "Starting a temporary Ollama (context %s)..." % want)
                 try:
                     started = services_mod.start_temporary_ollama(settings, want)
                 except Exception as error:
                     started = {"ok": False, "error": str(error)}
                 if started.get("ok"):
                     effective["endpoint"] = started["endpoint"]
-                    gate = flows_mod.service_gate(dict(settings, endpoint=started["endpoint"]), env_mod, services_mod)
+                    gate = flows_mod.service_gate(dict(settings, endpoint=started["endpoint"]),
+                                                  env_mod, services_mod)
                     self.call_from_thread(
-                        self._set_text, "newrun-preflight",
-                        "Temporary inference for this run only: %s (stops on TUI exit)." % started["endpoint"])
+                        self._say, transcript_mod.NOTICE,
+                        "Temporary inference for this run only: %s (stops on TUI exit)."
+                        % started["endpoint"])
                 else:
-                    self.call_from_thread(self._set_text, "newrun-preflight",
-                                          "Temporary Ollama failed: %s. Fix your Ollama manually." % started.get("error"))
+                    self.call_from_thread(
+                        self._say, transcript_mod.ERROR,
+                        "Temporary Ollama failed: %s. Fix your Ollama manually."
+                        % started.get("error"))
                     self.call_from_thread(self._settle_launch)
                     return
             problems = list(problems) + list(gate)
             if problems:
-                self.call_from_thread(self._set_text, "newrun-preflight",
-                                      "Blocked:\n" + "\n".join("- %s" % p if isinstance(p, str) else "- %s" % p.get("name") for p in problems[:8]))
+                self.call_from_thread(
+                    self._say, transcript_mod.ERROR,
+                    "Blocked:\n" + "\n".join(
+                        "- %s" % (p if isinstance(p, str) else p.get("name"))
+                        for p in problems[:8]))
                 self.call_from_thread(self._settle_launch)
                 return
-            config_path = flows_mod.write_config(effective, preset, cfg)
-            self.call_from_thread(self._set_text, "newrun-preflight", "Launching %s..." % config_path.name)
-            thread = threading.Thread(target=self._launch_blocking, args=(str(config_path),), daemon=True)
+            config_path = flows_mod.write_config(effective, task_kind, cfg)
+            self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                  "Launching %s..." % config_path.name)
+            thread = threading.Thread(target=self._launch_blocking,
+                                      args=(str(config_path),), daemon=True)
             self._launcher_thread = thread
             thread.start()
 
         def _settle_launch(self) -> None:
-            """Release the Start button + busy spinner exactly once per launch."""
+            """Release the Start lock + busy spinner exactly once per launch."""
             if self._launcher_result.get("settled"):
                 return
             self._launcher_result["settled"] = True
             self._start_locked = False
-            self._set_start_loading(False)
             self._busy_dec()
 
         def _launch_blocking(self, config_path: str):
@@ -1602,12 +1781,13 @@ if _TEXTUAL:
                     self.call_from_thread(self._enter_live_from_launcher)
             except Exception as error:
                 self._launcher_result["error"] = str(error)
-                self.call_from_thread(self._set_text, "newrun-preflight", "Launch failed: %s" % error)
+                self.call_from_thread(self._say, transcript_mod.ERROR,
+                                      "Launch failed: %s" % error)
             finally:
                 if not self._launcher_result.get("directory") and not self._launcher_result.get("error"):
                     tail = (result.output_tail if result else "")[-1500:]
                     self.call_from_thread(
-                        self._set_text, "newrun-preflight",
+                        self._say, transcript_mod.ERROR,
                         "Launch ended without reserving a run (config/duplicate/reservation). "
                         "No evidence touched.\n%s" % tail)
                 self.call_from_thread(self._settle_launch)
@@ -1617,239 +1797,8 @@ if _TEXTUAL:
             if not directory:
                 return
             self.start_live(directory, self._launcher_result.get("run_id"))
-            self._goto_tab("tab-live")
+            self._poll_live()
             self._settle_launch()
-
-        # -- volumes ---------------------------------------------------------
-        def _render_volumes(self, needle: str):
-            vols = self.volumes or self.discover_volumes()
-            self.volumes = vols
-            try:
-                table = self.query_one("#volumes-table", DataTable)
-            except Exception:
-                return
-            needle = (needle or "").lower()
-            try:
-                table.clear()
-                for item in vols:
-                    text = "%s %s" % (item.get("label", ""), item.get("path", ""))
-                    if needle and needle not in text.lower():
-                        continue
-                    dims = "x".join(str(v) for v in (item.get("dimensions") or ["?"]))
-                    flags = ("default " if item.get("default") else "") + ("+%d" % (item.get("copies", 1) - 1) if item.get("copies", 1) > 1 else "")
-                    table.add_row(_escape_markup(str(item.get("path", ""))[-60:]),
-                                  _escape_markup(dims), _escape_markup(flags))
-            except Exception:
-                pass
-
-        def _selected_volume(self) -> dict | None:
-            try:
-                row = self.query_one("#volumes-table", DataTable).cursor_row
-            except Exception:
-                return None
-            if 0 <= row < len(self.volumes):
-                return self.volumes[row]
-            return None
-
-        def _slice_preview(self, button=None):
-            item = self._selected_volume()
-            if not item:
-                self._set_text("volumes-detail", "Select a volume row first.")
-                return
-            try:
-                axis = str(self.query_one("#slice-axis", Select).value)
-                index = int(self.query_one("#slice-index", Input).value.strip() or "0")
-            except Exception:
-                self._set_text("volumes-detail", "Slice index must be an integer.")
-                return
-            header, want_axis, want_index = item["path"], axis, index
-            self._set_text("volumes-detail", "Rendering slice %s=%d..." % (axis, index))
-
-            def _work():
-                result = volumes_mod.slice_preview_path(header, want_axis, want_index)
-                if result.get("ok"):
-                    self.call_from_thread(
-                        self._set_text, "volumes-detail",
-                        "slice %s=%d dims=%s" % (want_axis, want_index, result.get("dimensions")))
-                    try:
-                        image = imaging_mod.preview_or_message(result["image"], width=50, height=20)
-                    except Exception as error:
-                        image = "(preview failed: %s)" % error
-                    self.call_from_thread(self._show_slice_image, image)
-                else:
-                    self.call_from_thread(
-                        self._set_text, "volumes-detail",
-                        "Slice unavailable: %s" % result.get("detail"))
-            self._run_guarded("Slice preview", _work, button)
-
-        def _show_slice_image(self, image: str) -> None:
-            try:
-                self.query_one("#slice-preview", Static).update(image)
-            except Exception:
-                pass
-
-        def _use_selected_volume(self):
-            item = self._selected_volume()
-            if not item:
-                return
-            self.settings["volumePath"] = item["path"]
-            try:
-                cfg.save_settings(self.settings)
-            except Exception:
-                pass
-            self._set_text("volumes-detail", "Volume selected: %s" % item["path"])
-
-        # -- services ---------------------------------------------------------
-        def _refresh_services(self):
-            try:
-                items = services_mod.owned_services()
-            except Exception:
-                items = []
-            try:
-                table = self.query_one("#services-table", DataTable)
-                table.clear()
-                for entry in items:
-                    table.add_row(_escape_markup(str(entry.get("kind", ""))),
-                                  _escape_markup(str(entry.get("pid", ""))),
-                                  "alive" if entry.get("alive") else "stopped")
-            except Exception:
-                pass
-            try:
-                from rich.text import Text as _RichText
-            except Exception:  # pragma: no cover
-                _RichText = None
-            try:
-                log = self.query_one("#service-logs", RichLog)
-                log.clear()
-                for name, lines in services_mod.service_logs():
-                    log.write("[bold]%s[/bold]" % name)
-                    for line in lines[-15:]:
-                        if _RichText is not None:
-                            log.write(_RichText(line[:160]))
-                        else:
-                            log.write(line[:160])
-            except Exception:
-                pass
-
-        def _ensure_services(self):
-            try:
-                report = services_mod.ensure_services(self.settings)
-                self.call_from_thread(self._set_text, "live-head", "; ".join(services_mod.report_lines(report)[:4]) or "services OK")
-            except Exception as error:
-                pass
-            try:
-                # Keep the ownership record fresh: another TUI session may
-                # only adopt our services once this heartbeat went stale.
-                services_mod.heartbeat_start()
-            except Exception:
-                pass
-            self._refresh_services()
-
-        def _release_services(self, force: bool):
-            try:
-                if force:
-                    report = services_mod.release_owned_services(force=True)
-                else:
-                    report = services_mod.release_owned_services()
-                self.call_from_thread(self._refresh_services)
-            except Exception:
-                pass
-
-        def _stop_everything_owned(self):
-            """Stop the agent tree, the local Ollama and the owned services.
-
-            Same order as the quit path (run -> agent tree -> owned services),
-            but without the cached report, so the later quit still cleans up
-            whatever was started meanwhile.
-            """
-            try:
-                # A second Ctrl+C must not abort the stop half-way.
-                self._on_ui(services_mod.block_interrupts)
-            except Exception:
-                pass
-            try:
-                report = services_mod.shutdown_all(self.settings, hard=False, cache=False)
-                self.call_from_thread(
-                    self._set_text, "live-head",
-                    "; ".join(services_mod.shutdown_lines(report)[:4]) or "stopped")
-            except Exception:
-                pass
-            self._on_ui(self._refresh_services)
-
-        def _restart_services(self):
-            try:
-                services_mod.release_owned_services(force=True)
-            except Exception:
-                pass
-            self._ensure_services()
-
-        # -- settings ----------------------------------------------------------
-        def _save_settings(self):
-            try:
-                for _label, widget, key, kind in SETTINGS_ROWS:
-                    raw = self.query_one("#" + widget, Input).value.strip()
-                    if kind == "int":
-                        if raw:
-                            self.settings[key] = int(raw)
-                    elif kind == "float":
-                        if raw:
-                            self.settings[key] = float(raw)
-                    else:
-                        self.settings[key] = raw
-                try:
-                    self.settings["think"] = str(
-                        self.query_one("#set-think", Select).value) == "true"
-                except Exception:
-                    pass
-                problems = cfg.validate_settings(self.settings)
-                if problems:
-                    self._set_text("settings-status", "Invalid:\n" + "\n".join("- " + p for p in problems))
-                    self.notify("Settings invalid: %s" % problems[0], severity="error", timeout=5, markup=False)
-                    return
-                cfg.save_settings(self.settings)
-                self._set_text("settings-status", "Saved to runtime/tui-settings.json.")
-                self.notify("Settings saved.", timeout=3, markup=False)
-            except Exception as error:
-                self._set_text("settings-status", "Save failed: %s" % error)
-                self.notify("Save failed: %s" % error, severity="error", timeout=5, markup=False)
-
-        def _reset_settings(self):
-            """Fill the form with the built-in defaults. Writes nothing.
-
-            The button label, its tooltip and the F1 help all promise that
-            nothing is written here, so the file is only written by
-            "Save settings". The settings in use stay untouched until then —
-            the next run must not silently use the defaults.
-            """
-            defaults = dict(cfg.DEFAULTS)
-            for _label, widget, key, _kind in SETTINGS_ROWS:
-                self._set_input(widget, str(defaults.get(key, "")))
-            try:
-                self.query_one("#set-think", Select).value = (
-                    "true" if defaults.get("think") else "false")
-            except Exception:
-                pass
-            self._set_text("settings-status",
-                           "Form filled with the built-in defaults. Nothing was written — "
-                           "press Save settings to keep them.")
-            self.notify("Form reset to defaults (not saved yet).", timeout=4, markup=False)
-
-        def _set_input(self, widget_id: str, value: str) -> None:
-            try:
-                self.query_one("#" + widget_id, Input).value = value
-            except Exception:
-                pass
-
-        def _probe_h200(self):
-            import urllib.request
-            try:
-                endpoint = self.settings.get("h200Endpoint", "").rstrip("/")
-                with urllib.request.urlopen(endpoint + "/api/version", timeout=5) as response:
-                    version = json.load(response)
-                self.call_from_thread(self._set_text, "settings-status", "H200 OK: %s" % str(version)[:120])
-            except Exception as error:
-                self.call_from_thread(self._set_text, "settings-status", "H200 DOWN: %s" % error)
-
 
     def main() -> int:
         """Crash-safe entry: no model call, non-TTY exits 2, Ctrl+C hard stop."""
@@ -1869,7 +1818,7 @@ if _TEXTUAL:
             app.run()
             return 0
         except KeyboardInterrupt:
-            print("\nInterrupted — stopping agent, local Ollama and owned services…")
+            print("\nInterrupted - stopping agent, local Ollama and owned services...")
             return 130
         finally:
             # Every exit path (quit, Ctrl+C, crash, closed window) leaves no

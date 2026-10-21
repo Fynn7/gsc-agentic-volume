@@ -162,25 +162,67 @@ class EventTail:
             if kind == "turn.started":
                 self._turn += 1
                 event = text_mod.model_turn_started(self._turn)
-                out.append({"cat": "MODEL", "title": event["title"],
-                            "detail": event["detail"], "ts": stamp})
+                out.append({"cat": "MODEL", "kind": "thinking_start",
+                            "title": event["title"], "detail": event["detail"],
+                            "turn": self._turn, "ts": stamp})
             elif kind == "turn.completed":
-                event = text_mod.model_turn_done(self._turn, record.get("usage") or {})
-                out.append({"cat": "MODEL", "title": event["title"],
-                            "detail": event["detail"], "ts": stamp})
-            elif kind == "item.completed":
+                usage = record.get("usage") or {}
+                event = text_mod.model_turn_done(self._turn, usage)
+                out.append({"cat": "MODEL", "kind": "thinking_end",
+                            "title": event["title"], "detail": event["detail"],
+                            "turn": self._turn, "usage": usage, "ts": stamp})
+            elif kind == "turn.failed":
+                message = str((record.get("error") or {}).get("message")
+                              or record.get("message") or "the turn failed")
+                out.append({"cat": "ERROR", "kind": "error", "title": "ERROR  %s" % message,
+                            "detail": message, "message": message, "ts": stamp})
+            elif kind in ("item.started", "item.updated", "item.completed"):
                 item = record.get("item") or {}
-                if item.get("type") == "agent_message":
+                item_type = item.get("type")
+                if item_type == "agent_message":
                     event = text_mod.model_message(item.get("text", ""))
-                    out.append({"cat": "MODEL", "title": event["title"],
-                                "detail": event["detail"], "ts": stamp})
-                elif item.get("type") == "error":
+                    # The raw text is kept: the transcript shows the whole
+                    # answer, not the shortened log title. A streamed answer
+                    # arrives as item.updated - the block grows with it.
+                    event_kind = ("assistant_update"
+                                  if record.get("type") == "item.updated"
+                                  else "assistant")
+                    out.append({"cat": "MODEL", "kind": event_kind,
+                                "title": event["title"], "detail": event["detail"],
+                                "text": item.get("text", ""), "ts": stamp})
+                elif item_type == "error":
                     # The codex harness reports its own notices this way; they
                     # do not stop the run, so they are warnings, not errors.
-                    event = text_mod.harness_warning(item.get("message", ""))
-                    out.append({"cat": "WARN", "title": event["title"],
-                                "detail": event["detail"], "ts": stamp})
+                    message = item.get("message", "")
+                    event = text_mod.harness_warning(message)
+                    out.append({"cat": "WARN", "kind": "warn", "title": event["title"],
+                                "detail": event["detail"], "message": message,
+                                "ts": stamp})
+                elif item_type == "mcp_tool_call":
+                    out.extend(self._harness_tool_event(record, item, stamp))
         return out
+
+    def _harness_tool_event(self, record: dict, item: dict, stamp: float) -> list[dict]:
+        """The harness view of a renderer tool call.
+
+        The service log reports the same call; the transcript folds both into
+        one block, so the evidence stays complete without showing the call
+        twice.
+        """
+        name = str(item.get("tool") or "tool")
+        status = str(item.get("status") or "")
+        if record.get("type") in ("item.started", "item.updated"):
+            return [{"cat": "TOOL", "kind": "tool_call", "title": "TOOL  %s" % name,
+                     "detail": "", "name": name, "source": "harness",
+                     "arguments": item.get("arguments") or {}, "ts": stamp}]
+        failed = bool(item.get("error")) or status == "failed"
+        if failed:
+            message = str(item.get("error") or "the tool call failed")
+            return [{"cat": "ERROR", "kind": "tool_error", "title": "TOOL  %s  FAILED" % name,
+                     "detail": message, "name": name, "source": "harness",
+                     "message": message, "ts": stamp}]
+        return [{"cat": "TOOL", "kind": "tool_result", "title": "TOOL  %s  returned" % name,
+                 "detail": "", "name": name, "source": "harness", "ts": stamp}]
 
     # -- run_dir/session.json (embedded events array; always in the run dir) --
     def _poll_session_json(self) -> list[dict]:
@@ -241,46 +283,78 @@ class EventTail:
             rev = scene.get("revision")
             self.counters["images"] += 1
             event = text_mod.image_event(kind, result)
-            return {"cat": "IMAGE", "title": event["title"],
+            return {"cat": "IMAGE", "kind": "image", "title": event["title"],
                     "detail": event["detail"],
                     "image": image, "revision": rev, "ts": stamp,
+                    "source": kind, "lit": self._lit_pixels(result),
+                    "size": self._output_size(scene),
                     "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "external_tool_call":
             self.counters["tools"] += 1
             event = text_mod.tool_call(record.get("name"), record.get("arguments"))
             # Remember what the call changed, so a later rejection can name it.
             self._last_call[record.get("name")] = event.get("changes") or []
-            return {"cat": "TOOL", "title": event["title"], "detail": event["detail"],
+            return {"cat": "TOOL", "kind": "tool_call", "title": event["title"],
+                    "detail": event["detail"], "source": "service",
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
                     "name": record.get("name"), "arguments": record.get("arguments")}
         elif kind == "external_tool_return":
             event = text_mod.tool_return(record.get("name"), record.get("seconds"))
-            return {"cat": "TOOL", "title": event["title"], "detail": event["detail"],
+            return {"cat": "TOOL", "kind": "tool_result", "title": event["title"],
+                    "detail": event["detail"], "source": "service",
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
                     "name": record.get("name"), "seconds": record.get("seconds")}
         elif kind == "tool_error":
             event = text_mod.tool_error(record.get("name"), record.get("message", ""),
                                         self._last_call.get(record.get("name")))
-            return {"cat": "ERROR", "title": event["title"], "detail": event["detail"],
+            return {"cat": "ERROR", "kind": "tool_error", "title": event["title"],
+                    "detail": event["detail"], "source": "service",
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
-                    "name": record.get("name")}
+                    "name": record.get("name"), "message": record.get("message", "")}
         elif kind == "finish":
             event = text_mod.finish_event(record)
-            return {"cat": "FINISH", "title": event["title"], "detail": event["detail"],
-                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
+            return {"cat": "FINISH", "kind": "finish", "title": event["title"],
+                    "detail": event["detail"],
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
+                    "revision": record.get("selectedRevision"),
+                    "verification": record.get("externalTaskVerification"),
+                    "claim": record.get("modelClaim", "")}
         elif kind == "error":
-            event = text_mod.error_event(record.get("message", ""))
-            return {"cat": "ERROR", "title": event["title"], "detail": event["detail"],
+            message = record.get("message", "")
+            event = text_mod.error_event(message)
+            return {"cat": "ERROR", "kind": "error", "title": event["title"],
+                    "detail": event["detail"], "message": message,
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "model_action":
-            event = text_mod.model_action(record.get("action"))
-            return {"cat": "MODEL", "title": event["title"], "detail": event["detail"],
+            action = record.get("action") or {}
+            event = text_mod.model_action(action)
+            return {"cat": "MODEL", "kind": "thinking", "title": event["title"],
+                    "detail": event["detail"],
+                    "reason": action.get("reason", ""),
+                    "tool": action.get("tool", ""),
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "pause":
             event = text_mod.paused_event(record)
-            return {"cat": "MODEL", "title": event["title"], "detail": event["detail"],
+            return {"cat": "MODEL", "kind": "notice", "title": event["title"],
+                    "detail": event["detail"],
+                    "text": "the agent stopped early - %s observations left"
+                            % text_mod.count(record.get("remaining", "?")),
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         return None
+
+    @staticmethod
+    def _lit_pixels(result: dict):
+        """How many pixels of the frame are not black (the frame's content)."""
+        value = result.get("nonblackPixels")
+        return text_mod.count(value) if value is not None else None
+
+    @staticmethod
+    def _output_size(scene: dict) -> str:
+        """The frame size, e.g. '512x512'."""
+        output = scene.get("output") or []
+        if len(output) == 2:
+            return "%sx%s" % (output[0], output[1])
+        return "?"
 
     # -- runtime/<session>/events.jsonl (tools + images) ------------------
     def _poll_events(self) -> list[dict]:
@@ -315,7 +389,10 @@ class EventTail:
             index = _http_index(path)
             model, summary = _request_summary(self.run_dir, index)
             event = text_mod.infer_request(index, model, summary)
-            out.append({"cat": "INFER", "title": event["title"], "detail": event["detail"],
+            out.append({"cat": "INFER", "kind": "meta", "title": event["title"],
+                        "detail": event["detail"],
+                        "text": "model call #%d%s" % (
+                            index, (" · %s" % model) if model else ""),
                         "ts": self._now()})
         for path in sorted(directory.glob("http-*.metadata.json"), key=_http_index):
             if path.name in self._seen_metadata:
@@ -328,8 +405,14 @@ class EventTail:
             self.counters["http"] += 1
             stamp = self._now()
             event = text_mod.infer_response(meta)
-            cat = "ERROR" if "FAILED" in event["title"] else "INFER"
-            out.append({"cat": cat, "title": event["title"], "detail": event["detail"],
+            failed = "FAILED" in event["title"]
+            seconds = meta.get("seconds")
+            elapsed = ("%.2fs" % seconds) if isinstance(seconds, (int, float)) else "?"
+            out.append({"cat": "ERROR" if failed else "INFER",
+                        "kind": "error" if failed else "meta",
+                        "title": event["title"], "detail": event["detail"],
+                        "message": event["title"] if failed else "",
+                        "text": "HTTP %s in %s" % (meta.get("status", "?"), elapsed),
                         "ts": stamp})
         return out
 

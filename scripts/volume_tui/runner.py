@@ -143,6 +143,7 @@ def request_stop(run_id: str) -> Path:
 
 def stop_notice() -> str:
     return ("Quitting the TUI stops the agent run, the local Ollama and the services this TUI "
-            "started: the run keeps its evidence and stays in the run list. Ctrl+C is the hard "
-            "stop: the same, plus a local Ollama that this TUI did not start. Kill a harness "
-            "PID manually only after confirming manifest.json pid belongs to this run directory.")
+            "started: the run keeps its evidence and stays in the run list. The hard stop "
+            "(Ctrl+P -> Hard stop...) is the same, plus a local Ollama that this TUI did not "
+            "start. Ctrl+C copies the selected text and stops nothing. Kill a harness PID "
+            "manually only after confirming manifest.json pid belongs to this run directory.")

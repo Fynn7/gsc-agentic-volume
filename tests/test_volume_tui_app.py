@@ -274,69 +274,78 @@ class NewRunFlow(unittest.TestCase):
         self.assertEqual(effective["task"], "rotate a little")
 
 
+def _conversation_text(app) -> str:
+    """Everything the conversation shows, as plain text."""
+    parts = []
+    for widget in app.query(".block"):
+        if isinstance(widget, tui_app.ImageBlock):
+            for caption in widget.query(".image-caption"):
+                parts.append(str(caption.render()))
+            continue
+        parts.append(str(widget.render()))
+    return "\n".join(parts)
+
+
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
-class TextualLayout(unittest.TestCase):
-    """Regression: every field stays inside the viewport, rows never overlap."""
+class CodingAgentScreen(unittest.TestCase):
+    """The TUI is one screen, like a coding agent app - no workspaces."""
 
-    def test_settings_rows_fit_and_stack(self):
+    def test_the_workspaces_are_gone(self):
         import asyncio
-        from textual.widgets import TabbedContent
 
         async def _run():
             app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(80, 24)) as pilot:
+            async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app.query_one("#workspaces", TabbedContent).active = "tab-settings"
-                await pilot.pause()
-                self.assertTrue(app.query("VerticalScroll"))
-                inputs = list(app.query_one("#tab-settings").query("Input"))
-                self.assertEqual(len(inputs), 11)
-                width = app.screen.size.width
-                last_y = -1
-                for widget in inputs:
-                    region = widget.region
-                    self.assertGreater(region.width, 0)
-                    self.assertLessEqual(region.x + region.width, width)
-                    self.assertGreater(region.y, last_y)
-                    last_y = region.y
-                labels = list(app.query_one("#tab-settings").query("Label"))
-                self.assertGreaterEqual(len(labels), 11)
+                self.assertEqual(len(app.query("TabbedContent")), 0)
+                self.assertEqual(len(app.query("TabPane")), 0)
+                self.assertEqual(len(app.query("TabbedContent")), 0)
         asyncio.run(_run())
 
-    def test_live_and_volumes_rows_fit(self):
+    def test_the_screen_is_a_status_line_a_conversation_and_a_composer(self):
         import asyncio
-        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                for widget_id in ("#status-bar", "#transcript", "#blocks",
+                                  "#composer", "#btn-send"):
+                    self.assertTrue(app.query(widget_id), widget_id)
+                self.assertTrue(app.query("Footer"))
+        asyncio.run(_run())
+
+    def test_every_widget_stays_inside_the_window(self):
+        import asyncio
 
         async def _run():
             app = tui_app.VolumeAgentApp()
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 width = app.screen.size.width
-                app.query_one("#workspaces", TabbedContent).active = "tab-live"
-                await pilot.pause()
-                for wid in ("#live-search", "#live-category", "#btn-live-copy"):
-                    region = app.query_one(wid).region
-                    self.assertLessEqual(region.x + region.width, width)
-                app.query_one("#workspaces", TabbedContent).active = "tab-volumes"
-                await pilot.pause()
-                for wid in ("#slice-axis", "#slice-index", "#btn-slice", "#btn-volume-use"):
-                    region = app.query_one(wid).region
-                    self.assertLessEqual(region.x + region.width, width)
+                for widget_id in ("#status-bar", "#transcript", "#composer", "#btn-send"):
+                    region = app.query_one(widget_id).region
+                    self.assertGreater(region.width, 0, widget_id)
+                    self.assertLessEqual(region.x + region.width, width, widget_id)
         asyncio.run(_run())
 
-    def test_scroll_keys_from_textarea(self):
+    def test_ctrl_up_and_down_scroll_the_conversation(self):
         import asyncio
-        from textual.containers import VerticalScroll
-        from textual.widgets import TabbedContent
 
         async def _run():
             app = tui_app.VolumeAgentApp()
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                app.query_one("#workspaces", TabbedContent).active = "tab-newrun"
+                for index in range(60):
+                    app.transcript.add(tui_app.transcript_mod.NOTICE,
+                                       title="line %d" % index)
+                app._sync_transcript()
                 await pilot.pause()
-                scroller = app.query_one("#tab-newrun").query_one(VerticalScroll)
-                app.query_one("#newrun-prompt", tui_app.TextArea).focus()
+                scroller = app.query_one("#transcript", tui_app.VerticalScroll)
+                app.query_one("#composer", tui_app.Composer).focus()
+                await pilot.pause()
+                # The user reads the history: the view is not at the tail.
+                scroller.scroll_to(y=0, animate=False)
                 await pilot.pause()
                 before = scroller.scroll_offset.y
                 await pilot.press("ctrl+down")
@@ -347,69 +356,665 @@ class TextualLayout(unittest.TestCase):
                 self.assertLess(scroller.scroll_offset.y, before + 8)
         asyncio.run(_run())
 
-    def test_scroll_hint_present(self):
+    def test_the_status_line_names_the_model_and_the_run(self):
         import asyncio
-        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            app.settings["model"] = "probe-model"
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.live_run_id = "run-demo"
+                app._render_status()
+                await pilot.pause()
+                status = str(app.query_one("#status-bar").render())
+                self.assertIn("probe-model", status)
+                self.assertIn("run-demo", status)
+                # The model works in the conversation, not in the status line.
+                app._ingest_events([{"kind": "thinking_start"}])
+                app._render_status()
+                await pilot.pause()
+                status = str(app.query_one("#status-bar").render())
+                self.assertNotIn("thinking", status.lower())
+        asyncio.run(_run())
+
+    def test_ctrl_t_switches_the_theme(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                before = app.theme
+                app.action_toggle_dark()
+                await pilot.pause()
+                self.assertNotEqual(app.theme, before)
+                app.action_toggle_dark()
+                await pilot.pause()
+                self.assertEqual(app.theme, before)
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class Conversation(unittest.TestCase):
+    """The conversation: the task, the thinking, the tool calls, the answer."""
+
+    def test_opening_a_run_starts_with_its_task(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                (run_dir / "config.json").write_text(json.dumps(
+                    {"task": "Rotate the camera to 25,-35,10"}))
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    await pilot.pause()
+                    first = app.transcript.blocks[0]
+                    self.assertEqual(first["kind"], tui_app.transcript_mod.USER)
+                    self.assertIn("Rotate the camera", first["title"])
+                    self.assertEqual(app.live_run_id, "run-demo")
+                    self.assertFalse(app.live_frozen)
+        asyncio.run(_run())
+
+    def test_the_conversation_shows_the_tool_call_with_its_numbers(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.transcript.add(tui_app.transcript_mod.USER, title="Rotate it")
+                app._ingest_events([
+                    {"kind": "thinking_start"},
+                    {"kind": "thinking", "reason": "The task wants a rotation.",
+                     "tool": "render_scene"},
+                    {"kind": "tool_call", "name": "render_scene", "source": "service",
+                     "arguments": {"parameters": {"rotationXYZ": [25, -35, 10]}}},
+                    {"kind": "tool_result", "name": "render_scene", "source": "service",
+                     "seconds": 1.25},
+                    {"kind": "assistant", "text": "The camera is rotated now."},
+                ])
+                await pilot.pause()
+                text = _conversation_text(app)
+                self.assertIn("Thinking", text)
+                self.assertIn("render_scene", text)
+                self.assertIn("camera rotation 25,-35,10", text)
+                self.assertIn("The camera is rotated now.", text)
+                # The tool call is done, so it is marked as such.
+                self.assertIn("✓", text)
+        asyncio.run(_run())
+
+    def test_a_tool_call_is_shown_once_even_when_two_sources_see_it(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([
+                    {"kind": "tool_call", "name": "render_scene", "source": "harness",
+                     "arguments": {}},
+                    {"kind": "tool_result", "name": "render_scene", "source": "harness"},
+                    {"kind": "tool_call", "name": "render_scene", "source": "service",
+                     "arguments": {}},
+                    {"kind": "tool_result", "name": "render_scene", "source": "service",
+                     "seconds": 0.5},
+                ])
+                await pilot.pause()
+                tools = [block for block in app.transcript.blocks
+                         if block["kind"] == tui_app.transcript_mod.TOOL]
+                self.assertEqual(len(tools), 1)
+                self.assertEqual(tools[0]["status"], "done")
+        asyncio.run(_run())
+
+    def test_the_conversation_follows_the_tail_only_while_at_the_bottom(self):
+        import asyncio
+        import tempfile
 
         async def _run():
             app = tui_app.VolumeAgentApp()
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
-                for tab in ("tab-newrun", "tab-runs", "tab-live", "tab-volumes", "tab-services", "tab-settings"):
-                    app.query_one("#workspaces", TabbedContent).active = tab
+                with tempfile.TemporaryDirectory() as tmp:
+                    app.start_live(Path(tmp), "run-demo")
+                    for index in range(40):
+                        app.transcript.add(tui_app.transcript_mod.NOTICE,
+                                           title="row %d" % index)
+                    app._sync_transcript()
                     await pilot.pause()
-                    hints = app.query_one("#" + tab).query("Static.scroll-hint")
-                    self.assertEqual(len(hints), 1, tab)
+                    scroller = app.query_one("#transcript", tui_app.VerticalScroll)
+                    scroller.scroll_to(y=6, animate=False)
+                    await pilot.pause()
+                    before = scroller.scroll_offset.y
+                    self.assertGreater(before, 0)
+                    # A new entry arrives (the normal poll path).
+                    app.transcript.add(tui_app.transcript_mod.NOTICE, title="new")
+                    app._sync_transcript()
+                    await pilot.pause()
+                    # Reading the history: the view is not yanked to the tail.
+                    self.assertEqual(scroller.scroll_offset.y, before)
+                    # Scrolling back to the tail resumes the follow.
+                    scroller.scroll_end(animate=False)
+                    await pilot.pause()
+                    app.transcript.add(tui_app.transcript_mod.NOTICE, title="newest")
+                    app._sync_transcript()
+                    for _ in range(20):
+                        await pilot.pause()
+                        if scroller.scroll_offset.y >= scroller.max_scroll_y - 1:
+                            break
+                    self.assertGreaterEqual(scroller.scroll_offset.y,
+                                            scroller.max_scroll_y - 1)
         asyncio.run(_run())
 
-    def test_dashboard_goto_buttons_stick(self):
+    def test_the_thinking_block_animates_while_the_model_works(self):
         import asyncio
-        from textual.widgets import TabbedContent
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([{"kind": "thinking_start"}])
+                await pilot.pause()
+                thinking = app.transcript.find(tui_app.transcript_mod.THINKING)
+                self.assertEqual(thinking["status"], "running")
+                app._animate_thinking()
+                await pilot.pause()
+                self.assertIn("s", str(thinking.get("subtitle")))
+                self.assertIn("Thinking", _conversation_text(app))
+        asyncio.run(_run())
+
+    def test_the_thinking_block_stops_spinning_when_the_run_is_over(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                (run_dir / "run.json").write_text(json.dumps({"status": "finished"}))
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    app._ingest_events([{"kind": "thinking_start"}])
+                    await pilot.pause()
+                    thinking = app.transcript.find(tui_app.transcript_mod.THINKING)
+                    self.assertEqual(thinking["status"], "running")
+                    app._poll_live()
+                    await pilot.pause()
+                    self.assertTrue(app.live_frozen)
+                    self.assertEqual(thinking["status"], "done")
+        asyncio.run(_run())
+
+    def test_the_thinking_block_opens_the_reasoning_chain_on_a_click(self):
+        import asyncio
+
+        chain = ("Let me inspect the scene to see what volume we are working "
+                 "with, then I will render a frame of it.")
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([
+                    {"kind": "thinking_start"},
+                    {"kind": "reasoning_delta", "delta": chain},
+                ])
+                await pilot.pause()
+                blocks = list(app.query(tui_app.ThinkingBlock))
+                self.assertEqual(len(blocks), 1)
+                widget = blocks[0]
+                # Collapsed: the chain is hidden, a hint points at it.
+                self.assertFalse(widget.expanded)
+                collapsed = str(widget.render())
+                self.assertIn("Thinking", collapsed)
+                self.assertNotIn(chain, collapsed)
+                # A click opens the chain.
+                widget.on_click()
+                await pilot.pause()
+                self.assertTrue(widget.expanded)
+                opened = str(widget.render())
+                self.assertIn(chain, opened)
+                # A second click closes it again.
+                widget.on_click()
+                await pilot.pause()
+                self.assertFalse(widget.expanded)
+        asyncio.run(_run())
+
+    def test_the_model_stream_reaches_the_conversation(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                http = run_dir / "http"
+                http.mkdir()
+                (http / "http-001.response.bin").write_text(
+                    'event: x\ndata: {"type": "response.output_text.delta", '
+                    '"delta": "It is a frog."}\n\n', encoding="utf-8")
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    await pilot.pause()
+                    app._poll_live()
+                    await pilot.pause()
+                    answers = [block for block in app.transcript.blocks
+                               if block["kind"] == tui_app.transcript_mod.ASSISTANT]
+                    self.assertEqual(len(answers), 1)
+                    self.assertEqual(answers[0]["title"], "It is a frog.")
+        asyncio.run(_run())
+
+    def test_the_frame_preview_shows_the_whole_frame(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                frame_dir = root / "session" / "frame-1"
+                frame_dir.mkdir(parents=True)
+                png = frame_dir / "image.png"
+                from PIL import Image
+                Image.new("RGB", (256, 256), (200, 200, 200)).save(png)
+                run_dir = root / "run"
+                run_dir.mkdir()
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    app._ingest_events([
+                        {"kind": "image", "source": "render", "revision": 1,
+                         "lit": "148491", "size": "512x512", "image": str(png)},
+                    ])
+                    await pilot.pause()
+                    await pilot.pause()
+                    preview = app.query_one(".image-preview")
+                    lines = preview.content.plain.splitlines()
+                    # Every row of the picture is on screen (nothing clipped) ...
+                    self.assertEqual(preview.size.height, len(lines))
+                    # ... and no row is folded in half (nothing cropped): the
+                    # picture is drawn at its own width, never wider.
+                    self.assertLessEqual(len(lines[0]), preview.size.width)
+                    # The PNG path is on screen, so the file can be found.
+                    self.assertIn(str(png), _conversation_text(app))
+        asyncio.run(_run())
+
+    def test_open_folder_targets_the_folder_that_holds_the_png(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                frame_dir = root / "session" / "frame-1"
+                frame_dir.mkdir(parents=True)
+                png = frame_dir / "image.png"
+                png.write_bytes(b"not-a-real-png")
+                run_dir = root / "run"
+                run_dir.mkdir()
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    app.live_image_path = str(png)
+                    # The frames live beside the run, not inside the run folder.
+                    self.assertEqual(app._live_frames_folder(), root / "session")
+                    self.assertNotEqual(app._live_frames_folder(), run_dir)
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class ComposerFlow(unittest.TestCase):
+    """Enter in the composer starts a run with that task."""
+
+    def _patched_launch(self, tmp, run_dir):
+        target = Path(tmp) / "c.json"
+
+        def fake_launch(config_path, on_line=None):
+            if on_line:
+                on_line('{"event": "run_started", "runId": "r1",'
+                        ' "directory": "%s"}' % run_dir)
+            result = tui_runner.LaunchResult()
+            result.run_id = "r1"
+            result.directory = run_dir
+            result.exit_code = 0
+            result.output_tail = ""
+            return result
+
+        return patch.multiple(
+            tui_app.flows_mod, build_new_run=patch.DEFAULT,
+            service_gate=patch.DEFAULT), target, fake_launch
+
+    def test_enter_in_the_composer_starts_a_run(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp) / "run-r1"
+                run_dir.mkdir()
+                target = Path(tmp) / "c.json"
+
+                def fake_launch(config_path, on_line=None):
+                    if on_line:
+                        on_line('{"event": "run_started", "runId": "r1",'
+                                ' "directory": "%s"}' % run_dir)
+                    result = tui_runner.LaunchResult()
+                    result.run_id = "r1"
+                    result.directory = run_dir
+                    result.exit_code = 0
+                    result.output_tail = ""
+                    return result
+
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 32)) as pilot:
+                    await pilot.pause()
+                    with patch.object(tui_app.flows_mod, "build_new_run",
+                                      return_value=({"task": "x"}, [])), \
+                         patch.object(tui_app.flows_mod, "service_gate",
+                                      return_value=[]), \
+                         patch.object(tui_app.cfg, "write_run_config",
+                                      return_value=target), \
+                         patch.object(tui_app.runner_mod, "launch",
+                                      side_effect=fake_launch):
+                        composer = app.query_one("#composer", tui_app.Composer)
+                        composer.text = "Rotate the camera"
+                        composer.focus()
+                        await pilot.pause()
+                        await pilot.press("enter")
+                        for _ in range(200):
+                            await pilot.pause()
+                            if app._launcher_result.get("settled"):
+                                break
+                        for _ in range(200):
+                            await pilot.pause()
+                            if app._busy_count == 0:
+                                break
+                    self.assertEqual(app.live_run_id, "r1")
+                    self.assertEqual(app._busy_count, 0)
+                    # The composer is empty again - the task is in the run.
+                    self.assertEqual(app.query_one("#composer").text, "")
+        asyncio.run(_run())
+
+    def test_a_launch_failure_settles_and_says_why(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "c.json"
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 32)) as pilot:
+                    await pilot.pause()
+                    with patch.object(tui_app.flows_mod, "build_new_run",
+                                      return_value=({"task": "x"}, [])), \
+                         patch.object(tui_app.flows_mod, "service_gate",
+                                      return_value=[]), \
+                         patch.object(tui_app.cfg, "write_run_config",
+                                      return_value=target), \
+                         patch.object(tui_app.runner_mod, "launch",
+                                      side_effect=RuntimeError("boom")):
+                        app.run_worker(lambda: app._start_run_worker("custom", "x"),
+                                       thread=True)
+                        for _ in range(200):
+                            await pilot.pause()
+                            if app._busy_count == 0 and app._launcher_result.get("settled"):
+                                break
+                    self.assertEqual(app._busy_count, 0)
+                    self.assertFalse(app._start_locked)
+                    self.assertIn("boom", _conversation_text(app))
+        asyncio.run(_run())
+
+    def test_a_second_task_does_not_start_a_second_run(self):
+        import asyncio
+        import threading
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            gate = threading.Event()
+            started = []
+
+            def _slow_gate(settings, env_mod, services_mod):
+                started.append("gate")
+                gate.wait(2.0)
+                return []
+
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with patch.object(tui_app.flows_mod, "build_new_run",
+                                  return_value=({"task": "x"}, [])), \
+                     patch.object(tui_app.flows_mod, "service_gate", side_effect=_slow_gate), \
+                     patch.object(tui_app.cfg, "write_run_config",
+                                  return_value=Path("c.json")), \
+                     patch.object(tui_app.runner_mod, "launch",
+                                  return_value=tui_runner.LaunchResult()):
+                    composer = app.query_one("#composer", tui_app.Composer)
+                    composer.text = "first task"
+                    app.action_submit_task()
+                    await pilot.pause()
+                    composer.text = "second task"
+                    app.action_submit_task()
+                    await pilot.pause()
+                    # The gate is still running: the second task was refused.
+                    self.assertEqual(len(started), 1)
+                    self.assertTrue(app._start_locked)
+                    gate.set()
+                    for _ in range(200):
+                        await pilot.pause()
+                        if not app._start_locked:
+                            break
+                    self.assertFalse(app._start_locked)
+        asyncio.run(_run())
+
+    def test_copying_a_selection_never_crashes(self):
+        """A selection past the last line must not break the copy.
+
+        While the answer grows, a block can be one layout behind its content;
+        Textual's own extraction then reads past the last line.
+        """
+        import asyncio
+        from textual.geometry import Offset
+        from textual.selection import Selection
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([
+                    {"kind": "thinking_start"},
+                    {"kind": "reasoning_delta",
+                     "delta": "I'll start by inspecting the current scene."},
+                ])
+                for _ in range(3):
+                    await pilot.pause()
+                widget = list(app.query(tui_app.ThinkingBlock))[0]
+                # The selection points one line past the content.
+                selection = Selection(start=Offset(2, 1), end=Offset(24, 1))
+                selected = widget.get_selection(selection)
+                self.assertIsNotNone(selected)
+                self.assertIn("Thinking", selected[0])
+                # The screen copy action works as well.
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                self.assertTrue(app.is_running)
+        asyncio.run(_run())
+
+    def test_esc_asks_the_agent_to_stop(self):
+        import asyncio
 
         async def _run():
             app = tui_app.VolumeAgentApp()
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
-                tabs = app.query_one("#workspaces", TabbedContent)
-                self.assertEqual(tabs.active, "tab-dashboard")
-                await pilot.click("#btn-goto-newrun")
-                await pilot.pause()
-                await pilot.pause()
-                self.assertEqual(tabs.active, "tab-newrun")
-                tabs.active = "tab-dashboard"
-                await pilot.pause()
-                await pilot.click("#btn-goto-live")
-                await pilot.pause()
-                await pilot.pause()
-                self.assertEqual(tabs.active, "tab-live")
+                app.live_run_id = "run-demo"
+                with patch.object(tui_app.runner_mod, "request_stop") as stop:
+                    await pilot.press("escape")
+                    await pilot.pause()
+                    # A second Esc does not repeat the request or the line.
+                    await pilot.press("escape")
+                    await pilot.pause()
+                self.assertEqual(stop.call_count, 1)
+                self.assertEqual(stop.call_args.args[0], "run-demo")
+                self.assertEqual(_conversation_text(app).count("Stop requested"), 1)
         asyncio.run(_run())
 
-    def test_settings_save_roundtrip(self):
+    def test_esc_stops_the_agent_with_the_composer_focused(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app.live_run_id = "run-demo"
+                app.query_one("#composer", tui_app.Composer).focus()
+                await pilot.pause()
+                with patch.object(tui_app.runner_mod, "request_stop") as stop:
+                    await pilot.press("escape")
+                    await pilot.pause()
+                self.assertTrue(stop.called, "Esc must stop the agent")
+        asyncio.run(_run())
+
+    def test_the_send_button_becomes_a_red_stop_while_the_agent_works(self):
         import asyncio
         import tempfile
-        from textual.widgets import TabbedContent
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                (run_dir / "run.json").write_text(json.dumps({"status": "running"}))
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 32)) as pilot:
+                    await pilot.pause()
+                    button = app.query_one("#btn-send", tui_app.Button)
+                    self.assertEqual(str(button.label), "Send")
+                    app.start_live(run_dir, "run-demo")
+                    await pilot.pause()
+                    # The agent works: the button stops it instead of sending.
+                    self.assertEqual(str(button.label), "Stop")
+                    self.assertEqual(button.variant, "error")
+                    with patch.object(tui_app.runner_mod, "request_stop") as stop:
+                        button.focus()
+                        await pilot.pause()
+                        await pilot.press("enter")
+                        await pilot.pause()
+                    self.assertTrue(stop.called, "the Stop button must stop the agent")
+                    # And the line says that the agent is stopping.
+                    self.assertIn("Stopping", str(button.label))
+        asyncio.run(_run())
+
+    def test_the_status_line_says_that_the_agent_is_stopping(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                (run_dir / "run.json").write_text(json.dumps({"status": "running"}))
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 32)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    await pilot.pause()
+                    with patch.object(tui_app.runner_mod, "request_stop"):
+                        await pilot.press("escape")
+                        await pilot.pause()
+                    status = str(app.query_one("#status-bar").render())
+                    self.assertIn("stopping", status)
+                    # The run ended as interrupted: the line says so.
+                    (run_dir / "run.json").write_text(json.dumps(
+                        {"status": "failed", "interrupted": True}))
+                    app._poll_live()
+                    await pilot.pause()
+                    status = str(app.query_one("#status-bar").render())
+                    self.assertIn("stopped", status)
+                    self.assertIn("Run stopped", _conversation_text(app))
+        asyncio.run(_run())
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
+class Dialogs(unittest.TestCase):
+    """The pages that were deleted are now dialogs behind the palette."""
+
+    def test_the_settings_dialog_saves_the_form(self):
+        import asyncio
+        import tempfile
 
         async def _run():
             with tempfile.TemporaryDirectory() as tmp:
                 target = Path(tmp) / "settings.json"
                 with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
                     app = tui_app.VolumeAgentApp()
-                    async with app.run_test(size=(100, 30)) as pilot:
+                    async with app.run_test(size=(100, 32)) as pilot:
                         await pilot.pause()
-                        app.query_one("#workspaces", TabbedContent).active = "tab-settings"
+                        app._open_settings()
                         await pilot.pause()
-                        app.query_one("#set-model", tui_app.Input).value = "probe-model"
-                        from textual.widgets import Button as _Button
-                        app.query_one("#btn-settings-save", _Button).focus()
+                        self.assertIsInstance(app.screen, tui_app.SettingsScreen)
+                        app.screen.query_one("#set-model", tui_app.Input).value = "probe-model"
+                        app.screen.query_one("#btn-settings-save", tui_app.Button).focus()
                         await pilot.pause()
                         await pilot.press("enter")
                         await pilot.pause()
                         self.assertEqual(tui_app.cfg.load_settings()["model"], "probe-model")
         asyncio.run(_run())
 
+    def test_reset_to_defaults_fills_the_form_and_writes_nothing(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "settings.json"
+                with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
+                    app = tui_app.VolumeAgentApp()
+                    async with app.run_test(size=(100, 32)) as pilot:
+                        await pilot.pause()
+                        app._open_settings()
+                        await pilot.pause()
+                        app.screen.query_one("#set-model", tui_app.Input).value = "changed-model"
+                        app.screen._reset()
+                        await pilot.pause()
+                        # The form is filled with the defaults ...
+                        self.assertEqual(app.screen.query_one("#set-model", tui_app.Input).value,
+                                         str(tui_app.cfg.DEFAULTS["model"]))
+                        self.assertEqual(app.screen.query_one("#set-budget", tui_app.Input).value,
+                                         str(tui_app.cfg.DEFAULTS["renderBudget"]))
+                        # ... and nothing was written (the button says so).
+                        self.assertFalse(target.exists())
+        asyncio.run(_run())
+
+    def test_the_runs_dialog_opens_a_run(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                (run_dir / "config.json").write_text(json.dumps({"task": "the old task"}))
+                runs = [{"runId": "run-old", "status": "Finished", "model": "m",
+                         "frames": 1, "task": "the old task", "directory": str(run_dir)}]
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(100, 32)) as pilot:
+                    await pilot.pause()
+                    with patch.object(app, "discover_runs", return_value=runs):
+                        app._open_runs()
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, tui_app.RunsScreen)
+                    app.screen.query_one("#runs-modal-table", tui_app.DataTable).focus()
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertEqual(app.live_run_id, "run-old")
+                    self.assertIn("the old task", _conversation_text(app))
+        asyncio.run(_run())
+
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
-class TextualBusy(unittest.TestCase):
+class BusyFeedback(unittest.TestCase):
     """Every waiting operation shows feedback and always settles."""
 
     def test_guarded_worker_shows_busy_and_resets(self):
@@ -421,10 +1026,8 @@ class TextualBusy(unittest.TestCase):
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 gate = threading.Event()
-                app._run_guarded("Probe", gate.wait,
-                                 button=app.query_one("#btn-refresh"))
+                app._run_guarded("Probe", gate.wait)
                 await pilot.pause()
-                self.assertTrue(app.query_one("#btn-refresh").loading)
                 self.assertGreater(app._busy_count, 0)
                 spinner = app.query_one("#busy-spinner")
                 self.assertIn("busy", spinner.classes)
@@ -434,7 +1037,6 @@ class TextualBusy(unittest.TestCase):
                     if app._busy_count == 0:
                         break
                 self.assertEqual(app._busy_count, 0)
-                self.assertFalse(app.query_one("#btn-refresh").loading)
                 self.assertNotIn("busy", app.query_one("#busy-spinner").classes)
         asyncio.run(_run())
 
@@ -457,173 +1059,13 @@ class TextualBusy(unittest.TestCase):
                 self.assertEqual(app._busy_count, 0)
         asyncio.run(_run())
 
-    def test_start_launch_failure_settles(self):
+    def test_copy_json_log_copies_the_whole_run(self):
         import asyncio
+        import tempfile
 
         async def _run():
             app = tui_app.VolumeAgentApp()
             async with app.run_test(size=(100, 32)) as pilot:
-                await pilot.pause()
-                with tempfile.TemporaryDirectory() as tmp:
-                    target = Path(tmp) / "c.json"
-                    with patch.object(tui_app.flows_mod, "build_new_run",
-                                       return_value=({}, [])), \
-                         patch.object(tui_app.flows_mod, "service_gate",
-                                       return_value=[]), \
-                         patch.object(tui_app.cfg, "write_run_config",
-                                       return_value=target), \
-                         patch.object(tui_app.runner_mod, "launch",
-                                       side_effect=RuntimeError("boom")):
-                        app.run_worker(app._start_run, thread=True)
-                        for _ in range(100):
-                            await pilot.pause()
-                            if app._busy_count == 0 and app._launcher_result.get("settled"):
-                                break
-                self.assertEqual(app._busy_count, 0)
-                self.assertFalse(app.query_one("#btn-start-run").loading)
-                preflight = app.query_one("#newrun-preflight")
-                self.assertIn("boom", str(preflight.render()))
-        asyncio.run(_run())
-
-    def test_start_success_enters_live_and_frees_button(self):
-        import asyncio
-        from textual.widgets import TabbedContent
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(100, 32)) as pilot:
-                await pilot.pause()
-                with tempfile.TemporaryDirectory() as tmp:
-                    run_dir = Path(tmp) / "run-r1"
-                    run_dir.mkdir()
-                    target = Path(tmp) / "c.json"
-
-                    def fake_launch(config_path, on_line=None):
-                        if on_line:
-                            on_line('{"event": "run_started", "runId": "r1",'
-                                    ' "directory": "%s"}' % run_dir)
-                        result = tui_runner.LaunchResult()
-                        result.run_id = "r1"
-                        result.directory = run_dir
-                        result.exit_code = 0
-                        result.output_tail = ""
-                        return result
-
-                    with patch.object(tui_app.flows_mod, "build_new_run",
-                                       return_value=({"task": "x"}, [])), \
-                         patch.object(tui_app.flows_mod, "service_gate",
-                                       return_value=[]), \
-                         patch.object(tui_app.cfg, "write_run_config",
-                                       return_value=target), \
-                         patch.object(tui_app.runner_mod, "launch",
-                                       side_effect=fake_launch):
-                        app.run_worker(app._start_run, thread=True)
-                        for _ in range(200):
-                            await pilot.pause()
-                            if (app.query_one("#workspaces", TabbedContent).active == "tab-live"
-                                    and app._launcher_result.get("settled")):
-                                break
-                        # The mount-time dashboard load may still hold the busy
-                        # spinner (the service probes are slow where the
-                        # loopback packets are dropped instead of refused).
-                        for _ in range(200):
-                            await pilot.pause()
-                            if app._busy_count == 0:
-                                break
-                self.assertEqual(
-                    app.query_one("#workspaces", TabbedContent).active, "tab-live")
-                self.assertEqual(app._busy_count, 0)
-                self.assertFalse(app.query_one("#btn-start-run").loading)
-        asyncio.run(_run())
-
-    def test_live_table_keeps_scroll_when_appending(self):
-        import asyncio
-        import tempfile
-        from textual.widgets import TabbedContent
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                app.query_one("#workspaces", TabbedContent).active = "tab-live"
-                await pilot.pause()
-                with tempfile.TemporaryDirectory() as tmp:
-                    app.start_live(Path(tmp), "run-demo")
-                    app.live_events = [
-                        {"cat": "INFER", "title": "INFER call #%d" % i, "detail": ""}
-                        for i in range(40)
-                    ]
-                    app._render_live()
-                    await pilot.pause()
-                    table = app.query_one("#events-table", tui_app.DataTable)
-                    self.assertEqual(table.row_count, 40)
-                    table.scroll_to(y=6, animate=False)
-                    await pilot.pause()
-                    before = table.scroll_offset.y
-                    self.assertGreater(before, 0)
-                    # A new event arrives (the normal poll path).
-                    app.live_events.append({"cat": "TOOL", "title": "TOOL render_scene", "detail": ""})
-                    app._render_live()
-                    await pilot.pause()
-                    self.assertEqual(table.row_count, 41)
-                    # Reading the history: the view is not yanked to the tail.
-                    self.assertEqual(table.scroll_offset.y, before)
-        asyncio.run(_run())
-
-    def test_live_follows_only_while_at_the_bottom(self):
-        import asyncio
-        import tempfile
-        from textual.widgets import TabbedContent
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                app.query_one("#workspaces", TabbedContent).active = "tab-live"
-                await pilot.pause()
-                with tempfile.TemporaryDirectory() as tmp:
-                    app.start_live(Path(tmp), "run-demo")
-                    app.live_events = [
-                        {"cat": "INFER", "title": "row %d" % i, "detail": ""} for i in range(40)
-                    ]
-                    app._render_live()
-                    await pilot.pause()
-                    table = app.query_one("#events-table", tui_app.DataTable)
-                    # The first render ends at the newest event.
-                    app.live_events.append({"cat": "TOOL", "title": "new", "detail": ""})
-                    app._render_live()
-                    await pilot.pause()
-                    self.assertEqual(table.row_count, 41)
-                    self.assertTrue(app._at_bottom(table))
-                    # Scrolling up to read the history stops the follow.
-                    table.scroll_to(y=4, animate=False)
-                    await pilot.pause()
-                    app.live_events.append({"cat": "TOOL", "title": "newer", "detail": ""})
-                    app._render_live()
-                    await pilot.pause()
-                    self.assertEqual(table.scroll_offset.y, 4)
-                    self.assertFalse(app._at_bottom(table))
-                    # Scrolling back to the tail resumes the follow.
-                    app._jump_to_latest()
-                    await pilot.pause()
-                    self.assertTrue(app._at_bottom(table))
-                    app.live_events.append({"cat": "TOOL", "title": "newest", "detail": ""})
-                    app._render_live()
-                    await pilot.pause()
-                    self.assertEqual(table.row_count, 43)
-                    self.assertTrue(app._at_bottom(table))
-        asyncio.run(_run())
-
-    def test_copy_json_log_button_copies_the_whole_run(self):
-        import asyncio
-        import tempfile
-        from textual.widgets import TabbedContent
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                app.query_one("#workspaces", TabbedContent).active = "tab-live"
                 await pilot.pause()
                 with tempfile.TemporaryDirectory() as tmp:
                     run_dir = Path(tmp)
@@ -637,9 +1079,7 @@ class TextualBusy(unittest.TestCase):
                         return "Copied %d characters to the clipboard." % len(text)
 
                     with patch.object(tui_app.evidence_mod, "copy_to_clipboard", _fake_copy):
-                        app.query_one("#btn-live-copy", tui_app.Button).focus()
-                        await pilot.pause()
-                        await pilot.press("enter")
+                        app._copy_run_json_log()
                         for _ in range(200):
                             await pilot.pause()
                             if "text" in copied and app._busy_count == 0:
@@ -651,223 +1091,6 @@ class TextualBusy(unittest.TestCase):
                     self.assertIn("run.json", document["files"])
                     self.assertEqual(app._busy_count, 0)
         asyncio.run(_run())
-
-    def test_live_head_shows_spinner_when_running(self):
-        import asyncio
-        import tempfile
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(80, 24)) as pilot:
-                await pilot.pause()
-                with tempfile.TemporaryDirectory() as tmp:
-                    app.start_live(Path(tmp), "run-demo")
-                    app._render_live()
-                    await pilot.pause()
-                    head = str(app.query_one("#live-head").render())
-                    self.assertIn("[live", head)
-                    app.live_frozen = True
-                    app._render_live()
-                    await pilot.pause()
-                    frozen = str(app.query_one("#live-head").render())
-                    self.assertIn("[FROZEN]", frozen)
-                    # Letter-led [...] is markup to Static: must render literally.
-                    app._set_text("runs-detail", "Custom: rotate [fast] now [25,-35,10]")
-                    await pilot.pause()
-                    detail = str(app.query_one("#runs-detail").render())
-                    self.assertIn("[fast]", detail)
-                    self.assertIn("[25,-35,10]", detail)
-        asyncio.run(_run())
-
-
-@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
-class TextualAppSmoke(unittest.TestCase):
-    def test_app_mounts_all_workspaces(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                self.assertEqual(len(app.query("TabPane")), 7)
-                for widget_id in ("#status-bar", "#runs-table", "#events-table",
-                                  "#volumes-table", "#services-table", "#newrun-prompt",
-                                  "#live-image", "#slice-preview"):
-                    self.assertTrue(app.query(widget_id), widget_id)
-                self.assertGreaterEqual(len(app.query("Button")), 20)
-        asyncio.run(_run())
-
-    def test_live_filter_and_search(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                app.live_events = [
-                    {"cat": "TOOL", "title": "TOOL render_scene Started", "detail": "rotationXYZ"},
-                    {"cat": "IMAGE", "title": "IMAGE Frame 1 Native PNG saved", "detail": "rev=1"},
-                ]
-                app.live_filter = "TOOL"
-                self.assertEqual(len(app._filtered_events()), 1)
-                app.live_filter = "ALL"
-                app.live_search = "rev=1"
-                self.assertEqual(len(app._filtered_events()), 1)
-                app.live_search = "nope"
-                self.assertEqual(app._filtered_events(), [])
-        asyncio.run(_run())
-
-    def test_live_header_shows_the_task_and_the_observation_budget(self):
-        import asyncio
-        import tempfile
-
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                run_dir = root / "run"
-                run_dir.mkdir()
-                (run_dir / "config.json").write_text(json.dumps(
-                    {"task": "Show me the present in the box", "renderBudget": 4}))
-                app = tui_app.VolumeAgentApp()
-                async with app.run_test(size=(120, 30)) as pilot:
-                    await pilot.pause()
-                    app.start_live(run_dir, "run-demo")
-                    app.live_tail.meta = {"goal": "Show me the present in the box",
-                                          "model": "qwen3.6:35b", "budget": 4, "used": 2}
-                    app.live_events = [
-                        {"cat": "TOOL", "title": "TOOL  render_scene  camera rotation 30,0,0",
-                         "detail": "changed: camera rotation 30,0,0"},
-                        {"cat": "IMAGE", "title": "IMAGE  new frame 1  148491 lit px  512x512 saved",
-                         "detail": "lit pixels: 148491 of 262144 (56.6%)"},
-                    ]
-                    app._render_live()
-                    await pilot.pause()
-                    head = str(app.query_one("#live-head").render())
-                    # The task and the budget are on screen, not only in the log.
-                    self.assertIn("Show me the present in the box", head)
-                    self.assertIn("2 of 4 observations used", head)
-                    # The concrete title of every event reaches the table.
-                    from textual.widgets import DataTable
-                    table = app.query_one("#events-table", DataTable)
-                    cells = [str(cell) for row in range(table.row_count)
-                             for cell in table.get_row_at(row)]
-                    self.assertTrue(any("camera rotation 30,0,0" in cell for cell in cells))
-                    self.assertTrue(any("148491 lit px" in cell for cell in cells))
-        asyncio.run(_run())
-
-    def test_start_live_sets_state(self):
-        import asyncio
-
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                run_dir = Path(tmp)
-                (run_dir / "run.json").write_text(json.dumps({"status": "running"}))
-                app = tui_app.VolumeAgentApp()
-                async with app.run_test() as pilot:
-                    await pilot.pause()
-                    app.start_live(run_dir, "run-demo")
-                    self.assertEqual(app.live_run_id, "run-demo")
-                    self.assertFalse(app.live_frozen)
-        asyncio.run(_run())
-
-
-@unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
-class LiveFrameAndLabels(unittest.TestCase):
-    """The Live view must show the whole frame and say what every button does."""
-
-    def test_preview_shows_the_whole_frame(self):
-        import asyncio
-        from PIL import Image
-        from textual.widgets import TabbedContent
-
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                frame_dir = root / "session" / "frame-1"
-                frame_dir.mkdir(parents=True)
-                png = frame_dir / "image.png"
-                Image.new("RGB", (256, 256), (200, 200, 200)).save(png)
-                run_dir = root / "run"
-                run_dir.mkdir()
-                app = tui_app.VolumeAgentApp()
-                async with app.run_test(size=(120, 40)) as pilot:
-                    await pilot.pause()
-                    app.query_one("#workspaces", TabbedContent).active = "tab-live"
-                    await pilot.pause()
-                    app.start_live(run_dir, "run-demo")
-                    app.live_events = [{"cat": "IMAGE", "title": "IMAGE Frame 1",
-                                        "detail": "rev=1", "image": str(png), "revision": 1}]
-                    app._render_live()
-                    await pilot.pause()
-                    await pilot.pause()
-                    widget = app.query_one("#live-image")
-                    lines = widget.content.plain.splitlines()
-                    # Every row of the picture is on screen (nothing clipped) ...
-                    self.assertEqual(widget.size.height, len(lines))
-                    # ... and no row is folded in half (nothing cropped).
-                    self.assertEqual(widget.size.width, len(lines[0]))
-                    # The PNG path is on screen, so the file can be found.
-                    shown = str(app.query_one("#live-image-path").render())
-                    self.assertIn(str(png), shown)
-        asyncio.run(_run())
-
-    def test_open_folder_targets_the_folder_that_holds_the_png(self):
-        import asyncio
-
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                frame_dir = root / "session" / "frame-1"
-                frame_dir.mkdir(parents=True)
-                png = frame_dir / "image.png"
-                png.write_bytes(b"not-a-real-png")
-                run_dir = root / "run"
-                run_dir.mkdir()
-                app = tui_app.VolumeAgentApp()
-                async with app.run_test() as pilot:
-                    await pilot.pause()
-                    app.start_live(run_dir, "run-demo")
-                    app.live_image_path = str(png)
-                    # The frames live beside the run, not inside the run folder.
-                    self.assertEqual(app._live_frames_folder(), root / "session")
-                    self.assertNotEqual(app._live_frames_folder(), run_dir)
-        asyncio.run(_run())
-
-    def test_every_live_button_says_what_it_does(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                expected = {
-                    "btn-live-stop": "Stop run",
-                    "btn-live-verify": "Verify evidence",
-                    "btn-live-open-png": "View PNG",
-                    "btn-live-open": "Open folder",
-                    "btn-live-detach": "Stop watching",
-                    "btn-live-copy": "Copy JSON log",
-                }
-                for widget_id, label in expected.items():
-                    button = app.query_one("#" + widget_id)
-                    self.assertEqual(str(button.label), label, widget_id)
-                    self.assertTrue(str(button.tooltip), widget_id)
-                # The explanations live in the tooltips (and F1), not twice.
-                self.assertFalse(app.query("#live-legend"))
-        asyncio.run(_run())
-
-    def test_command_palette_actions_have_stable_ids(self):
-        actions = [action for _label, action, _tooltip in tui_app.CommandScreen.COMMANDS]
-        for action in ("live-verify", "live-detach", "live-open-png", "live-open"):
-            self.assertIn(action, actions)
-        for action in actions:
-            self.assertTrue(action.startswith("go-") or action.startswith("live-")
-                            or action.startswith("runs-") or action.startswith("services-")
-                            or action in ("help", "quit"))
-
-    def test_every_command_palette_button_carries_a_tooltip(self):
-        for _label, _action, tooltip in tui_app.CommandScreen.COMMANDS:
-            self.assertTrue(str(tooltip).strip())
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
@@ -891,19 +1114,45 @@ class CtrlPOpensTheTuiPalette(unittest.TestCase):
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui_app.CommandScreen)
                 # The palette runs its action when a command is picked.
-                app.screen.query_one("#cmd-go-settings", tui_app.Button).focus()
+                app.screen.query_one("#cmd-settings", tui_app.Button).focus()
                 await pilot.pause()
                 await pilot.press("enter")
                 await pilot.pause()
-                from textual.widgets import TabbedContent
-                self.assertEqual(
-                    app.query_one("#workspaces", TabbedContent).active, "tab-settings")
+                self.assertIsInstance(app.screen, tui_app.SettingsScreen)
+        asyncio.run(_run())
+
+    def test_every_command_palette_button_carries_a_tooltip(self):
+        for _label, _action, tooltip in tui_app.CommandScreen.COMMANDS:
+            self.assertTrue(str(tooltip).strip())
+
+    def test_the_palette_knows_the_run_commands(self):
+        actions = [action for _label, action, _tooltip in tui_app.CommandScreen.COMMANDS]
+        for action in ("run-task-a", "run-task-b", "live-stop", "live-verify",
+                       "live-copy", "live-open-png", "live-open", "runs-open",
+                       "settings", "theme", "help", "hard-stop", "quit"):
+            self.assertIn(action, actions)
+
+    def test_the_hard_stop_kills_everything_and_leaves(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            with patch.object(tui_app.services_mod, "shutdown_all") as shutdown:
+                async with app.run_test(size=(100, 32)) as pilot:
+                    await pilot.pause()
+                    app._command_chosen("cmd-hard-stop")
+                    await pilot.pause()
+                    await asyncio.sleep(0.2)
+                    await pilot.pause()
+            self.assertTrue(shutdown.called, "the hard stop must stop everything")
+            self.assertTrue(shutdown.call_args.kwargs.get("hard"))
+            self.assertFalse(app.is_running)
         asyncio.run(_run())
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
-class ReviewFixes(unittest.TestCase):
-    """Regressions for the code-review findings of this branch."""
+class ServiceLifecycle(unittest.TestCase):
+    """The services the TUI owns are still started and stopped correctly."""
 
     def test_entry_starts_the_ownership_heartbeat(self):
         with patch.object(tui_app.services_mod, "ensure_services",
@@ -916,198 +1165,7 @@ class ReviewFixes(unittest.TestCase):
         # adopts (and stops) the services this session still owns.
         self.assertTrue(heartbeat.called)
 
-    def test_reset_to_defaults_fills_the_form_and_writes_nothing(self):
-        import asyncio
-
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "settings.json"
-                with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
-                    app = tui_app.VolumeAgentApp()
-                    async with app.run_test(size=(100, 30)) as pilot:
-                        await pilot.pause()
-                        app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-settings"
-                        await pilot.pause()
-                        app.query_one("#set-model", tui_app.Input).value = "changed-model"
-                        app._reset_settings()
-                        await pilot.pause()
-                        # The form is filled with the defaults ...
-                        self.assertEqual(app.query_one("#set-model", tui_app.Input).value,
-                                         str(tui_app.cfg.DEFAULTS["model"]))
-                        self.assertEqual(app.query_one("#set-budget", tui_app.Input).value,
-                                         str(tui_app.cfg.DEFAULTS["renderBudget"]))
-                        # ... and nothing was written (label, tooltip and F1 say so).
-                        self.assertFalse(target.exists())
-        asyncio.run(_run())
-
-    def test_second_click_starts_only_one_run(self):
-        import asyncio
-        import threading
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            gate = threading.Event()
-            started = []
-
-            def _slow_gate(settings, env_mod, services_mod):
-                started.append("gate")
-                gate.wait(2.0)
-                return []
-
-            async with app.run_test(size=(100, 32)) as pilot:
-                await pilot.pause()
-                app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-newrun"
-                await pilot.pause()
-                with patch.object(tui_app.flows_mod, "build_new_run",
-                                  return_value=({"task": "x"}, [])), \
-                     patch.object(tui_app.flows_mod, "service_gate", side_effect=_slow_gate), \
-                     patch.object(tui_app.cfg, "write_run_config",
-                                  return_value=Path("c.json")), \
-                     patch.object(tui_app.runner_mod, "launch",
-                                  return_value=tui_runner.LaunchResult()):
-                    button = app.query_one("#btn-start-run", tui_app.Button)
-                    button.focus()
-                    await pilot.pause()
-                    await pilot.press("enter")
-                    await pilot.pause()
-                    await pilot.press("enter")
-                    await pilot.pause()
-                    # The gate is still running: the second click was refused.
-                    self.assertEqual(len(started), 1)
-                    self.assertTrue(app._start_locked)
-                    gate.set()
-                    for _ in range(100):
-                        await pilot.pause()
-                        if not app._start_locked:
-                            break
-                    self.assertFalse(app._start_locked)
-        asyncio.run(_run())
-
-    def test_dashboard_shows_volume_and_service_state(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(120, 40)) as pilot:
-                await pilot.pause()
-                # Let the mount-time dashboard load finish first.
-                for _ in range(20):
-                    await pilot.pause()
-                with patch.object(tui_app.services_mod, "service_status",
-                                  return_value={"inference": "up", "renderer": "down",
-                                                "owned": "TUI-owned (ollama)"}):
-                    app.query_one("#status-bar", tui_app.Static).update("")
-                    app.run_worker(app._load_dashboard, thread=True)
-                    for _ in range(100):
-                        await pilot.pause()
-                        text = str(app.query_one("#status-bar").render())
-                        if "Renderer down" in text:
-                            break
-                text = str(app.query_one("#status-bar").render())
-                self.assertIn("Mode", text)
-                self.assertIn("Volume", text)
-                self.assertIn("Inference up", text)
-                self.assertIn("Renderer down", text)
-                self.assertIn("TUI-owned", text)
-        asyncio.run(_run())
-
-    def test_refresh_list_keeps_the_active_filter(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            runs = [{"runId": "alpha", "status": "Finished", "model": "m",
-                     "frames": 1, "task": "t"},
-                    {"runId": "beta", "status": "Finished", "model": "m",
-                     "frames": 1, "task": "t"}]
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-runs"
-                await pilot.pause()
-                app.query_one("#runs-filter", tui_app.Input).value = "alpha"
-                with patch.object(app, "discover_runs", return_value=runs):
-                    app.run_worker(app._refresh_runs, thread=True)
-                    for _ in range(100):
-                        await pilot.pause()
-                        if app.query_one("#runs-table", tui_app.DataTable).row_count == 1:
-                            break
-                table = app.query_one("#runs-table", tui_app.DataTable)
-                # The table shows the filtered runs, and the row the cursor is
-                # on is the run the actions would act on.
-                self.assertEqual(table.row_count, 1)
-                self.assertEqual(app._selected_run()["runId"], "alpha")
-        asyncio.run(_run())
-
-    def test_settings_expose_the_think_control(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.query_one("#workspaces", tui_app.TabbedContent).active = "tab-settings"
-                await pilot.pause()
-                select = app.query_one("#set-think", tui_app.Select)
-                self.assertEqual(str(select.value), "false")
-        asyncio.run(_run())
-
-    def test_reset_to_defaults_keeps_the_settings_in_use(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            app.settings["model"] = "model-in-use"
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app._reset_settings()
-                await pilot.pause()
-                # The form shows the defaults, the run keeps the settings it
-                # has until "Save settings" writes the new ones.
-                self.assertEqual(app.query_one("#set-model", tui_app.Input).value,
-                                 str(tui_app.cfg.DEFAULTS["model"]))
-                self.assertEqual(app.settings["model"], "model-in-use")
-        asyncio.run(_run())
-
-    def test_palette_refresh_commands_refresh_their_own_tab(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                calls = []
-                with patch.object(app, "_refresh_runs", side_effect=lambda: calls.append("runs")), \
-                     patch.object(app, "_refresh_services",
-                                  side_effect=lambda: calls.append("services")):
-                    app._command_chosen("cmd-runs-refresh")
-                    app._command_chosen("cmd-services-refresh")
-                    for _ in range(100):
-                        await pilot.pause()
-                        if len(calls) >= 2:
-                            break
-                self.assertIn("runs", calls)
-                self.assertIn("services", calls)
-        asyncio.run(_run())
-
-    def test_stop_all_services_stops_the_agent_tree(self):
-        import asyncio
-
-        async def _run():
-            app = tui_app.VolumeAgentApp()
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                with patch.object(tui_app.services_mod, "shutdown_all",
-                                  return_value={"stopped": [], "kept": [], "failed": [],
-                                                "agent": [], "requested": [], "remaining": [],
-                                                "inference": {}}) as shutdown:
-                    app._stop_everything_owned()
-                # The button promises the agent tree, the local Ollama and the
-                # owned services — and it must not freeze the quit path.
-                self.assertTrue(shutdown.called)
-                self.assertFalse(shutdown.call_args.kwargs.get("cache", True))
-        asyncio.run(_run())
-
-    def test_shutdown_cache_is_not_poisoned_by_the_services_tab(self):
+    def test_shutdown_cache_is_not_poisoned_by_the_dialogs(self):
         import services as tui_services
         with patch.object(tui_services, "_SHUTDOWN_REPORT", None), \
              patch.object(tui_services, "_block_interrupts"), \
@@ -1128,7 +1186,7 @@ class ReviewFixes(unittest.TestCase):
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
 class ModalEscape(unittest.TestCase):
-    """Esc must close every modal the TUI opens (help, palette, confirm)."""
+    """Esc must close every dialog the TUI opens."""
 
     def test_escape_closes_the_help_screen(self):
         import asyncio
@@ -1183,7 +1241,8 @@ class ModalEscape(unittest.TestCase):
         asyncio.run(_run())
 
     def test_every_modal_has_the_escape_binding(self):
-        for screen in (tui_app.HelpScreen, tui_app.CommandScreen, tui_app.ConfirmScreen):
+        for screen in (tui_app.HelpScreen, tui_app.CommandScreen, tui_app.ConfirmScreen,
+                       tui_app.RunsScreen, tui_app.SettingsScreen):
             keys = [binding.key for binding in screen.BINDINGS]
             self.assertIn("escape", keys, screen.__name__)
 
@@ -1194,7 +1253,6 @@ class QuitLeavesNothingBehind(unittest.TestCase):
 
     def test_quit_stops_everything_before_exiting(self):
         import asyncio
-        from unittest.mock import patch
 
         async def _run():
             app = tui_app.VolumeAgentApp()
@@ -1216,12 +1274,14 @@ class QuitLeavesNothingBehind(unittest.TestCase):
 
         async def _run():
             app = tui_app.VolumeAgentApp()
-            async with app.run_test() as pilot:
+            async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 app.runs = [{"runId": "run-x", "status": "Running"}]
                 app.live_run_id = "run-x"
-                app.action_quit_confirm()
+                # Ctrl+Q is the quit key.
+                await pilot.press("ctrl+q")
                 await pilot.pause()
+                self.assertIsInstance(app.screen, tui_app.ConfirmScreen)
                 text = str(app.screen.query_one("#confirm-message").render())
                 self.assertIn("run-x", text)
                 self.assertIn("Nothing is left running", text)

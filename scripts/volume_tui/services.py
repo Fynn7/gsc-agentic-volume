@@ -369,9 +369,9 @@ def _terminate_agent_trees(descendants: list[int] | None = None) -> dict:
 def terminate_local_inference(settings: dict | None = None) -> dict:
     """Hard-stop the Local Ollama server so the model is unloaded from VRAM.
 
-    Ctrl+C is a full stop: every `ollama*` image is terminated (server, model
-    runner, tray app), including an instance that predated this TUI and was
-    only "reused". H200 endpoints are remote and are never touched.
+    The hard stop is a full stop: every `ollama*` image is terminated (server,
+    model runner, tray app), including an instance that predated this TUI and
+    was only "reused". H200 endpoints are remote and are never touched.
     """
     report: dict = {"stopped": [], "failed": [], "endpoint": None, "verified": None}
     settings = settings or config_mod.load_settings()
@@ -663,7 +663,7 @@ def owned_summary() -> str:
 def service_status(settings: dict | None = None) -> dict:
     """Read-only state of the local inference and renderer endpoints.
 
-    The Dashboard shows it. It never starts, stops or changes a service, it
+    The status line shows it. It never starts, stops or changes a service, it
     never asks the model anything, and it only probes loopback addresses —
     the TUI never dials out.
     """
@@ -861,12 +861,12 @@ def shutdown_all(settings: dict | None = None, hard: bool = False,
     period is killed, including children that outlived their parent. Then the
     local Ollama and the services this TUI started are stopped.
 
-    `hard=True` (the Ctrl+C path) additionally kills every `ollama*` process,
+    `hard=True` (the hard-stop path) additionally kills every `ollama*` process,
     including one that predates this TUI. The normal quit only stops what
     this TUI started and reports anything foreign that stays alive.
 
     The result is cached: the quit path and the safety net in `main()` must
-    not stop the same process twice. `cache=False` is for the Services tab,
+    not stop the same process twice. `cache=False` is for a forced stop,
     which stops the same tree on purpose and must not freeze the report the
     later quit path reads.
     """

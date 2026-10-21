@@ -288,6 +288,15 @@ def execute(context, show_images=False, open_images=False):
     write_json(directory/'manifest.json', manifest)
     trace.start()
     try:
+        # A stop that arrives before the agent starts must not start it: the
+        # run ends here, with the same interrupted evidence as a stop in the
+        # middle of a turn. Without this the harness would run a whole turn
+        # before the first check of the stop file.
+        if stop_requested(context.run_id):
+            manifest['interrupted']=True
+            manifest['stopReason']='tui-stop-request'
+            manifest['exitCode']=130
+            raise KeyboardInterrupt('stop requested via runtime/tui-control/%s.stop' % context.run_id)
         with (directory/'harness.jsonl').open('wb') as stdout, (directory/'harness-stderr.log').open('wb') as stderr:
             process = subprocess.Popen(command, cwd=workspace, env=env, stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             manifest['pid']=process.pid
@@ -315,7 +324,8 @@ def execute(context, show_images=False, open_images=False):
                             manifest['exitCode']=process.returncode
                             break
             except KeyboardInterrupt:
-                # Cooperative TUI stop already recorded above; hard Ctrl+C lands here too.
+                # Cooperative TUI stop already recorded above; a real SIGINT
+                # (the launcher killed from outside) lands here too.
                 if not manifest.get('interrupted'):
                     manifest['interrupted']=True
                     stop_harness(process)
@@ -339,7 +349,7 @@ def execute(context, show_images=False, open_images=False):
                               timedOut=bool(manifest.get('timedOut')), sessionId=session['id'])
         if interrupted:
             context.record['interrupted']=True
-            context.record['error']='interrupted by Ctrl+C; harness and its child processes were terminated'
+            context.record['error']='interrupted; harness and its child processes were terminated'
             write_json(directory/'failure.json', {'status':'interrupted','stage':'run','time':time.time(),
                                                   'error':context.record['error'],'taskSuccess':'unverified'})
         write_json(directory/'run.json', context.record)

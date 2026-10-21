@@ -93,3 +93,23 @@ def preview_or_message(image_path: str | Path | None, width: int = 60, height: i
     if not image_path:
         return "(no frame yet)"
     return render_frame(image_path, width, height)
+
+
+def preview_fitted_or_message(image_path: str | Path | None, width: int = 60,
+                              height: int = 28):
+    """Frame preview at the picture's own size - no black padding around it.
+
+    The frame is scaled into the cell box with its aspect ratio intact; the
+    preview is then drawn at exactly that size, so the conversation shows the
+    picture and not a canvas with empty columns beside it.
+    """
+    if not image_path:
+        return "(no frame yet)"
+    try:
+        from PIL import Image
+        with Image.open(image_path) as image:
+            src_w, src_h = image.size
+    except Exception:
+        return render_frame(image_path, width, height)
+    box_w, box_h = fit_box(src_w, src_h, max(1, int(width)), max(2, int(height) * 2))
+    return render_frame(image_path, box_w, max(1, box_h // 2))

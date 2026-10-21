@@ -1,7 +1,10 @@
-# Volume Agent TUI — Textual IDE-style interface
+# Volume Agent TUI — a coding agent for one volume
 
-Control/display only over the Codex CLI. No agent loop lives here.
-Evidence is read-only except new runs, `verification.json`, and `tui-settings.json`.
+One screen, like a coding agent app (Codex CLI, OpenCode): the task at the
+top, then the model's thinking, its tool calls, the frames it rendered and its
+answer. Control/display only over the Codex CLI — no agent loop lives here.
+Evidence is read-only except new runs, `verification.json`, and
+`tui-settings.json`.
 
 ## Entry
 
@@ -18,71 +21,113 @@ Evidence is read-only except new runs, `verification.json`, and `tui-settings.js
   then runs `python -B scripts/volume_tui` inside the venv.
 - The TUI itself starts the missing **Local loopback** services on entry (see
   "Service lifecycle"); it never downloads a model and never calls one.
-- Non-interactive shells exit 2 with guidance. `q` quits and stops every
-  process the TUI owns (see "Leaving the TUI"); Ctrl+C is the hard stop and
-  also stops a local Ollama the TUI did not start.
+- Non-interactive shells exit 2 with guidance. `Ctrl+Q` quits and stops every
+  process the TUI owns (see "Leaving the TUI"); the hard stop (Ctrl+P →
+  *Hard stop…*) also stops a local Ollama the TUI did not start. `Ctrl+C`
+  copies the selected text — the terminal default, not a hard stop.
 
-## Workspaces (Ctrl+P commands, F1 help, t theme)
+## The screen (one screen, no workspaces)
 
-Every button states its purpose in its label, carries a tooltip, and is
-explained in the F1 help screen — stated once, never repeated on screen.
+```
+ ● volume-agent  qwen3.6:35b  ·  run-20261019-131431  ·  running  ·  2/4 obs
+ ▌ Set the camera rotationXYZ to [25,-35,10] degrees. …
+ ✳ Thinking  in 12278, out 96 tokens  ▸ Let me inspect the current scene …
+ ● render_scene  camera rotation 25,-35,10  ✓ 1.28s
+   changed: camera rotation 25,-35,10
+   why: Rotate the camera as the task asks.
+ ▣ frame revision 1 · 148491 lit px · 512x512
+   D:/…/runtime/<session>/frame-1/image.png
+   [the picture, inline]
+ The camera is now rotated to [25,-35,10] …
+ ✓ Run finished · picked frame revision 1 · task check: unverified
+```
 
-- **Dashboard**: mode/model/volume, Inference/Renderer status (`up` / `down` /
-  `foreign service` / `remote (not probed)` — only loopback is probed), owned
-  services, Running/Last run. Refresh status re-discovers without blocking the
-  UI.
-- **New Run**: Task preset (A/B loads audited text, Custom never inherits A/B),
-  editable prompt, volume override, model/budget/context/temperature overrides,
-  Check services & settings, Start agent run. Service DOWN blocks before any
-  config is written. A lone Model-context mismatch auto-starts a temporary
-  TUI-owned Ollama on a free loopback port (this run only; saved settings
-  untouched).
-- **Runs**: filterable table (run/status/model/frames/task), Open Live view
-  (re-enters a running run from existing events), Verify evidence, Rerun as new
-  run (pre-fills New Run), Pick as A/B + Compare A vs B (config diff).
-- **Live**: event timeline (category filter + text search), selected
-  event detail, resource bar (`telemetry.jsonl` GPU/VRAM + Ollama context), and
-  the current frame: its **absolute PNG path** plus an inline preview (Pillow
-  downsample to Rich half-block cells; Static never interprets raw ANSI
-  escapes). The preview is fitted into the panel (aspect ratio kept, black
-  padding, never cropped) and re-fitted when the window is resized, so the
-  whole frame is visible instead of a cut-off corner.
-  - Every row is written for someone who never saw this pipeline: the title
-    says what happened **and** with which numbers (`TOOL  render_scene  camera
-    rotation 30,0,0 - "Tilt camera down slightly"`, `IMAGE  new frame 1  148491
-    lit px  512x512 saved`), the header shows the task and the observation
-    budget, and the selected row shows the full detail (what changed, the
-    agent's reason, scene numbers, file path). The wording lives in
-    `event_text.py`; the categories are explained in the F1 help.
-  - The timeline **follows the newest event on its own** while it is scrolled
-    to the bottom; scrolling up to read the history stops the follow, and
-    scrolling back to the bottom resumes it (there is no Follow button).
-    A new filter/search starts at the first match and stops the follow until
-    the view is back at the tail.
-  - Stop run (cooperative `runtime/tui-control/<runId>.stop`, launcher records
-    `interrupted`/`failure.json`), Verify evidence (read-only check →
-    `verification.json`, never calls the model), View PNG (opens the previewed
-    PNG in the system image viewer), Open folder (opens the folder that holds
-    the PNGs — `runtime/<sessionId>` — **not** the run log folder, which has no
-    images), Copy JSON log (copies the whole run's JSON log to the clipboard:
-    the run's meta data, every event and every JSON log file of the run folder
-    — base64 image bytes are replaced by a size note, unreadable files are
-    listed inside the payload), Stop watching (leave Live; the run keeps going,
-    reopen it from Runs). Finish freezes the view (no more polling).
-- **Volumes**: scan of the fixed `volumes/` folder (+ current selection),
-  filter, metadata, Use this volume (persists to `tui-settings.json`), Slice
-  Inspector (x/y/z + index → inline preview for prepared volumes only;
-  never converts, never consumes budget, never touches run evidence).
-- **Services**: owned-service table (liveness re-verified), Start missing
-  services, Stop owned services, Restart owned, Stop all services (confirmed;
-  stops the agent run, the local Ollama and the owned services — the model
-  unloads from VRAM), Refresh status, owned log tails. Foreign processes are
-  never touched; releasing the owned services refuses while a run/launcher is
-  live (the forced paths — Ctrl+C and "Stop all services" — stop the agent
-  tree first).
-- **Settings**: mode/model/endpoints, contextSize, renderBudget, temperature,
-  think, timeouts, maxOutputTokens. Validated, saved to
-  `runtime/tui-settings.json`, H200 probe honest (never silent fallback).
+- The **status line** names the model, the open run, its state and how much of
+  the observation budget is already spent. It carries the spinner while a
+  worker runs.
+- The **conversation** is the whole live view: the task, the thinking, the
+  tool calls with the numbers they changed, the frames (the picture is inline,
+  fitted into the panel, never cropped) and the answer. Every line says what
+  happened — the wording lives in `transcript.py` and `event_text.py`.
+- The **Thinking** line holds the model's own words. **A click opens the
+  reasoning chain**, a second click closes it; the chain grows while the model
+  writes it.
+- The **answer is streamed**: the recorded model stream
+  (`http/http-NNN.response.bin`, the raw SSE the launcher recorded while the
+  model was still answering) is tailed, so the text appears word by word.
+- The **composer** at the bottom starts the next task: Enter sends it,
+  Shift+Enter adds a line. While the agent works the **Send button turns into
+  a red Stop** — it stops the run the same way Esc does. One run at a time:
+  a new task waits until the current run is over.
+- The **footer** lists the keys.
+
+### Keys
+
+| Key | What it does |
+| --- | --- |
+| Enter | send the composer text: it starts a new run |
+| Ctrl+Up / Ctrl+Down | scroll the conversation (the composer keeps the cursor) |
+| Esc | stop the running agent (the evidence already written stays) |
+| Ctrl+P | the commands (below) |
+| F1 | help |
+| Ctrl+T | light / dark |
+| Ctrl+Q | quit (asks first while a run is live) |
+| Ctrl+C | copy the selected text (the terminal default — not a hard stop) |
+
+The **Send button becomes a red Stop** while the agent works; it stops the
+run the same way Esc does.
+
+The conversation **follows the newest entry on its own** while it is scrolled
+to the bottom; scrolling up to read the history stops the follow, scrolling
+back to the bottom resumes it (there is no Follow button).
+
+### What "stop" really stops
+
+- Esc (or the red **Stop** button) writes the stop marker; the launcher
+  notices it within half a second and kills the **agent tree** — the harness
+  and its MCP children. The run records `interrupted` + `failure.json`, the
+  evidence stays complete.
+- A stop that arrives during the start-up phase (the first render) never
+  starts the agent at all.
+- The **local Ollama and the renderer are services**: they keep running, so
+  the model may still finish the request that was in flight. They are
+  stopped when the TUI quits (Ctrl+Q) or with the hard stop.
+- The status line says `stopping` right away and `stopped` when the run has
+  ended; the Thinking block stops spinning and the conversation says how the
+  run ended.
+
+### Commands (Ctrl+P)
+
+| Command | What it does |
+| --- | --- |
+| Run: the audited Task A / Task B | start the audited preset prompts |
+| Run: stop the agent | cooperative stop; the launcher records `interrupted` |
+| Live: verify the evidence | read-only check → `verification.json` |
+| Live: copy the JSON log | the run's meta data, every event and every JSON log file |
+| Live: view the current PNG | opens the previewed PNG in the system viewer |
+| Live: open the PNG folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
+| Runs: open another run | picks one of the runs on this machine and opens it here |
+| Settings: model, endpoints, budget | the form that writes `runtime/tui-settings.json` |
+| Theme / Help | light or dark, the help screen |
+| Hard stop: kill everything this TUI owns | agent tree, local Ollama, owned services — then leave |
+| Quit the TUI | stops what the TUI owns, then leaves (asks first while a run is live) |
+
+Every command carries a tooltip that says what it does.
+
+### What was removed
+
+The old workspaces (Dashboard, New Run, Runs, Live, Volumes, Services,
+Settings) are gone. What they did lives in the coding agent screen:
+
+- **Dashboard** → the status line.
+- **New Run** → the composer (a free task) plus the audited presets in the
+  command palette.
+- **Runs** → *Runs: open another run* (a dialog, not a page).
+- **Live** → the conversation itself.
+- **Volumes / Services** → not part of a coding agent app: the volumes are
+  chosen in `runtime/tui-settings.json` (or the audited gate volume) and the
+  services are started on entry and stopped on exit.
+- **Settings** → the settings dialog behind one command.
 
 ## Service lifecycle (auto-start on entry, auto-stop on exit)
 
@@ -98,12 +143,12 @@ explained in the F1 help screen — stated once, never repeated on screen.
 - Never auto-started: H200 tunnel/endpoint, non-loopback URLs. Never
   downloaded: models (`ollama pull` stays manual). Never touched: foreign
   processes.
-- The Dashboard shows the state read-only: `Inference up/down`,
+- The status line shows the state read-only: `Inference up/down`,
   `Renderer up/down` and `Owned TUI-owned (…) / foreign/manual`.
 
 ## Leaving the TUI leaves no process behind
 
-Every exit path (quit, Ctrl+C, crash, closed window) runs one shutdown:
+Every exit path (quit, hard stop, crash, closed window) runs one shutdown:
 
 1. **Cooperative stop**: `runtime/tui-control/<runId>.stop` is written for
    every run that has not recorded an end. The launcher polls it, records
@@ -118,23 +163,24 @@ Every exit path (quit, Ctrl+C, crash, closed window) runs one shutdown:
    left alone and reported as such.
 
 The result is cached, so the quit path and the safety net in `main()` never
-stop the same process twice. Ctrl+C additionally stops every `ollama*`
-process (the documented emergency path).
+stop the same process twice. The **hard stop** (Ctrl+P → *Hard stop…*) also
+stops every `ollama*` process, including one that predates this TUI. `Ctrl+C`
+is the terminal's copy key and does not stop anything — use Ctrl+Q, the hard
+stop, or close the window.
 
 ## Busy feedback (every waiting operation animates)
 
-- A one-row spinner under the header animates while any background worker is
-  active; the pressed button shows its own spinner and locks against
-  double clicks; worker failures surface as error toasts.
-- Covered: dashboard refresh, preflight, run start (button stays loaded until
-  Live takes over), runs refresh/verify, live verify, live copy, slice preview,
-  all service operations, H200 probe. The Live header animates while running
-  and freezes on finish; the startup service check prints elapsed time.
+- The status line carries a spinner while any background worker is active;
+  the pressed button shows its own spinner and locks against double clicks;
+  worker failures surface as error toasts.
+- Covered: preflight, run start, verify evidence, copy log, settings probe.
+  The status line animates while the model thinks; the startup service check
+  prints elapsed time.
 - Static text and table cells escape literal `[...]` (terminal markup would
   otherwise swallow tags like `[FROZEN]`); toasts render with markup off.
-- The frame preview is drawn at the panel width: a stale width would fold the
-  picture row in half, so `FramePreview` re-fits the PNG whenever its own size
-  changes (window resize, scrollbar).
+- The frame preview is drawn at the picture's own size: a stale width would
+  fold the picture row in half, so the preview is re-fitted whenever the
+  window is resized.
 
 ## Backend contracts (unchanged semantics)
 
@@ -142,18 +188,34 @@ process (the documented emergency path).
   duplicate protection (exit 3), `LATEST.txt`, `run_started` line. The TUI
   never reserves directories or writes locks.
 - Cooperative stop: `runner.request_stop(runId)` writes
-  `runtime/tui-control/<runId>.stop`; `execute()` polls every 0.5s while
-  waiting on the harness, then `stop_harness` + `interrupted`/`failure.json`
-  + exit 130 path. No stop file = legacy timeout/Ctrl+C behavior.
+  `runtime/tui-control/<runId>.stop`; the launcher checks that file **before
+  the agent starts** (a stop during the start-up phase never starts the
+  harness) and every 0.5s while it waits on the harness, then
+  `stop_harness` + `interrupted`/`failure.json` + exit 130 path. No stop file =
+  legacy timeout behavior. The TUI says `stopping` at once and `stopped` when
+  the run has ended.
 - Shutdown: `services.shutdown_all()` — cooperative stop of every live run
   (evidence complete) → hard kill of the agent tree (children snapshotted
   before the first kill, so orphaned MCP servers die too) → local Ollama
-  (only the one this TUI started; Ctrl+C stops every `ollama*`) → owned
-  services (`runtime/tui/services.json` + heartbeat, ownership re-verified).
-  One run per process, cached report.
+  (only the one this TUI started; the hard stop kills every `ollama*`) →
+  owned services (`runtime/tui/services.json` + heartbeat, ownership
+  re-verified). One run per process, cached report.
 - Events: `trace_events.EventTail` tails harness.jsonl, run `session.json`
   (mtime/size gated), `runtime/<session>/events.jsonl` (seq gap-fill),
-  http request/metadata (request summaries, no base64). All events carry `ts`.
+  http request/metadata (request summaries, no base64). All events carry `ts`
+  and a `kind` (`thinking_start`, `thinking`, `assistant`, `tool_call`,
+  `tool_result`, `tool_error`, `image`, `notice`, `warn`, `error`, `finish`,
+  `meta`) plus the raw payload the transcript needs.
+- Transcript: `transcript.Transcript` folds the events into the blocks the
+  screen shows. The service log is the authoritative source of a tool call,
+  the model stream and the harness are the fallback — a call that several
+  sources see is shown once, and the answer that the stream and the harness
+  both report is written once.
+- Model stream: `stream.StreamTail` tails the recorded SSE responses
+  (`http/http-NNN.response.bin`, written chunk by chunk while the model
+  answers). The words the model writes **before** a tool call are its
+  thinking and move into the Thinking block; the words after the call are the
+  answer. `stream.SseParser` keeps the state of the turn between the chunks.
 - Run log: `runs.run_json_log` builds one JSON document out of the run
   directory (meta + every event + every JSON/JSONL log file, base64 image
   bytes replaced by a size note, unreadable files listed under `skipped`);
@@ -162,9 +224,7 @@ process (the documented emergency path).
   the terminal's own OSC 52 escape as the fallback). Read-only, nothing is
   written into the run folder.
 - Verify: `runs.run_verify` subprocess + three-way summary
-  (execution / image transport / visual-quality UNVERIFIED). The Live tab
-  writes it to its own `Verify evidence:` box so it never overwrites the
-  selected event detail.
+  (execution / image transport / visual-quality UNVERIFIED).
 - Services: `services.ensure_services` (Local-loopback only: the H200 tunnel is
   probed read-only and never started, never `ollama pull`), ownership via
   `runtime/tui/services.json` + heartbeat,
@@ -182,14 +242,17 @@ runtime\tui-venv\Scripts\python.exe -B -m compileall -q scripts\volume_tui
 ```
 
 `tests/test_volume_tui.py` covers backend (config/discovery/lifecycle/trace/
-services); `tests/test_volume_tui_app.py` covers new flows (cooperative stop,
-timestamps, diffs, slices, imaging, Textual smoke via `run_test`). No test
-starts a model, renderer, or network service. Run them with the TUI venv
-Python (has NumPy/Pillow/Textual). With a bare Python lacking NumPy,
-`test_capabilities`/`test_external_tools` fail at import (pre-existing,
-untouched: they exercise `src/` which requires NumPy); the Textual smoke and
-NumPy slice tests skip cleanly instead of erroring. Real acceptance is one live
-Task A run: Live/Stop/Verify/Compare/Volumes/Services/Settings.
+services); `tests/test_transcript.py` covers the coding-agent transcript
+(pure functions, no run needed); `tests/test_stream.py` covers the recorded
+model stream (SSE parsing and the live tail); `tests/test_volume_tui_app.py`
+covers the screen (the conversation, the thinking chain, the composer, the
+dialogs, the busy feedback). No test starts a model, renderer, or network
+service. Run them with the TUI venv Python (has NumPy/Pillow/Textual). With a
+bare Python lacking NumPy, `test_capabilities`/`test_external_tools` fail at
+import (pre-existing, untouched: they exercise `src/` which requires NumPy);
+the Textual smoke and NumPy slice tests skip cleanly instead of erroring.
+Real acceptance is one live Task A run: send a task, watch the conversation,
+open the thinking chain, stop, verify, switch runs.
 
 ### CI
 

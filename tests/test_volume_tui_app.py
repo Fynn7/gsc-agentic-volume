@@ -1215,27 +1215,31 @@ class Dialogs(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 volume = Path(tmp) / "render.dat"
                 volume.write_text("ObjectFileName: x.raw\nResolution: 2 2 2\n")
+                # The dialog offers the resolved path: on Windows the temp
+                # folder can carry a short name, and the short and the long
+                # form are two different strings.
+                resolved = str(volume.resolve())
                 target = Path(tmp) / "settings.json"
                 with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
                     app = tui_app.VolumeAgentApp()
                     async with app.run_test(size=(100, 32)) as pilot:
                         await pilot.pause()
                         # The volume in use is offered in the dialog.
-                        app.settings["volumePath"] = str(volume)
+                        app.settings["volumePath"] = resolved
                         app._open_settings()
                         await pilot.pause()
                         screen = app.screen
                         # The model is still configurable ...
                         screen.query_one("#set-model", tui_app.Input).value = "probe-model"
                         # ... and so is the volume the agent works on.
-                        screen.query_one("#set-volume", tui_app.Select).value = str(volume)
+                        screen.query_one("#set-volume", tui_app.Select).value = resolved
                         screen.query_one("#btn-settings-save", tui_app.Button).focus()
                         await pilot.pause()
                         await pilot.press("enter")
                         await pilot.pause()
                         saved = tui_app.cfg.load_settings()
                         self.assertEqual(saved["model"], "probe-model")
-                        self.assertEqual(saved["volumePath"], str(volume))
+                        self.assertEqual(saved["volumePath"], resolved)
                         # The app uses the new settings for the next run.
                         self.assertEqual(app.settings["model"], "probe-model")
         asyncio.run(_run())

@@ -171,7 +171,8 @@ Settings) are gone. What they did lives in the coding agent screen:
   agent run (`Running`) or launcher lock is live — services stay up instead.
 - Never auto-started: H200 tunnel/endpoint, non-loopback URLs. Never
   downloaded: models (`ollama pull` stays manual). Never touched: foreign
-  processes.
+  processes — except the local `ollama*` of a Local-mode run, which the
+  shutdown below stops (an H200 endpoint is remote and is never touched).
 - The status line shows the state read-only: `Inference up/down`,
   `Renderer up/down` and `Owned TUI-owned (…) / foreign/manual`.
 
@@ -194,10 +195,11 @@ Every exit path (quit, hard stop, crash, closed window) runs one shutdown:
 The result is cached, so the quit path and the safety net in `main()` never
 stop the same process twice. `main()`'s safety net runs on **every** exit
 path (quit, hard stop, crash, closed window) and stops the agent tree, the
-local Ollama and the owned services — with `hard=True`, so it also stops
-every `ollama*` process, including one that predates this TUI. `Ctrl+C` is
-the terminal's copy key and does not stop anything — use Ctrl+Q, the hard
-stop, or close the window.
+local Ollama and the owned services — with `hard=True`, so in Local mode it
+also stops every `ollama*` process, including one that predates this TUI (an
+H200 endpoint is remote and is never touched). `Ctrl+C` is the terminal's
+copy key and does not stop anything — use Ctrl+Q, the hard stop, or close
+the window.
 
 ## Busy feedback (every waiting operation animates)
 

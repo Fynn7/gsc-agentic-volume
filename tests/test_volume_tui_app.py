@@ -429,7 +429,8 @@ class CodingAgentScreen(unittest.TestCase):
                 text = _conversation_text(app)
                 # The step is the story; the transport is behind a key press.
                 self.assertIn("Render a picture", text)
-                self.assertIn("render_scene", text)
+                # The raw tool name is not on the row: the row is facts.
+                self.assertNotIn("render_scene", text)
                 rows = [widget for widget in app.query(".block")
                         if "model call #1" in str(widget.render())]
                 self.assertTrue(rows)
@@ -519,7 +520,7 @@ class Conversation(unittest.TestCase):
                 text = _conversation_text(app)
                 # The turn carried the agent's reason, not reasoning.
                 self.assertIn("Working", text)
-                self.assertIn("render_scene", text)
+                self.assertNotIn("render_scene", text)
                 self.assertIn("Render a picture", text)
                 self.assertIn("camera rotation 25,-35,10", text)
                 self.assertIn("a new PNG of the volume", text)

@@ -54,7 +54,6 @@ class SseParser:
     """
 
     def __init__(self):
-        self.saw_call = False
         self._buffer = ""
 
     def feed(self, text: str) -> list[dict]:
@@ -85,12 +84,9 @@ class SseParser:
                 events.append({"kind": "text_delta", "delta": data.get("delta", "")})
             elif kind in _REASONING_DELTAS:
                 events.append({"kind": "reasoning_delta", "delta": data.get("delta", "")})
-            elif kind == _ARGUMENTS_DELTA:
-                events.append({"kind": "tool_args_delta", "delta": data.get("delta", "")})
             elif kind == _ITEM_DONE:
                 item = data.get("item") or {}
                 if item.get("type") == "function_call":
-                    self.saw_call = True
                     events.append({
                         "kind": "tool_call",
                         "name": item.get("name", "tool"),
@@ -114,7 +110,6 @@ def parse_sse(text: str) -> list[dict]:
     - text_delta: a piece of the answer
     - reasoning_delta: a piece of the reasoning the model streamed (the
       reasoning summary of the model service)
-    - tool_args_delta: a piece of the arguments of a tool call
     - tool_call: the finished tool call (name + arguments)
     - message_done: the finished answer
     - done: the model call is over

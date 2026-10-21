@@ -47,6 +47,12 @@ Evidence is read-only except new runs, `verification.json`, and
 - The **status line** names the model, the volume, the open run, its state and
   how much of the observation budget is already spent. It carries the spinner
   while a worker runs.
+- The **screen and the backend run on their own clocks**: the screen ticks
+  every 0.1s (the spinner, the seconds) and the evidence is read in a worker
+  thread every 0.5s, so a slow backend never freezes the animation.
+- The **flow diagram** of the whole pipeline (TUI, launcher, renderer service,
+  agent, evidence) is in `docs/agent-prompt-to-completion.html`, with its
+  source (`docs/agent-prompt-to-completion.workflow.json`) next to it.
 - **Whose words are these?** `▌` is your task, `»` is everything the model
   itself wrote (its answer, its reason for a call, its claim at the end),
   and `● ▣ ⚠ ✓` are facts the screen measured or recorded. The screen never
@@ -54,11 +60,13 @@ Evidence is read-only except new runs, `verification.json`, and
 - The **conversation** is the whole live view: the task, the model turns, the
   tool calls with the numbers they changed, the frames (the picture is inline,
   fitted into the panel, never cropped) and the answer. Every line says what
-  happened — the wording lives in `transcript.py` and `event_text.py`.
+  happened — the wording lives in `transcript.py`, `event_text.py` and
+  `app.py`.
 - Every row is **facts, not labels**: what goes in, what comes out, what
   changes ("Render a picture  camera rotation 25,-35,10 · a new PNG of the
   volume · the scene changes"). No parentheses of explanation, no "what that
-  does:" in front of the numbers — the numbers say themselves.
+  does:" in front of the numbers — the numbers say themselves. The raw tool
+  names are not on the rows either; the glossary (F2) names them.
 - The **transport is hidden**: the model calls and the HTTP status are written
   to the evidence, but they only appear on screen with **Ctrl+H**. The harness
   notices (an under-development feature, a missing model description) are one
@@ -224,9 +232,11 @@ stop, or close the window.
 - Events: `trace_events.EventTail` tails harness.jsonl, run `session.json`
   (mtime/size gated), `runtime/<session>/events.jsonl` (seq gap-fill),
   http request/metadata (request summaries, no base64). All events carry `ts`
-  and a `kind` (`thinking_start`, `thinking`, `assistant`, `tool_call`,
-  `tool_result`, `tool_error`, `image`, `notice`, `warn`, `error`, `finish`,
-  `meta`) plus the raw payload the transcript needs.
+  and a `kind` plus the raw payload the transcript needs. The kinds are
+  `thinking_start`, `thinking_end`, `thinking`, `assistant`, `assistant_update`,
+  `tool_call`, `tool_result`, `tool_error`, `image`, `notice`, `warn`, `error`,
+  `finish`, `meta` (from the harness and the service log) and `text_delta`,
+  `reasoning_delta`, `message_done`, `done` (from the recorded model stream).
 - Transcript: `transcript.Transcript` folds the events into the blocks the
   screen shows. The service log is the authoritative source of a tool call,
   the model stream and the harness are the fallback — a call that several
@@ -264,10 +274,13 @@ runtime\tui-venv\Scripts\python.exe -B -m compileall -q scripts\volume_tui
 
 `tests/test_volume_tui.py` covers backend (config/discovery/lifecycle/trace/
 services); `tests/test_transcript.py` covers the coding-agent transcript
-(pure functions, no run needed); `tests/test_stream.py` covers the recorded
-model stream (SSE parsing and the live tail); `tests/test_volume_tui_app.py`
-covers the screen (the conversation, the thinking chain, the composer, the
-dialogs, the busy feedback). No test starts a model, renderer, or network
+(pure functions, no run needed); `tests/test_event_text.py` covers the wording
+of every row (the same pure functions); `tests/test_stream.py` covers the
+recorded model stream (SSE parsing and the live tail);
+`tests/test_run_lifecycle.py` covers the launcher, the stop before the agent
+starts and the evidence; `tests/test_volume_tui_app.py` covers the screen (the
+conversation, the thinking chain, the composer, the dialogs, the busy
+feedback). No test starts a model, renderer, or network
 service. Run them with the TUI venv Python (has NumPy/Pillow/Textual). With a
 bare Python lacking NumPy, `test_capabilities`/`test_external_tools` fail at
 import (pre-existing, untouched: they exercise `src/` which requires NumPy);

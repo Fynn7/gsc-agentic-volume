@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import config as cfg
     import env as env_mod
+    import event_text as event_text_mod
     import runs as runs_mod
     import runner as runner_mod
     import services as services_mod
@@ -37,6 +38,7 @@ try:
 except Exception:  # pragma: no cover - import path for tests
     cfg = None  # type: ignore
     env_mod = None  # type: ignore
+    event_text_mod = None  # type: ignore
     runs_mod = None  # type: ignore
     runner_mod = None  # type: ignore
     services_mod = None  # type: ignore
@@ -143,8 +145,8 @@ BACKEND_TICK_SECONDS = 0.5
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-# In front of every word the model wrote itself (event_text owns the mark).
-MODEL_MARK = "»"
+# In front of every word the model wrote itself. event_text owns the mark.
+MODEL_MARK = getattr(event_text_mod, "MODEL_MARK", "»")
 
 
 def _spinner_frame() -> str:
@@ -184,9 +186,6 @@ def render_block(block: dict):
     if kind == transcript_mod.TOOL:
         text.append("● ", style=ACCENT)
         text.append(title, style="bold %s" % ACCENT)
-        tool_name = str(data.get("tool") or "")
-        if tool_name and tool_name != title:
-            text.append(" (%s)" % tool_name, style="dim")
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
         if status == "running":
@@ -376,11 +375,9 @@ class GlossaryScreen(DismissibleModal):
 
 def _glossary_entries():
     """The glossary of event_text, or nothing if the module is missing."""
-    try:
-        import event_text as glossary_mod
-    except Exception:  # pragma: no cover - the module always loads
+    if event_text_mod is None:  # pragma: no cover - the module always loads
         return []
-    return list(getattr(glossary_mod, "GLOSSARY", []))
+    return list(getattr(event_text_mod, "GLOSSARY", []))
 
 
 class ConfirmScreen(DismissibleModal):
@@ -637,14 +634,38 @@ class SettingsScreen(DismissibleModal):
                      "press Save settings to keep them.")
 
     def _probe(self) -> None:
-        import urllib.request
+        """The probe runs in a worker: the screen must not freeze on it."""
         endpoint = str(self.settings.get("h200Endpoint", "")).rstrip("/")
+
+        def _work() -> None:
+            import urllib.request
+            try:
+                with urllib.request.urlopen(endpoint + "/api/version", timeout=5) as response:
+                    version = json.load(response)
+                message = "H200 OK: %s" % str(version)[:120]
+            except Exception as error:
+                message = "H200 DOWN: %s" % error
+            try:
+                self.call_from_thread(self._probe_done, message)
+            except Exception:
+                pass
+
+        self._status("Probing %s ..." % endpoint)
         try:
-            with urllib.request.urlopen(endpoint + "/api/version", timeout=5) as response:
-                version = json.load(response)
-            self._status("H200 OK: %s" % str(version)[:120])
-        except Exception as error:
-            self._status("H200 DOWN: %s" % error)
+            button = self.query_one("#btn-h200-probe", Button)
+            button.loading = True
+        except Exception:
+            pass
+        self.run_worker(_work, thread=True)
+
+    def _probe_done(self, message: str) -> None:
+        """The probe answered: the button stops spinning, the text shows."""
+        try:
+            button = self.query_one("#btn-h200-probe", Button)
+            button.loading = False
+        except Exception:
+            pass
+        self._status(message)
 
 
 class TranscriptScroll(VerticalScroll if _TEXTUAL else object):
@@ -971,6 +992,9 @@ if _TEXTUAL:
             self._busy_count = 0
             self.transcript = transcript_mod.Transcript() if transcript_mod else None
             self._widgets: list[tuple[dict, object]] = []
+            # One read of the evidence at a time, and the run it belongs to.
+            self._poll_running = False
+            self._poll_run: str | None = None
             # The technical rows (model calls, HTTP status) stay hidden until
             # Ctrl+H asks for them: the steps of the run are the story.
             self.show_plumbing = False
@@ -1262,14 +1286,75 @@ if _TEXTUAL:
         def _tick(self) -> None:
             """Read the backend: the run, the status line, the button.
 
-            The screen animation does not wait for this: it has its own
-            fast clock, so a slow backend never freezes the spinner.
+            The evidence is read in a worker, so a slow backend never
+            freezes the spinner - the screen paints at its own speed.
             """
-            if self.live_dir and not self.live_frozen:
+            if self.live_dir and not self.live_frozen and not self._poll_running:
+                self._start_poll()
+            self._render_status()
+            self._sync_send_button()
+
+        def _start_poll(self) -> None:
+            """Start one read of the evidence (in a worker thread)."""
+            self._poll_running = True
+            self._poll_run = self.live_run_id
+
+            def _work() -> None:
                 try:
-                    self._poll_live()
+                    payload = self._read_evidence()
+                except Exception:
+                    payload = ([], [], None)
+                try:
+                    self.call_from_thread(self._apply_poll, payload)
                 except Exception:
                     pass
+
+            self.run_worker(_work, thread=True)
+
+        def _read_evidence(self):
+            """Read the run's evidence. Worker thread: no UI here."""
+            assert self.live_tail is not None and self.live_dir is not None
+            # Re-resolve session dir once the launcher writes session.json.
+            if self.live_tail.session_dir is None:
+                found = trace_mod.resolve_session_dir(self.live_dir)
+                if found:
+                    self.live_tail.session_dir = found
+            fresh = self.live_tail.poll()
+            # The recorded model stream: the answer and the reasoning arrive
+            # while the model is still writing them.
+            streamed = []
+            if self.stream_tail is not None:
+                try:
+                    streamed = self.stream_tail.poll()
+                except Exception:
+                    streamed = []
+            # Finished/failed freezes the view (no more polling).
+            try:
+                status = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8")).get("status")
+            except (OSError, ValueError):
+                status = None
+            if status in ("finished", "failed"):
+                for _ in range(2):
+                    fresh.extend(self.live_tail.poll())
+            return fresh, streamed, status
+
+        def _apply_poll(self, payload) -> None:
+            """Put the new evidence on the screen. UI thread."""
+            fresh, streamed, status = payload
+            self._poll_running = False
+            if self._poll_run is not None and self._poll_run != self.live_run_id:
+                return  # the run changed while the read was running
+            if fresh:
+                self.live_events.extend(fresh)
+            if status in ("finished", "failed"):
+                self.live_frozen = True
+                self._close_thinking()
+                self._announce_the_end()
+            self._ingest_events(fresh)
+            self._ingest_events(streamed)
+            self._render_live()
+            # The poll learned the state of the run: the line and the button
+            # follow it right away, not at the next tick.
             self._render_status()
             self._sync_send_button()
 
@@ -1321,6 +1406,11 @@ if _TEXTUAL:
             return str(config.get("task") or "").strip()
 
         def _poll_live(self):
+            """Read the evidence and paint it (the synchronous path)."""
+            fresh, streamed, status = self._read_evidence()
+            self._apply_poll((fresh, streamed, status))
+
+        def _unused_poll_live(self):
             assert self.live_tail is not None and self.live_dir is not None
             # Re-resolve session dir once the launcher writes session.json.
             if self.live_tail.session_dir is None:

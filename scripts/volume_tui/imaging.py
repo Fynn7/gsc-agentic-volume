@@ -6,8 +6,8 @@ therefore a Rich styled character instead (fg=top pixel, bg=bottom pixel),
 which Textual renders as truecolor.
 
 The preview never crops and never distorts: the frame is fitted into the
-requested cell box with its aspect ratio intact and padded with black, so
-the whole image is visible instead of a cut-off corner.
+requested cell box with its aspect ratio intact, so the whole image is
+visible instead of a cut-off corner.
 """
 from __future__ import annotations
 
@@ -104,12 +104,12 @@ def preview_fitted_or_message(image_path: str | Path | None, width: int = 60,
     picture and not a canvas with empty columns beside it.
     """
     if not image_path:
-        return "(no frame yet)"
+        return preview_or_message(image_path, width, height)
     try:
         from PIL import Image
         with Image.open(image_path) as image:
             src_w, src_h = image.size
     except Exception:
-        return render_frame(image_path, width, height)
+        return preview_or_message(image_path, width, height)
     box_w, box_h = fit_box(src_w, src_h, max(1, int(width)), max(2, int(height) * 2))
     return render_frame(image_path, box_w, max(1, box_h // 2))

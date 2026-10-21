@@ -532,11 +532,3 @@ class Transcript:
         """The model call is over: the next stream starts a new answer."""
         self._answer_text = ""
         return []
-
-    def _ingest_tool_args_delta(self, event: dict) -> list[dict]:
-        """The arguments of a tool call, piece by piece.
-
-        The finished call carries the whole argument set, so the pieces are
-        not needed - they only tell that the model is still writing.
-        """
-        return []

@@ -1,4 +1,4 @@
-"""Plain-language wording for the Live event log.
+"""Plain-language wording for the conversation and the event log.
 
 The Live timeline is read by people who never saw this pipeline, so every row
 has to say what happened and with which concrete numbers. The rules stay short
@@ -213,6 +213,15 @@ GLOSSARY = (
                               "drawn, above start+width everything is bright."),
     ("crop", "the part of the volume that is shown (voxel bounds, not a "
              "percentage)."),
+    ("inspect_scene", "the tool that reads the current scene: its camera, its "
+                      "opacity window, its crop box and its picture. It changes "
+                      "nothing."),
+    ("render_scene", "the tool that draws a new picture from the volume with "
+                     "the settings you name."),
+    ("inspect_slice", "the tool that reads one raw voxel layer as a grayscale "
+                      "picture. It changes nothing."),
+    ("finish_task", "the tool that saves an already rendered picture as the "
+                    "result of the run."),
     ("model call", "one request to the model. Technical detail (Ctrl+H)."),
     ("HTTP 200", "the model answered without an error. Technical detail (Ctrl+H)."),
     ("harness", "the program that runs the model and hands it the renderer tools."),
@@ -295,6 +304,22 @@ ERROR_HINT = {
 }
 
 
+def model_words(name, arguments, limit=300):
+    """The words the model wrote for this call: its reason, its summary.
+
+    One shape, used by the log and by the conversation, so the two can
+    never drift apart.
+    """
+    arguments = arguments if isinstance(arguments, dict) else {}
+    lines = []
+    reason = arguments.get("reason")
+    if reason:
+        lines.append("%s %s" % (MODEL_MARK, brief(reason, limit)))
+    if name == "finish_task" and arguments.get("summary"):
+        lines.append("%s %s" % (MODEL_MARK, brief(arguments["summary"], limit)))
+    return lines
+
+
 def tool_call(name, arguments):
     arguments = arguments if isinstance(arguments, dict) else {}
     head, extra = _tool_subject(name, arguments)
@@ -304,13 +329,10 @@ def tool_call(name, arguments):
         title += ' - "%s"' % brief(reason, 45)
     lines = ["%s: %s" % (name, TOOL_MEANING.get(name, "call the renderer"))]
     lines.extend(extra)
-    if reason:
-        lines.append("reason (the agent's words): %s" % brief(reason, 220))
+    lines.extend(model_words(name, arguments, 220))
     if "expectedRevision" in arguments:
         lines.append("the agent expected scene revision %s"
                      % count(arguments.get("expectedRevision")))
-    if name == "finish_task" and arguments.get("summary"):
-        lines.append("summary (the agent's words): %s" % brief(arguments["summary"], 220))
     return {"title": title, "detail": "\n".join(lines),
             "changes": parameter_lines(arguments.get("parameters"))}
 

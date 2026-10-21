@@ -107,6 +107,6 @@ try {
   else { Write-Warning 'Renderer URL does not identify this application; check port conflicts.' }
 } catch { Write-Warning 'Renderer not reachable; it will start on the next Run and stay for reuse.' }
 
-Write-Host 'Entering Volume Agent TUI (Ctrl+Q quits and stops the agent run, the local Ollama and the owned services; Ctrl+C hard-stops everything, foreign processes included)...'
+Write-Host 'Entering Volume Agent TUI (Ctrl+Q quits and stops the agent run, the local Ollama and the owned services; the hard stop in the command palette also stops a local Ollama this TUI did not start)...'
 & $TuiPython -B (Join-Path $repoRoot 'scripts\volume_tui')
 exit $LASTEXITCODE

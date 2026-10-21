@@ -170,7 +170,6 @@ def render_block(block: dict):
     title = str(block.get("title") or "")
     subtitle = str(block.get("subtitle") or "")
     body = str(block.get("body") or "")
-    status = block.get("status")
     data = block.get("data") or {}
 
     text = Text()
@@ -190,15 +189,11 @@ def render_block(block: dict):
         text.append(title, style="bold %s" % ACCENT)
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
-        if status == "running":
-            text.append("  …", style="dim")
-        elif status == "done":
-            text.append("  ✓", style="green")
-            seconds = data.get("seconds")
-            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-                text.append(" %ds" % int(seconds + 0.5), style="dim")
-        elif status == "failed":
-            text.append("  ✗", style="red")
+        # How the step ended: the chat log writes the same parts.
+        for part, role in transcript_mod.tool_row_parts(block):
+            style = {"wait": "dim", "ok": "green", "fail": "red",
+                     "time": "dim"}.get(role, "dim")
+            text.append(part, style=style)
         if body:
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
@@ -1200,7 +1195,7 @@ if _TEXTUAL:
             is written to the evidence, but it only appears on screen when
             Ctrl+H asks for the technical view.
             """
-            if str(block.get("kind")) != transcript_mod.META:
+            if not transcript_mod.is_plumbing(str(block.get("kind"))):
                 return True
             return bool(self.show_plumbing)
 
@@ -1421,10 +1416,28 @@ if _TEXTUAL:
                 return
             task = self._task_text(self.live_dir)
             if task:
-                self.transcript.add(transcript_mod.USER, title=task)
+                self.transcript.add(transcript_mod.USER, title=task,
+                                    ts=self._run_started_at(self.live_dir))
             self._sync_transcript()
             self._sync_send_button()
             self._render_status()
+
+        def _run_started_at(self, run_dir: Path | None) -> float | None:
+            """When the run started (the task comes first in the log).
+
+            The steps of the run carry the time they happened; the task
+            row carries the time the run began, so the log reads in order.
+            """
+            if run_dir is None:
+                return None
+            try:
+                run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            started = run.get("startedAt")
+            if isinstance(started, (int, float)) and not isinstance(started, bool):
+                return float(started)
+            return None
 
         def _task_text(self, run_dir: Path | None) -> str:
             """What the run was asked to do (the task of its config)."""
@@ -1878,11 +1891,11 @@ if _TEXTUAL:
             The conversation in plain text: the task, the model's thinking,
             the tool calls with their numbers, the frames and the answer.
             """
-            text = self._chat_log_text()
-            if not text.strip():
+            if not self._chat_log_blocks():
                 self.notify("Nothing to copy - the conversation is empty.",
                             severity="warning", timeout=4, markup=False)
                 return
+            text = self._chat_log_text()
 
             def _work() -> None:
                 message = evidence_mod.copy_to_clipboard(text)

@@ -62,6 +62,38 @@ def block_mark(kind: str) -> str:
     return MARKS.get(str(kind), "·")
 
 
+def is_plumbing(kind: str) -> bool:
+    """Is this the transport (the model calls, the HTTP status)?
+
+    The screen hides it until Ctrl+H asks for it, and the chat log leaves
+    it out for the same reason: it belongs to the JSON log.
+    """
+    return str(kind) == META
+
+
+def tool_row_parts(block: dict) -> list[tuple[str, str]]:
+    """How the step ended, as parts: (text, role).
+
+    Roles: "wait" (the call is still running), "ok" (it returned), "fail"
+    (the renderer refused it), "time" (the seconds it took). The screen
+    paints the roles, the chat log writes them - one rule, two
+    presentations.
+    """
+    status = block.get("status")
+    data = block.get("data") or {}
+    if status == "running":
+        return [("  …", "wait")]
+    if status == "failed":
+        return [("  ✗", "fail")]
+    if status == "done":
+        parts = [("  ✓", "ok")]
+        seconds = data.get("seconds")
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            parts.append((" %ds" % int(seconds + 0.5), "time"))
+        return parts
+    return []
+
+
 def thinking_headline(block: dict) -> tuple[str, str]:
     """The mark and the words of a model turn.
 
@@ -480,6 +512,11 @@ class Transcript:
                 block = last
             else:
                 block = self.add(TOOL, title=name, status="running", ts=event.get("ts"))
+        # The service log knows when the call happened: the block carries
+        # that time, not only the moment the TUI read it.
+        stamp = event.get("ts")
+        if stamp is not None:
+            block["ts"] = stamp
         block["data"]["source"] = source
         block["data"]["tool"] = name
         self._tools[name] = block

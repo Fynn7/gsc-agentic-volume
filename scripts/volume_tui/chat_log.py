@@ -31,13 +31,8 @@ import transcript as transcript_mod
 # Where an exported chat log lands (the run folder stays read-only).
 LOG_DIR = _ROOT / "runtime" / "tui" / "chat-logs"
 
-# The mark in front of every word the model itself wrote.
-MODEL_MARK = text_mod.MODEL_MARK
-
-# The technical rows (the model calls, the HTTP status) are not part of the
-# conversation: the screen hides them until Ctrl+H asks for them, so the
-# chat log leaves them out too.
-_TECHNICAL_KINDS = (transcript_mod.META,)
+# The mark in front of every word the model itself wrote (the screen's mark).
+MODEL_MARK = transcript_mod.block_mark(transcript_mod.ASSISTANT)
 
 
 def _stamp(ts) -> str:
@@ -62,20 +57,11 @@ def _tool_head(block: dict) -> str:
     """The tool row: what the step does, what it changed and how it ended."""
     title = str(block.get("title") or "")
     subtitle = str(block.get("subtitle") or "")
-    status = block.get("status")
-    data = block.get("data") or {}
     head = "%s %s" % (transcript_mod.block_mark(transcript_mod.TOOL), title)
     if subtitle:
         head += "  %s" % subtitle
-    if status == "running":
-        head += "  …"
-    elif status == "done":
-        head += "  ✓"
-        seconds = data.get("seconds")
-        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-            head += " %ds" % int(seconds + 0.5)
-    elif status == "failed":
-        head += "  ✗"
+    # How the step ended: the same parts the screen paints.
+    head += "".join(part for part, _role in transcript_mod.tool_row_parts(block))
     return head
 
 
@@ -103,6 +89,7 @@ def block_lines(block: dict) -> list[str]:
     title = str(block.get("title") or "")
     subtitle = str(block.get("subtitle") or "")
     body = str(block.get("body") or "")
+    data = block.get("data") or {}
     mark = transcript_mod.block_mark(kind)
 
     if kind == transcript_mod.THINKING:
@@ -120,7 +107,11 @@ def block_lines(block: dict) -> list[str]:
     if kind == transcript_mod.ERROR:
         return _row_lines(mark, title) + _body_lines(body)
     if kind == transcript_mod.NOTICES:
-        return _row_lines(mark, title) + _body_lines(body)
+        # The screen folds the notices behind Ctrl+H; the log opens them
+        # (a file has no keys). The label itself is the screen's.
+        count = len(data.get("notices") or [])
+        headline = text_mod.notices_label(count) if count else title
+        return ["%s %s" % (mark, headline)] + _body_lines(body)
     if kind == transcript_mod.IMAGE:
         head = "%s %s" % (mark, title)
         if subtitle:
@@ -162,7 +153,9 @@ def chat_log_text(blocks, *, run_id=None, model=None, run_dir=None,
     for block in blocks or []:
         if not isinstance(block, dict):
             continue
-        if str(block.get("kind") or "") in _TECHNICAL_KINDS:
+        # The transport (the model calls, the HTTP status) is not part of
+        # the conversation: the screen hides it until Ctrl+H asks for it.
+        if transcript_mod.is_plumbing(str(block.get("kind") or "")):
             continue
         stamp = _stamp(block.get("ts"))
         row = block_lines(block)
@@ -180,15 +173,14 @@ def _safe_name(text: str) -> str:
     return cleaned.strip("-.") or "chat"
 
 
-def export_chat_log(blocks, directory=None, *, run_id=None, model=None,
-                    run_dir=None) -> Path:
+def export_chat_log(blocks, *, run_id=None, model=None, run_dir=None) -> Path:
     """Write the chat record to a log file; returns the path of the file.
 
     The file lands in runtime/tui/chat-logs/ (the run folder is never
     written to). Every export keeps its own file: a second export in the
     same second gets its own number.
     """
-    folder = Path(directory) if directory else LOG_DIR
+    folder = Path(LOG_DIR)
     folder.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     base = "%s-%s" % (_safe_name(run_id or "chat"), stamp)

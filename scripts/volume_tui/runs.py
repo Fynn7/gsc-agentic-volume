@@ -311,10 +311,14 @@ _BULK_MIN_ITEMS = 512
 
 
 def _is_bulk_numbers(value) -> bool:
-    """Is this a list of numbers that is too long to read (and to copy)?"""
+    """Is this a list of numbers that is too long to read (and to copy)?
+
+    Every item is checked: a list that holds anything else keeps its
+    content, so nothing disappears silently.
+    """
     if not isinstance(value, list) or len(value) <= _BULK_MIN_ITEMS:
         return False
-    for item in value[:64]:
+    for item in value:
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return False
     return True

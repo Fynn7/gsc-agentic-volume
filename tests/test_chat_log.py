@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -119,12 +120,33 @@ class ChatLogText(unittest.TestCase):
         self.assertIn(time.strftime("%Y-%m-%d %H:%M:%S",
                                     time.localtime(1700000000.0)), text)
 
+    def test_a_tool_call_keeps_the_time_of_the_service_log(self):
+        # The harness opens the block first; the service log knows when the
+        # call happened, so the block carries that time.
+        transcript = tui_transcript.Transcript()
+        transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                           "arguments": {}, "source": "harness", "ts": 999.0})
+        transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                           "arguments": {}, "source": "service", "ts": 5.0})
+        block = transcript.find(tui_transcript.TOOL)
+        self.assertEqual(block["ts"], 5.0)
+
+    def test_the_notices_are_open_and_need_no_key(self):
+        transcript = tui_transcript.Transcript()
+        transcript.ingest({"kind": "warn",
+                           "message": "Under-development features enabled"})
+        text = tui_chat_log.chat_log_text(transcript.blocks)
+        # The log opens what the screen folds behind Ctrl+H.
+        self.assertIn("Under-development features enabled", text)
+        self.assertNotIn("Ctrl+H", text)
+
 
 class ChatLogExport(unittest.TestCase):
     def test_the_export_writes_the_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = tui_chat_log.export_chat_log(
-                _conversation(), tmp, run_id="run-demo", model="qwen3.6:35b")
+            with patch.object(tui_chat_log, "LOG_DIR", Path(tmp)):
+                path = tui_chat_log.export_chat_log(
+                    _conversation(), run_id="run-demo", model="qwen3.6:35b")
             self.assertTrue(path.exists())
             self.assertEqual(path.suffix, ".log")
             self.assertIn("run-demo", path.name)
@@ -137,8 +159,9 @@ class ChatLogExport(unittest.TestCase):
             run_dir = Path(tmp) / "run-demo"
             run_dir.mkdir()
             (run_dir / "run.json").write_text("{}", encoding="utf-8")
-            path = tui_chat_log.export_chat_log(_conversation(), log_dir,
-                                                run_id="run-demo")
+            with patch.object(tui_chat_log, "LOG_DIR", log_dir):
+                path = tui_chat_log.export_chat_log(_conversation(),
+                                                    run_id="run-demo")
             self.assertEqual(path.parent, log_dir)
             # The run folder keeps its evidence: nothing is written into it.
             self.assertEqual([p.name for p in run_dir.iterdir()], ["run.json"])
@@ -149,17 +172,19 @@ class ChatLogExport(unittest.TestCase):
 
     def test_two_exports_keep_two_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            first = tui_chat_log.export_chat_log(_conversation(), tmp,
-                                                 run_id="run-demo")
-            second = tui_chat_log.export_chat_log(_conversation(), tmp,
-                                                  run_id="run-demo")
+            with patch.object(tui_chat_log, "LOG_DIR", Path(tmp)):
+                first = tui_chat_log.export_chat_log(_conversation(),
+                                                     run_id="run-demo")
+                second = tui_chat_log.export_chat_log(_conversation(),
+                                                      run_id="run-demo")
             self.assertNotEqual(first, second)
             self.assertEqual(len(list(Path(tmp).glob("*.log"))), 2)
 
     def test_the_file_name_is_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = tui_chat_log.export_chat_log(_conversation(), tmp,
-                                                 run_id="run/with:bad*chars")
+            with patch.object(tui_chat_log, "LOG_DIR", Path(tmp)):
+                path = tui_chat_log.export_chat_log(
+                    _conversation(), run_id="run/with:bad*chars")
             self.assertEqual(path.parent, Path(tmp))
             self.assertTrue(path.name.endswith(".log"))
             for char in '/\\:*?"<>|':

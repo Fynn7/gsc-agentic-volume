@@ -197,6 +197,16 @@ class RunHelpers(unittest.TestCase):
             camera = document["files"]["session.json"]["scene"]["camera"]
             self.assertEqual(camera["rotationXYZ"], [25, -35, 10])
 
+    def test_run_json_log_keeps_a_long_list_that_is_not_only_numbers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            mixed = [1] * 600 + ["text"] * 10
+            (run_dir / "session.json").write_text(json.dumps({"mixed": mixed}))
+            document = tui_runs.run_json_log(run_dir)
+            # Nothing disappears silently: a list that holds anything else
+            # keeps its content.
+            self.assertEqual(document["files"]["session.json"]["mixed"], mixed)
+
 
 class ClipboardHelper(unittest.TestCase):
     def test_copy_to_clipboard_never_raises(self):
@@ -1518,6 +1528,45 @@ class ChatLog(unittest.TestCase):
                     logs = list(log_dir.glob("*.log"))
                     self.assertEqual(len(logs), 1)
                     self.assertIn("# Volume Agent chat log", logs[0].read_text(encoding="utf-8"))
+        asyncio.run(_run())
+
+    def test_an_empty_conversation_is_not_copied(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app.transcript.clear()
+                copied = {}
+
+                def _fake_copy(text):
+                    copied["text"] = text
+                    return "Copied"
+
+                with patch.object(tui_app.evidence_mod, "copy_to_clipboard", _fake_copy):
+                    app._copy_chat_log()
+                    await pilot.pause()
+                self.assertNotIn("text", copied)
+        asyncio.run(_run())
+
+    def test_the_task_row_carries_the_start_of_the_run(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    (run_dir / "run.json").write_text(json.dumps(
+                        {"runId": "run-demo", "startedAt": 1700000000.0}))
+                    (run_dir / "config.json").write_text(json.dumps(
+                        {"task": "Set the camera rotationXYZ."}))
+                    app.start_live(run_dir, "run-demo")
+                    block = app.transcript.find("user")
+                    self.assertEqual(block["ts"], 1700000000.0)
         asyncio.run(_run())
 
 

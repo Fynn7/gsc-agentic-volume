@@ -47,6 +47,13 @@ explained in the F1 help screen — stated once, never repeated on screen.
   escapes). The preview is fitted into the panel (aspect ratio kept, black
   padding, never cropped) and re-fitted when the window is resized, so the
   whole frame is visible instead of a cut-off corner.
+  - Every row is written for someone who never saw this pipeline: the title
+    says what happened **and** with which numbers (`TOOL  render_scene  camera
+    rotation 30,0,0 - "Tilt camera down slightly"`, `IMAGE  new frame 1  148491
+    lit px  512x512 saved`), the header shows the task and the observation
+    budget, and the selected row shows the full detail (what changed, the
+    agent's reason, scene numbers, file path). The wording lives in
+    `event_text.py`; the categories are explained in the F1 help.
   - The timeline **follows the newest event on its own** while it is scrolled
     to the bottom; scrolling up to read the history stops the follow, and
     scrolling back to the bottom resumes it (there is no Follow button).

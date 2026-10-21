@@ -173,6 +173,16 @@ class HelpScreen(DismissibleModal):
             "  scrolled to the bottom; scroll up to read the history and it stops\n"
             "  following until you scroll back down.\n"
             "\n"
+            "  How to read an event row (each row says what happened and with which\n"
+            "  numbers; selecting it shows the full detail):\n"
+            "    MODEL   the model is working; the answer row carries its own words\n"
+            "    TOOL    the agent called the renderer: what changed and why\n"
+            "    IMAGE   a PNG frame was written to disk (revision, lit pixels, size)\n"
+            "    INFER   one call to the model service: what was sent, what came back\n"
+            "    WARN    a notice from the codex harness; the run continued\n"
+            "    ERROR   something failed; the row says what and where\n"
+            "    FINISH  the agent stopped and picked a frame as the result\n"
+            "\n"
             "RUNS — runs already on disk\n"
             "  Open Live view    follow the selected run in the Live tab\n"
             "  Verify evidence   same read-only check as in Live, for the selected run\n"
@@ -353,7 +363,7 @@ if _TEXTUAL:
         #runs-table { height: 12; }
         #runs-detail { height: auto; min-height: 3; }
         #events-table { height: 10; }
-        #live-detail { height: 5; border: solid gray; }
+        #live-detail { height: 7; border: solid gray; }
         #live-image-path { height: auto; color: $text-muted; }
         #live-image { height: auto; min-height: 3; border: solid cyan; }
         #volumes-table { height: 10; }
@@ -778,6 +788,31 @@ if _TEXTUAL:
             except Exception:
                 pass
 
+        def _live_progress_line(self) -> str:
+            """What the run is for and how much of its budget is already spent.
+
+            Without this the log is a list of tool names; with it the rows
+            can be read against the task the agent was given.
+            """
+            meta = getattr(self.live_tail, "meta", None) or {}
+            goal = str(meta.get("goal") or "").strip()
+            used = meta.get("used")
+            budget = meta.get("budget")
+            if not goal and self.live_dir is not None:
+                try:
+                    config = json.loads((self.live_dir / "config.json").read_text(encoding="utf-8"))
+                    goal = str(config.get("task") or "").strip()
+                    if not isinstance(budget, (int, float)):
+                        budget = config.get("renderBudget")
+                except (OSError, ValueError):
+                    goal = ""
+            parts = []
+            if goal:
+                parts.append("Task: %s" % (goal if len(goal) <= 90 else goal[:87] + "..."))
+            if isinstance(used, (int, float)) and isinstance(budget, (int, float)):
+                parts.append("%s of %s observations used (renders or slices)" % (used, budget))
+            return "  ·  ".join(parts)
+
         def _filtered_events(self) -> list[dict]:
             items = self.live_events
             if self.live_filter != "ALL":
@@ -832,7 +867,7 @@ if _TEXTUAL:
                     table.clear()
                     for i, event in enumerate(items):
                         table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
-                                      _escape_markup(str(event.get("title", ""))[:100]))
+                                      _escape_markup(str(event.get("title", ""))[:120]))
                     self._live_render_key = key
                     self._live_table_len = len(items)
                     if key_changed and not first:
@@ -846,7 +881,7 @@ if _TEXTUAL:
                     for i in range(prev_len, len(items)):
                         event = items[i]
                         table.add_row(str(i), _escape_markup(str(event.get("cat", ""))),
-                                      _escape_markup(str(event.get("title", ""))[:100]))
+                                      _escape_markup(str(event.get("title", ""))[:120]))
                     self._live_table_len = len(items)
             except Exception:
                 pass
@@ -857,8 +892,9 @@ if _TEXTUAL:
                 else:
                     frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 5) % 10]
                     state = "[live %s]" % frame
-                self._set_text("live-head", "Live: %s events=%d %s" % (
-                    self.live_dir.name if self.live_dir else "?", len(self.live_events), state))
+                head = "Live: %s  ·  %d events  ·  %s" % (
+                    self.live_dir.name if self.live_dir else "?", len(self.live_events), state)
+                self._set_text("live-head", head + "\n" + self._live_progress_line())
             except Exception:
                 pass
             # Newest frame preview.
@@ -1313,7 +1349,7 @@ if _TEXTUAL:
                 items = self._filtered_events()
                 if 0 <= event.cursor_row < len(items):
                     detail = items[event.cursor_row].get("detail", "")
-                    self._set_text("live-detail", detail[:600])
+                    self._set_text("live-detail", detail[:900])
                     if items[event.cursor_row].get("image"):
                         self._show_frame(items[event.cursor_row]["image"], items[event.cursor_row].get("revision"))
             elif event.data_table.id == "runs-table":

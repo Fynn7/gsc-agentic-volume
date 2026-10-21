@@ -14,9 +14,16 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parents[2]
+for _extra in (_ROOT / "scripts", Path(__file__).resolve().parent):
+    if str(_extra) not in sys.path:
+        sys.path.insert(0, str(_extra))
+
 import agent_console as console_mod
+import event_text as text_mod
 
 _INDEX = re.compile(r"http-(\d+)")
 
@@ -26,13 +33,13 @@ def _http_index(path: Path) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _request_summary(run_dir: Path, index: int) -> str:
+def _request_summary(run_dir: Path, index: int) -> tuple[str, str]:
     """What was actually sent to the model for call #index (no base64).
 
     Reads the recorded request body (forwarded copy preferred) and reports
     model, message roles with text heads, tool calls with brief arguments,
     and tool outputs as text heads + image counts/byte sizes. Image bytes
-    are never included.
+    are never included. Returns (model name, summary text).
     """
     for name in ("http-%03d.forwarded.bin" % index, "http-%03d.request.bin" % index):
         path = run_dir / "http" / name
@@ -40,11 +47,12 @@ def _request_summary(run_dir: Path, index: int) -> str:
             continue
         try:
             if path.stat().st_size > 32 * 1024 * 1024:
-                return "request body too large to summarize (%d bytes)" % path.stat().st_size
+                return "?", "request body too large to summarize (%d bytes)" % path.stat().st_size
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        lines = ["model=%s" % payload.get("model", "?")]
+        model = str(payload.get("model", "?"))
+        lines = ["model=%s" % model]
         tools = payload.get("tools") or []
         if tools:
             lines.append("tools=%s" % ",".join(str(t.get("name", "?")) for t in tools if isinstance(t, dict)))
@@ -77,8 +85,8 @@ def _request_summary(run_dir: Path, index: int) -> str:
                     lines.append("output: %d image(s) ~%d bytes (bytes not shown)" % (images, image_bytes))
                 if not texts and not images:
                     lines.append("output: (empty)")
-        return "\n".join(lines) if lines else "(empty request body)"
-    return "(request body not recorded yet)"
+        return model, ("\n".join(lines) if lines else "(empty request body)")
+    return "?", "(request body not recorded yet)"
 
 
 class EventTail:
@@ -95,7 +103,13 @@ class EventTail:
         self._session_mtime: float = 0.0
         self._session_size: int = -1
         self._turn = 0
+        # What the last call of each tool changed, so a rejection can name it.
+        self._last_call: dict = {}
         self.counters = {"images": 0, "tools": 0, "http": 0}
+        # Task and observation budget of the watched run, read from the run's
+        # own session.json. Shown in the Live header so the log can be read
+        # without knowing what the run was for.
+        self.meta: dict = {}
 
     @staticmethod
     def _now() -> float:
@@ -147,28 +161,25 @@ class EventTail:
             kind = record.get("type")
             if kind == "turn.started":
                 self._turn += 1
-                out.append({"cat": "MODEL", "title": "MODEL #%d  Running" % self._turn,
-                            "detail": "turn started", "ts": stamp})
+                event = text_mod.model_turn_started(self._turn)
+                out.append({"cat": "MODEL", "title": event["title"],
+                            "detail": event["detail"], "ts": stamp})
             elif kind == "turn.completed":
-                usage = record.get("usage") or {}
-                if self._turn > 0:
-                    out.append({"cat": "MODEL", "title": "MODEL #%d  Done" % self._turn,
-                            "detail": "input=%s cached=%s output=%s" % (
-                                usage.get("input_tokens"), usage.get("cached_input_tokens"),
-                                usage.get("output_tokens")), "ts": stamp})
-                else:
-                    out.append({"cat": "MODEL", "title": "MODEL  Done (turn count unknown)",
-                            "detail": "input=%s cached=%s output=%s" % (
-                                usage.get("input_tokens"), usage.get("cached_input_tokens"),
-                                usage.get("output_tokens")), "ts": stamp})
+                event = text_mod.model_turn_done(self._turn, record.get("usage") or {})
+                out.append({"cat": "MODEL", "title": event["title"],
+                            "detail": event["detail"], "ts": stamp})
             elif kind == "item.completed":
                 item = record.get("item") or {}
                 if item.get("type") == "agent_message":
-                    out.append({"cat": "MODEL", "title": "MODEL  message",
-                                "detail": console_mod._brief(item.get("text", ""), 500), "ts": stamp})
+                    event = text_mod.model_message(item.get("text", ""))
+                    out.append({"cat": "MODEL", "title": event["title"],
+                                "detail": event["detail"], "ts": stamp})
                 elif item.get("type") == "error":
-                    out.append({"cat": "ERROR", "title": "WARN  harness",
-                                "detail": console_mod._brief(item.get("message", ""), 320), "ts": stamp})
+                    # The codex harness reports its own notices this way; they
+                    # do not stop the run, so they are warnings, not errors.
+                    event = text_mod.harness_warning(item.get("message", ""))
+                    out.append({"cat": "WARN", "title": event["title"],
+                                "detail": event["detail"], "ts": stamp})
         return out
 
     # -- run_dir/session.json (embedded events array; always in the run dir) --
@@ -197,6 +208,7 @@ class EventTail:
             return out
         self._session_mtime = stat.st_mtime
         self._session_size = stat.st_size
+        self.meta = {key: data.get(key) for key in ("goal", "model", "budget", "used", "state")}
         events = data.get("events")
         if not isinstance(events, list):
             return out
@@ -228,40 +240,45 @@ class EventTail:
             scene = result.get("scene") or {}
             rev = scene.get("revision")
             self.counters["images"] += 1
-            label = ("Frame %d" % self.counters["images"]) if kind != "slice" else "Slice"
-            return {"cat": "IMAGE", "title": "IMAGE %s  Native PNG saved" % label,
-                    "detail": "rev=%s nonblack=%s\n%s" % (
-                        rev, result.get("nonblackPixels"), image),
+            event = text_mod.image_event(kind, result)
+            return {"cat": "IMAGE", "title": event["title"],
+                    "detail": event["detail"],
                     "image": image, "revision": rev, "ts": stamp,
                     "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "external_tool_call":
             self.counters["tools"] += 1
-            return {"cat": "TOOL", "title": "TOOL  %s  Started" % record.get("name"),
-                    "detail": console_mod._brief(record.get("arguments", {}), 240),
+            event = text_mod.tool_call(record.get("name"), record.get("arguments"))
+            # Remember what the call changed, so a later rejection can name it.
+            self._last_call[record.get("name")] = event.get("changes") or []
+            return {"cat": "TOOL", "title": event["title"], "detail": event["detail"],
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
                     "name": record.get("name"), "arguments": record.get("arguments")}
         elif kind == "external_tool_return":
-            try:
-                seconds = " %.2fs" % float(record["seconds"])
-            except (KeyError, TypeError, ValueError):
-                seconds = ""
-            return {"cat": "TOOL", "title": "TOOL  %s  Success (%s)" % (record.get("name"), seconds.strip() or "?"),
-                    "detail": "", "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
+            event = text_mod.tool_return(record.get("name"), record.get("seconds"))
+            return {"cat": "TOOL", "title": event["title"], "detail": event["detail"],
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
                     "name": record.get("name"), "seconds": record.get("seconds")}
         elif kind == "tool_error":
-            return {"cat": "ERROR", "title": "TOOL  %s  Failed" % record.get("name"),
-                    "detail": console_mod._brief(record.get("message", ""), 300),
+            event = text_mod.tool_error(record.get("name"), record.get("message", ""),
+                                        self._last_call.get(record.get("name")))
+            return {"cat": "ERROR", "title": event["title"], "detail": event["detail"],
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time"),
                     "name": record.get("name")}
         elif kind == "finish":
-            return {"cat": "FINISH", "title": "FINISH  selected revision %s" % record.get("selectedRevision"),
-                    "detail": "verification=%s claim: %s" % (
-                        record.get("externalTaskVerification"),
-                        console_mod._brief(record.get("modelClaim", ""), 400)),
+            event = text_mod.finish_event(record)
+            return {"cat": "FINISH", "title": event["title"], "detail": event["detail"],
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         elif kind == "error":
-            return {"cat": "ERROR", "title": "ERROR",
-                    "detail": console_mod._brief(record.get("message", ""), 300),
+            event = text_mod.error_event(record.get("message", ""))
+            return {"cat": "ERROR", "title": event["title"], "detail": event["detail"],
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
+        elif kind == "model_action":
+            event = text_mod.model_action(record.get("action"))
+            return {"cat": "MODEL", "title": event["title"], "detail": event["detail"],
+                    "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
+        elif kind == "pause":
+            event = text_mod.paused_event(record)
+            return {"cat": "MODEL", "title": event["title"], "detail": event["detail"],
                     "ts": stamp, "seq": record.get("seq"), "time": record.get("time")}
         return None
 
@@ -296,8 +313,10 @@ class EventTail:
                 continue
             self._seen_request.add(path.name)
             index = _http_index(path)
-            out.append({"cat": "INFER", "title": "INFER  call #%d  Sent to model" % index,
-                        "detail": _request_summary(self.run_dir, index), "ts": self._now()})
+            model, summary = _request_summary(self.run_dir, index)
+            event = text_mod.infer_request(index, model, summary)
+            out.append({"cat": "INFER", "title": event["title"], "detail": event["detail"],
+                        "ts": self._now()})
         for path in sorted(directory.glob("http-*.metadata.json"), key=_http_index):
             if path.name in self._seen_metadata:
                 continue
@@ -308,17 +327,10 @@ class EventTail:
                 continue
             self.counters["http"] += 1
             stamp = self._now()
-            if meta.get("error") or (isinstance(meta.get("status"), int) and meta.get("status") >= 400):
-                out.append({"cat": "ERROR", "title": "INFER  call #%s  FAILED" % meta.get("index"),
-                            "detail": "%s %s status=%s %s" % (meta.get("method"), meta.get("path"),
-                                                             meta.get("status"), meta.get("error", "")),
-                            "ts": stamp})
-            else:
-                seconds = meta.get("seconds")
-                out.append({"cat": "INFER", "title": "INFER  call #%s  %s in %ss" % (
-                    meta.get("index"), meta.get("status"),
-                    ("%.2f" % seconds) if seconds is not None else "?"),
-                    "detail": "%s %s" % (meta.get("method"), meta.get("path")), "ts": stamp})
+            event = text_mod.infer_response(meta)
+            cat = "ERROR" if "FAILED" in event["title"] else "INFER"
+            out.append({"cat": cat, "title": event["title"], "detail": event["detail"],
+                        "ts": stamp})
         return out
 
 

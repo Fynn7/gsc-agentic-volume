@@ -717,6 +717,44 @@ class TextualAppSmoke(unittest.TestCase):
                 self.assertEqual(app._filtered_events(), [])
         asyncio.run(_run())
 
+    def test_live_header_shows_the_task_and_the_observation_budget(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                run_dir = root / "run"
+                run_dir.mkdir()
+                (run_dir / "config.json").write_text(json.dumps(
+                    {"task": "Show me the present in the box", "renderBudget": 4}))
+                app = tui_app.VolumeAgentApp()
+                async with app.run_test(size=(120, 30)) as pilot:
+                    await pilot.pause()
+                    app.start_live(run_dir, "run-demo")
+                    app.live_tail.meta = {"goal": "Show me the present in the box",
+                                          "model": "qwen3.6:35b", "budget": 4, "used": 2}
+                    app.live_events = [
+                        {"cat": "TOOL", "title": "TOOL  render_scene  camera rotation 30,0,0",
+                         "detail": "changed: camera rotation 30,0,0"},
+                        {"cat": "IMAGE", "title": "IMAGE  new frame 1  148491 lit px  512x512 saved",
+                         "detail": "lit pixels: 148491 of 262144 (56.6%)"},
+                    ]
+                    app._render_live()
+                    await pilot.pause()
+                    head = str(app.query_one("#live-head").render())
+                    # The task and the budget are on screen, not only in the log.
+                    self.assertIn("Show me the present in the box", head)
+                    self.assertIn("2 of 4 observations used", head)
+                    # The concrete title of every event reaches the table.
+                    from textual.widgets import DataTable
+                    table = app.query_one("#events-table", DataTable)
+                    cells = [str(cell) for row in range(table.row_count)
+                             for cell in table.get_row_at(row)]
+                    self.assertTrue(any("camera rotation 30,0,0" in cell for cell in cells))
+                    self.assertTrue(any("148491 lit px" in cell for cell in cells))
+        asyncio.run(_run())
+
     def test_start_live_sets_state(self):
         import asyncio
 

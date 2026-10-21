@@ -169,6 +169,34 @@ class RunHelpers(unittest.TestCase):
             self.assertNotIn("AAAA", blob)
             self.assertIn("4096", blob)
 
+    def test_run_json_log_omits_the_bulk_number_arrays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            histogram = {
+                "binCount": 65536,
+                "edges": list(range(65537)),
+                "counts": [0] * 65536,
+            }
+            session = {"volume": {"statistics": {"histogram": histogram}}}
+            (run_dir / "session.json").write_text(json.dumps(session))
+            document = tui_runs.run_json_log(run_dir)
+            copied = document["files"]["session.json"]["volume"]["statistics"]["histogram"]
+            # The shape of the histogram stays; the 130000 numbers do not.
+            self.assertEqual(copied["binCount"], 65536)
+            self.assertIn("65537 numbers omitted", copied["edges"])
+            self.assertIn("65536 numbers omitted", copied["counts"])
+            # The copy stays a log a person can read.
+            self.assertLess(json.dumps(document, indent=2).count("\n"), 100)
+
+    def test_run_json_log_keeps_the_short_number_lists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "session.json").write_text(json.dumps({
+                "scene": {"camera": {"rotationXYZ": [25, -35, 10]}}}))
+            document = tui_runs.run_json_log(run_dir)
+            camera = document["files"]["session.json"]["scene"]["camera"]
+            self.assertEqual(camera["rotationXYZ"], [25, -35, 10])
+
 
 class ClipboardHelper(unittest.TestCase):
     def test_copy_to_clipboard_never_raises(self):

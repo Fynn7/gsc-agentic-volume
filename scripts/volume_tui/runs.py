@@ -303,13 +303,35 @@ def summary_numbers(entry: dict) -> dict:
 _IMAGE_BLOB_KEYS = ("data", "image_url", "b64_json", "imageData", "image_base64")
 _BLOB_MIN_CHARS = 512
 
+# A list of numbers this long is a bulk array, not a fact about the run: the
+# statistics of the volume carry an exact histogram with 65536 bins, and that
+# one array alone is 130000 lines of the copy. The copy keeps the count and
+# drops the numbers - the file on the disk still has every one of them.
+_BULK_MIN_ITEMS = 512
 
-def _strip_image_blobs(value, key=None):
-    """Replace base64 image payloads with a size note (never copied raw)."""
+
+def _is_bulk_numbers(value) -> bool:
+    """Is this a list of numbers that is too long to read (and to copy)?"""
+    if not isinstance(value, list) or len(value) <= _BULK_MIN_ITEMS:
+        return False
+    for item in value[:64]:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return False
+    return True
+
+
+def _readable_payload(value, key=None):
+    """Replace the bulky payloads with a size note (never copied raw).
+
+    Two kinds: the base64 image bytes and the bulk number arrays (the
+    histogram of the volume). Everything else is copied as it is.
+    """
     if isinstance(value, dict):
-        return {k: _strip_image_blobs(v, k) for k, v in value.items()}
+        return {k: _readable_payload(v, k) for k, v in value.items()}
     if isinstance(value, list):
-        return [_strip_image_blobs(v, key) for v in value]
+        if _is_bulk_numbers(value):
+            return "<%d numbers omitted (%s)>" % (len(value), key or "values")
+        return [_readable_payload(v, key) for v in value]
     if isinstance(value, str) and key in _IMAGE_BLOB_KEYS and len(value) > _BLOB_MIN_CHARS:
         return "<%d base64 image bytes omitted>" % len(value)
     return value
@@ -365,12 +387,12 @@ def run_json_log(run_dir: str | Path, events=None) -> dict:
         try:
             if path.suffix == ".jsonl":
                 records, problems = _jsonl_records(path)
-                document["files"][name] = _strip_image_blobs(records)
+                document["files"][name] = _readable_payload(records)
                 for problem in problems:
                     document["skipped"].append({"name": name, "reason": problem})
             else:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                document["files"][name] = _strip_image_blobs(data)
+                document["files"][name] = _readable_payload(data)
         except (OSError, ValueError) as error:
             document["skipped"].append({"name": name, "reason": str(error)})
     return document

@@ -256,11 +256,12 @@ the window.
   answer. `stream.SseParser` keeps the state of the turn between the chunks.
 - Run log: `runs.run_json_log` builds one JSON document out of the run
   directory (meta + every event + every JSON/JSONL log file, base64 image
-  bytes replaced by a size note, unreadable files listed under `skipped`);
-  `evidence.copy_to_clipboard` puts it on the system clipboard (PowerShell
-  `Set-Clipboard` over stdin on Windows, `pbcopy`/`wl-copy`/`xclip` elsewhere,
-  the terminal's own OSC 52 escape as the fallback). Read-only, nothing is
-  written into the run folder.
+  bytes replaced by a size note, bulk number arrays — the 65536 bins of the
+  volume histogram — replaced by a count, unreadable files listed under
+  `skipped`); `evidence.copy_to_clipboard` puts it on the system clipboard
+  (PowerShell `Set-Clipboard` over stdin on Windows, `pbcopy`/`wl-copy`/`xclip`
+  elsewhere, the terminal's own OSC 52 escape as the fallback). Read-only,
+  nothing is written into the run folder.
 - Chat log: `chat_log.chat_log_text` folds the transcript blocks into the
   conversation as plain text — the same marks as the screen (`▌` the task,
   `»` the model's words, `● ▣ ⚠ ✓` the facts), every row with its time, the

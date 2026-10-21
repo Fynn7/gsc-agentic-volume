@@ -987,6 +987,39 @@ class Dialogs(unittest.TestCase):
                         self.assertFalse(target.exists())
         asyncio.run(_run())
 
+    def test_the_settings_dialog_offers_the_volume_and_the_model(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                volume = Path(tmp) / "render.dat"
+                volume.write_text("ObjectFileName: x.raw\nResolution: 2 2 2\n")
+                target = Path(tmp) / "settings.json"
+                with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
+                    app = tui_app.VolumeAgentApp()
+                    async with app.run_test(size=(100, 32)) as pilot:
+                        await pilot.pause()
+                        # The volume in use is offered in the dialog.
+                        app.settings["volumePath"] = str(volume)
+                        app._open_settings()
+                        await pilot.pause()
+                        screen = app.screen
+                        # The model is still configurable ...
+                        screen.query_one("#set-model", tui_app.Input).value = "probe-model"
+                        # ... and so is the volume the agent works on.
+                        screen.query_one("#set-volume", tui_app.Select).value = str(volume)
+                        screen.query_one("#btn-settings-save", tui_app.Button).focus()
+                        await pilot.pause()
+                        await pilot.press("enter")
+                        await pilot.pause()
+                        saved = tui_app.cfg.load_settings()
+                        self.assertEqual(saved["model"], "probe-model")
+                        self.assertEqual(saved["volumePath"], str(volume))
+                        # The app uses the new settings for the next run.
+                        self.assertEqual(app.settings["model"], "probe-model")
+        asyncio.run(_run())
+
     def test_the_runs_dialog_opens_a_run(self):
         import asyncio
         import tempfile

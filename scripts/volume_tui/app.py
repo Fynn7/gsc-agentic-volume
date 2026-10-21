@@ -28,6 +28,7 @@ try:
     import trace_events as trace_mod
     import transcript as transcript_mod
     import stream as stream_mod
+    import volumes as volumes_mod
     from context import AppContext
     import evidence as evidence_mod
     import flows as flows_mod
@@ -42,6 +43,7 @@ except Exception:  # pragma: no cover - import path for tests
     trace_mod = None  # type: ignore
     transcript_mod = None  # type: ignore
     stream_mod = None  # type: ignore
+    volumes_mod = None  # type: ignore
     AppContext = None  # type: ignore
     evidence_mod = None  # type: ignore
     flows_mod = None  # type: ignore
@@ -429,7 +431,7 @@ class RunsScreen(DismissibleModal):
 
 
 class SettingsScreen(DismissibleModal):
-    """The settings form (model, endpoints, budget, timeouts).
+    """The settings form (model, volume, endpoints, budget, timeouts).
 
     It is a dialog, not a page: the app is one screen, like a coding agent
     app, and the settings live behind one command.
@@ -450,6 +452,10 @@ class SettingsScreen(DismissibleModal):
                             yield Label(label, classes="field-label")
                             yield Input(str(self.settings.get(key, "")), id=wid)
                     with Horizontal(classes="row"):
+                        yield Label("Volume", classes="field-label")
+                        options, volume_value = self._volume_options()
+                        yield Select(options, value=volume_value, id="set-volume")
+                    with Horizontal(classes="row"):
                         yield Label("Think", classes="field-label")
                         yield Select([("off", "false"), ("on", "true")],
                                      value="true" if self.settings.get("think") else "false",
@@ -463,6 +469,41 @@ class SettingsScreen(DismissibleModal):
                                      tooltip="Send one small probe request to the H200 endpoint. "
                                              "Never falls back silently.")
                     yield Static("", id="settings-status", markup=False)
+
+    # -- the volume ------------------------------------------------------
+    def _volume_options(self) -> tuple[list[tuple[str, str]], str]:
+        """The volumes this machine offers, and the one in use.
+
+        The volume is what the agent works on; it used to live on the
+        deleted Volumes page, so the settings dialog carries it now.
+        """
+        current = ""
+        try:
+            selected = cfg.selected_volume(self.settings) if cfg else None
+            current = str(selected) if selected else ""
+        except Exception:
+            current = ""
+        options: list[tuple[str, str]] = []
+        try:
+            items = volumes_mod.discover_volumes(current or None) if volumes_mod else []
+        except Exception:
+            items = []
+        for item in items:
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            try:
+                label = volumes_mod.option_text(item)
+            except Exception:
+                label = path
+            options.append((label, path))
+        if current and not any(value == current for _label, value in options):
+            options.insert(0, (current, current))
+        if not options:
+            options.append(("(the audited gate volume)", ""))
+        values = [value for _label, value in options]
+        value = current if current in values else values[0]
+        return options, value
 
     # -- the form --------------------------------------------------------
     def _collect(self) -> dict:
@@ -479,6 +520,10 @@ class SettingsScreen(DismissibleModal):
                 settings[key] = raw
         try:
             settings["think"] = str(self.query_one("#set-think", Select).value) == "true"
+        except Exception:
+            pass
+        try:
+            settings["volumePath"] = str(self.query_one("#set-volume", Select).value or "")
         except Exception:
             pass
         return settings
@@ -525,6 +570,12 @@ class SettingsScreen(DismissibleModal):
         try:
             self.query_one("#set-think", Select).value = (
                 "true" if defaults.get("think") else "false")
+        except Exception:
+            pass
+        try:
+            # The volume goes back to the default one (the audited gate volume).
+            _options, value = self._volume_options()
+            self.query_one("#set-volume", Select).value = value
         except Exception:
             pass
         self._status("Form filled with the built-in defaults. Nothing was written — "
@@ -1256,6 +1307,9 @@ if _TEXTUAL:
             text.append("● ", style="bold %s" % ACCENT)
             text.append("volume-agent", style="bold")
             text.append("  %s" % self.settings.get("model", "?"), style="dim")
+            volume = self._volume_name()
+            if volume:
+                text.append("  ·  %s" % volume, style="dim")
             if self.live_run_id:
                 text.append("  ·  %s" % self.live_run_id, style="dim")
                 text.append("  ·  %s" % self._run_state(), style="dim")
@@ -1266,6 +1320,16 @@ if _TEXTUAL:
                 self.query_one("#status-bar", Static).update(text)
             except Exception:
                 pass
+
+        def _volume_name(self) -> str:
+            """The volume the agent works on (the file name, not the path)."""
+            try:
+                selected = cfg.selected_volume(self.settings) if cfg else None
+            except Exception:
+                selected = None
+            if selected:
+                return Path(selected).name
+            return ""
 
         def _run_state(self) -> str:
             """What the open run is doing.

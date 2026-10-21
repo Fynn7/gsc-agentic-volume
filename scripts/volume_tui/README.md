@@ -107,7 +107,7 @@ back to the bottom resumes it (there is no Follow button).
 | Live: view the current PNG | opens the previewed PNG in the system viewer |
 | Live: open the PNG folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
 | Runs: open another run | picks one of the runs on this machine and opens it here |
-| Settings: model, endpoints, budget | the form that writes `runtime/tui-settings.json` |
+| Settings: model, endpoints, budget | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, timeouts, max output tokens and the Think toggle |
 | Theme / Help | light or dark, the help screen |
 | Hard stop: kill everything this TUI owns | agent tree, local Ollama, owned services — then leave |
 | Quit the TUI | stops what the TUI owns, then leaves (asks first while a run is live) |
@@ -124,8 +124,8 @@ Settings) are gone. What they did lives in the coding agent screen:
   command palette.
 - **Runs** → *Runs: open another run* (a dialog, not a page).
 - **Live** → the conversation itself.
-- **Volumes / Services** → not part of a coding agent app: the volumes are
-  chosen in `runtime/tui-settings.json` (or the audited gate volume) and the
+- **Volumes / Services** → not part of a coding agent app: the volume is
+  chosen in the settings dialog (the volumes this machine offers), and the
   services are started on entry and stopped on exit.
 - **Settings** → the settings dialog behind one command.
 

@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import chat_log as chat_log_mod
     import config as cfg
     import env as env_mod
     import event_text as event_text_mod
@@ -36,6 +37,7 @@ try:
     import imaging as imaging_mod
     import telemetry as telemetry_mod
 except Exception:  # pragma: no cover - import path for tests
+    chat_log_mod = None  # type: ignore
     cfg = None  # type: ignore
     env_mod = None  # type: ignore
     event_text_mod = None  # type: ignore
@@ -112,6 +114,18 @@ except Exception:
 # are drawn with it, exactly like a coding agent app marks its own output.
 ACCENT = "cyan"
 
+# How the screen paints the roles of a tool row (the row itself is built
+# once, in transcript.tool_row_parts; the chat log writes the same parts).
+TOOL_ROW_STYLES = {
+    "mark": ACCENT,
+    "title": "bold %s" % ACCENT,
+    "sub": "dim",
+    "wait": "dim",
+    "ok": "green",
+    "fail": "red",
+    "time": "dim",
+}
+
 # Settings form fields: (label, widget id, setting key, kind). One list, used
 # by the form, by "Save settings" and by "Reset to defaults", so they cannot
 # drift apart.
@@ -147,6 +161,8 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # In front of every word the model wrote itself. event_text owns the mark.
 MODEL_MARK = getattr(event_text_mod, "MODEL_MARK", "»")
+if transcript_mod is not None:
+    MODEL_MARK = transcript_mod.block_mark(transcript_mod.ASSISTANT)
 
 
 def _spinner_frame() -> str:
@@ -168,69 +184,59 @@ def render_block(block: dict):
     title = str(block.get("title") or "")
     subtitle = str(block.get("subtitle") or "")
     body = str(block.get("body") or "")
-    status = block.get("status")
     data = block.get("data") or {}
 
     text = Text()
     if kind == transcript_mod.USER:
-        text.append("▌ ", style="bold %s" % ACCENT)
+        text.append("%s " % transcript_mod.block_mark(kind), style="bold %s" % ACCENT)
         text.append(title, style="bold")
         return text
     if kind == transcript_mod.THINKING:
         return render_thinking(block, False)
     if kind == transcript_mod.ASSISTANT:
         # The model's own words, marked as such.
-        text.append("%s " % MODEL_MARK, style=ACCENT)
+        text.append("%s " % transcript_mod.block_mark(kind), style=ACCENT)
         text.append(title)
         return text
     if kind == transcript_mod.TOOL:
-        text.append("● ", style=ACCENT)
-        text.append(title, style="bold %s" % ACCENT)
-        if subtitle:
-            text.append("  %s" % subtitle, style="dim")
-        if status == "running":
-            text.append("  …", style="dim")
-        elif status == "done":
-            text.append("  ✓", style="green")
-            seconds = data.get("seconds")
-            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-                text.append(" %ds" % int(seconds + 0.5), style="dim")
-        elif status == "failed":
-            text.append("  ✗", style="red")
+        # The row is built once (transcript.tool_row_parts); the screen
+        # paints the roles.
+        for part, role in transcript_mod.tool_row_parts(block):
+            text.append(part, style=TOOL_ROW_STYLES.get(role, "dim"))
         if body:
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.IMAGE:
-        text.append("▣ ", style="green")
+        text.append("%s " % transcript_mod.block_mark(kind), style="green")
         text.append(title, style="green")
         if subtitle:
             text.append("  %s" % subtitle, style="dim")
         return text
     if kind == transcript_mod.NOTICES:
         # The harness notices: one row, quiet, with the text behind Ctrl+H.
-        text.append("⚠ ", style="yellow")
+        text.append("%s " % transcript_mod.block_mark(kind), style="yellow")
         text.append(title, style="yellow")
         if body and data.get("plumbing_visible"):
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.WARN:
-        text.append("⚠ ", style="yellow")
+        text.append("%s " % transcript_mod.block_mark(kind), style="yellow")
         text.append(title, style="yellow")
         return text
     if kind == transcript_mod.ERROR:
-        text.append("✗ ", style="red")
+        text.append("%s " % transcript_mod.block_mark(kind), style="red")
         text.append(title, style="red")
         if body:
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.FINISH:
-        text.append("✓ ", style="green")
+        text.append("%s " % transcript_mod.block_mark(kind), style="green")
         text.append(title, style="green")
         if body:
             text.append("\n  %s %s" % (MODEL_MARK, body), style="dim")
         return text
     # Notice and meta lines stay quiet: they carry facts, not the story.
-    text.append("· ", style="dim")
+    text.append("%s " % transcript_mod.block_mark(kind), style="dim")
     text.append(title, style="dim")
     return text
 
@@ -249,19 +255,19 @@ def render_thinking(block: dict, expanded: bool = False):
     from rich.text import Text
 
     text = Text()
-    status = block.get("status")
-    data = block.get("data") or {}
     body = str(block.get("body") or "")
-    reasoned = bool(data.get("reasoning"))
-    if status == "running":
-        text.append(str(block.get("spinner") or "✳"), style=ACCENT)
-        text.append(" Thinking" if reasoned else " Working", style="italic dim")
-    else:
-        text.append("✓", style="green")
-        text.append(" Thought" if reasoned else " Model answered", style="dim")
-    subtitle = str(block.get("subtitle") or "")
-    if subtitle:
-        text.append("  %s" % subtitle, style="dim")
+    running = block.get("status") == "running"
+    # The row is built once (transcript.thinking_row_parts); the screen
+    # paints the roles.
+    for part, role in transcript_mod.thinking_row_parts(block):
+        if role == "spin":
+            text.append(part, style=ACCENT)
+        elif role == "ok":
+            text.append(part, style="green")
+        elif role == "words":
+            text.append(part, style="italic dim" if running else "dim")
+        else:
+            text.append(part, style="dim")
     if not expanded:
         # Closed: the arrow says the chain is there, the words stay inside.
         if body:
@@ -305,7 +311,8 @@ class HelpScreen(DismissibleModal):
                     "  Enter          send the composer text: it starts a new run\n"
                     "  Ctrl+Up/Down   scroll the conversation (the composer keeps the cursor)\n"
                     "  Esc            stop the running agent (evidence already written stays)\n"
-                    "  Ctrl+P         commands: presets, stop, verify, copy log, switch run\n"
+                    "  Ctrl+P         commands: presets, stop, verify, copy log,\n"
+                    "                 chat log, switch run\n"
                     "  F1             this help\n"
                     "  F2             the glossary: what the words of the screen mean\n"
                     "  Ctrl+H         the technical rows (model calls, HTTP status)\n"
@@ -420,6 +427,12 @@ class CommandScreen(DismissibleModal):
          "Check this run's evidence; writes verification.json, never calls the model."),
         ("Live: copy the JSON log", "live-copy",
          "Copy the whole run's JSON log to the clipboard (read-only)."),
+        ("Live: copy the chat log", "live-copy-chat",
+         "Copy the conversation of this run as plain text (the task, the "
+         "model's thinking, the tool calls, the frames and the answer)."),
+        ("Live: export the chat log", "live-export-chat",
+         "Write the conversation of this run to runtime/tui/chat-logs/ as a "
+         ".log file (the run folder stays read-only)."),
         ("Live: view the current PNG", "live-open-png",
          "Open the previewed PNG in your image viewer (full size)."),
         ("Live: open the PNG folder", "live-open",
@@ -1192,7 +1205,7 @@ if _TEXTUAL:
             is written to the evidence, but it only appears on screen when
             Ctrl+H asks for the technical view.
             """
-            if str(block.get("kind")) != transcript_mod.META:
+            if not transcript_mod.is_plumbing(str(block.get("kind"))):
                 return True
             return bool(self.show_plumbing)
 
@@ -1413,20 +1426,49 @@ if _TEXTUAL:
                 return
             task = self._task_text(self.live_dir)
             if task:
-                self.transcript.add(transcript_mod.USER, title=task)
+                self.transcript.add(transcript_mod.USER, title=task,
+                                    ts=self._run_started_at(self.live_dir))
             self._sync_transcript()
             self._sync_send_button()
             self._render_status()
 
-        def _task_text(self, run_dir: Path | None) -> str:
-            """What the run was asked to do (the task of its config)."""
+        def _run_started_at(self, run_dir: Path | None) -> float | None:
+            """When the run started (the task comes first in the log).
+
+            The steps of the run carry the time they happened; the task
+            row carries the time the run began, so the log reads in order.
+            """
+            if run_dir is None or runs_mod is None:
+                return None
+            try:
+                return runs_mod.run_started_at(run_dir)
+            except Exception:
+                return None
+
+        def _run_config(self, run_dir: Path | None) -> dict:
+            """The config of the run (the task and the model it ran with)."""
             if run_dir is None:
-                return ""
+                return {}
             try:
                 config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                return ""
-            return str(config.get("task") or "").strip()
+                return {}
+            return config if isinstance(config, dict) else {}
+
+        def _task_text(self, run_dir: Path | None) -> str:
+            """What the run was asked to do (the task of its config)."""
+            return str(self._run_config(run_dir).get("task") or "").strip()
+
+        def _run_model(self) -> str:
+            """The model of the open run (not the model of the TUI).
+
+            An older run was made with another model: the log has to name
+            the model that did the work.
+            """
+            model = str(self._run_config(self.live_dir).get("model") or "").strip()
+            if model:
+                return model
+            return str(self.settings.get("model") or "")
 
         def _poll_now(self):
             """Read the evidence right now, on this thread.
@@ -1620,6 +1662,10 @@ if _TEXTUAL:
                 self._verify_live()
             elif result == "cmd-live-copy":
                 self._copy_run_json_log()
+            elif result == "cmd-live-copy-chat":
+                self._copy_chat_log()
+            elif result == "cmd-live-export-chat":
+                self._export_chat_log()
             elif result == "cmd-live-open-png":
                 self._open_live_png()
             elif result == "cmd-live-open":
@@ -1840,6 +1886,75 @@ if _TEXTUAL:
                             severity="warning", timeout=6, markup=False)
                 return
             self.notify(message, timeout=4, markup=False)
+
+        # -- the chat record as a log ---------------------------------------
+        def _chat_log_blocks(self) -> list[dict]:
+            """The conversation as it is on screen (the chat record)."""
+            if self.transcript is None:
+                return []
+            return list(self.transcript.blocks)
+
+        def _chat_log_text(self) -> str:
+            """The chat record as plain text - the words the screen shows.
+
+            The same blocks, without the markup: the task, the model's
+            thinking, the tool calls, the frames and the answer.
+            """
+            return chat_log_mod.chat_log_text(
+                self._chat_log_blocks(),
+                run_id=self.live_run_id,
+                model=self._run_model(),
+                run_dir=str(self.live_dir) if self.live_dir else None)
+
+        def _copy_chat_log(self, button=None) -> None:
+            """Copy the chat record to the clipboard (read-only).
+
+            The conversation in plain text: the task, the model's thinking,
+            the tool calls with their numbers, the frames and the answer.
+            """
+            if not self.live_dir:
+                self.notify("No run is open - open one first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            if not self._chat_log_blocks():
+                self.notify("Nothing to copy - the conversation is empty.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            text = self._chat_log_text()
+
+            def _work() -> None:
+                message = evidence_mod.copy_to_clipboard(text)
+                self.call_from_thread(self._copy_finished, text, message)
+
+            self._run_guarded("Copying the chat log", _work, button)
+
+        def _export_chat_log(self, button=None) -> None:
+            """Write the chat record to a log file (the run folder stays read-only).
+
+            The file lands in runtime/tui/chat-logs/, one file per export.
+            """
+            if not self.live_dir:
+                self.notify("No run is open - open one first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            blocks = self._chat_log_blocks()
+            if not blocks:
+                self.notify("Nothing to export - the conversation is empty.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            run_id = self.live_run_id
+            model = self._run_model()
+            run_dir = str(self.live_dir) if self.live_dir else None
+
+            def _work() -> None:
+                path = chat_log_mod.export_chat_log(
+                    blocks, run_id=run_id, model=model, run_dir=run_dir)
+                self.call_from_thread(self._chat_log_exported, path)
+
+            self._run_guarded("Exporting the chat log", _work, button)
+
+        def _chat_log_exported(self, path) -> None:
+            self.notify("Chat log written: %s" % path, timeout=6, markup=False)
 
         # -- where the frames live -----------------------------------------
         def _live_png_path(self) -> Path | None:

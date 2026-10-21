@@ -59,6 +59,15 @@ PARAM_MEANING = (
 _PARAM_KEYS = tuple(key for key, _label in PARAM_MEANING)
 
 
+def is_number(value) -> bool:
+    """Is this a number? (a bool is not a number here)
+
+    The shared type check of the TUI: a bool passes isinstance(int) but is
+    never a measurement.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def brief(text, limit=200):
     """One line, capped, with an ellipsis when something was cut."""
     text = " ".join(str(text if text is not None else "").split())
@@ -188,12 +197,19 @@ def effect_lines(parameters):
     return lines
 
 
+def notices_label(count):
+    """How many harness notices there are (without the key hint)."""
+    count = int(count or 0)
+    if count <= 1:
+        return "1 harness notice"
+    return "%d harness notices" % count
+
+
 def notice_headline(count):
     """One line for the harness notices (they do not stop the run)."""
     count = int(count or 0)
-    if count <= 1:
-        return "1 harness notice · Ctrl+H reads it"
-    return "%d harness notices · Ctrl+H reads them" % count
+    hint = "Ctrl+H reads it" if count <= 1 else "Ctrl+H reads them"
+    return "%s · %s" % (notices_label(count), hint)
 
 
 # The words the screen uses, explained for someone who never saw this system.

@@ -521,15 +521,18 @@ class SettingsScreen(DismissibleModal):
                     yield Static("", id="settings-status", markup=False)
 
     # -- the volume ------------------------------------------------------
-    def _volume_options(self) -> tuple[list[tuple[str, str]], str]:
+    def _volume_options(self, settings: dict | None = None) -> tuple[list[tuple[str, str]], str]:
         """The volumes this machine offers, and the one in use.
 
         The volume is what the agent works on; it used to live on the
-        deleted Volumes page, so the settings dialog carries it now.
+        deleted Volumes page, so the settings dialog carries it now. The
+        settings can be given, so the form can be filled with the
+        defaults and not with what is in use.
         """
+        settings = self.settings if settings is None else settings
         current = ""
         try:
-            selected = cfg.selected_volume(self.settings) if cfg else None
+            selected = cfg.selected_volume(settings) if cfg else None
             current = str(selected) if selected else ""
         except Exception:
             current = ""
@@ -624,7 +627,7 @@ class SettingsScreen(DismissibleModal):
             pass
         try:
             # The volume goes back to the default one (the audited gate volume).
-            _options, value = self._volume_options()
+            _options, value = self._volume_options(defaults)
             self.query_one("#set-volume", Select).value = value
         except Exception:
             pass
@@ -639,6 +642,9 @@ class SettingsScreen(DismissibleModal):
             endpoint = str(self.query_one("#set-h200", Input).value).rstrip("/")
         except Exception:
             endpoint = str(self.settings.get("h200Endpoint", "")).rstrip("/")
+        # The app is picked here, on the UI thread: a worker thread has no
+        # active app of its own.
+        app = self.app
 
         def _work() -> None:
             import urllib.request
@@ -649,7 +655,7 @@ class SettingsScreen(DismissibleModal):
             except Exception as error:
                 message = "H200 DOWN: %s" % error
             try:
-                self.call_from_thread(self._probe_done, message)
+                app.call_from_thread(self._probe_done, message)
             except Exception:
                 pass
 
@@ -659,11 +665,7 @@ class SettingsScreen(DismissibleModal):
             button = self.query_one("#btn-h200-probe", Button)
         except Exception:
             pass
-        guarded = getattr(self.app, "_run_guarded", None)
-        if guarded is not None:
-            guarded("Probing H200", _work, button)
-        else:  # pragma: no cover - the app is always there
-            self.run_worker(_work, thread=True)
+        app._run_guarded("Probing H200", _work, button)
 
     def _probe_done(self, message: str) -> None:
         """The probe answered: the text shows the result."""
@@ -994,9 +996,12 @@ if _TEXTUAL:
             self._busy_count = 0
             self.transcript = transcript_mod.Transcript() if transcript_mod else None
             self._widgets: list[tuple[dict, object]] = []
-            # One read of the evidence at a time.
+            # One read of the evidence at a time. The swap lock is short
+            # (it only picks the tail); the read lock is held while the
+            # files are read, never on the UI thread.
             self._poll_running = False
             self._poll_lock = threading.Lock()
+            self._read_lock = threading.Lock()
             # The technical rows (model calls, HTTP status) stay hidden until
             # Ctrl+H asks for them: the steps of the run are the story.
             self.show_plumbing = False
@@ -1324,30 +1329,34 @@ if _TEXTUAL:
             the payload always belongs to the run it was read from.
             """
             with self._poll_lock:
-                assert self.live_tail is not None and self.live_dir is not None
+                tail = self.live_tail
+                stream = self.stream_tail
                 run_id = self.live_run_id
+                live_dir = self.live_dir
+            assert tail is not None and live_dir is not None
+            with self._read_lock:
                 # Re-resolve session dir once the launcher writes session.json.
-                if self.live_tail.session_dir is None:
-                    found = trace_mod.resolve_session_dir(self.live_dir)
+                if tail.session_dir is None:
+                    found = trace_mod.resolve_session_dir(live_dir)
                     if found:
-                        self.live_tail.session_dir = found
-                fresh = self.live_tail.poll()
+                        tail.session_dir = found
+                fresh = tail.poll()
                 # The recorded model stream: the answer and the reasoning
                 # arrive while the model is still writing them.
                 streamed = []
-                if self.stream_tail is not None:
+                if stream is not None:
                     try:
-                        streamed = self.stream_tail.poll()
+                        streamed = stream.poll()
                     except Exception:
                         streamed = []
                 # Finished/failed freezes the view (no more polling).
                 try:
-                    status = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8")).get("status")
+                    status = json.loads((live_dir / "run.json").read_text(encoding="utf-8")).get("status")
                 except (OSError, ValueError):
                     status = None
                 if status in ("finished", "failed"):
                     for _ in range(2):
-                        fresh.extend(self.live_tail.poll())
+                        fresh.extend(tail.poll())
                 return run_id, fresh, streamed, status
 
         def _apply_poll(self, payload) -> None:
@@ -1419,8 +1428,13 @@ if _TEXTUAL:
                 return ""
             return str(config.get("task") or "").strip()
 
-        def _poll_live(self):
-            """Read the evidence and paint it (the synchronous path)."""
+        def _poll_now(self):
+            """Read the evidence right now, on this thread.
+
+            The app itself never does this: the 0.5s tick reads the
+            evidence in a worker. This is the synchronous path, for the
+            tests and for a caller that wants the evidence at once.
+            """
             self._apply_poll(self._read_evidence())
 
         def _announce_the_end(self) -> None:
@@ -1592,10 +1606,14 @@ if _TEXTUAL:
         def _command_chosen(self, result):
             if not result:
                 return
-            if result == "cmd-run-task-a":
-                self._start_run("task-a", "")
-            elif result == "cmd-run-task-b":
-                self._start_run("task-b", "")
+            if result in ("cmd-run-task-a", "cmd-run-task-b"):
+                if self._run_state() == "running":
+                    # One run at a time, like the composer: the agent has
+                    # to stop first (Esc).
+                    self.notify("The agent is still working - press Esc or Stop first.",
+                                severity="warning", timeout=4, markup=False)
+                    return
+                self._start_run("task-a" if result == "cmd-run-task-a" else "task-b", "")
             elif result == "cmd-live-stop":
                 self._stop_run()
             elif result == "cmd-live-verify":
@@ -1893,7 +1911,7 @@ if _TEXTUAL:
             if not run:
                 return
             self.start_live(run["directory"], run.get("runId"))
-            self._poll_live()
+            self._start_poll()
 
         # -- settings --------------------------------------------------------
         def _open_settings(self) -> None:
@@ -2054,7 +2072,7 @@ if _TEXTUAL:
             if not directory:
                 return
             self.start_live(directory, self._launcher_result.get("run_id"))
-            self._poll_live()
+            self._start_poll()
             self._settle_launch()
 
     def main() -> int:

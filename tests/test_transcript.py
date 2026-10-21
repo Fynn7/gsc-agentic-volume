@@ -77,7 +77,6 @@ class TranscriptBlocks(unittest.TestCase):
         # The reason is not reasoning: it does not fill the foldable block.
         thinking = self.transcript.find(tui_transcript.THINKING)
         self.assertNotIn("rotate it", thinking["body"])
-        self.assertEqual(thinking["data"]["next"], "render_scene")
         answers = [block for block in self.transcript.blocks
                    if block["kind"] == tui_transcript.ASSISTANT]
         self.assertEqual(len(answers), 1)

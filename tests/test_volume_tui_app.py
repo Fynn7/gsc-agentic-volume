@@ -627,7 +627,7 @@ class Conversation(unittest.TestCase):
                     await pilot.pause()
                     thinking = app.transcript.find(tui_app.transcript_mod.THINKING)
                     self.assertEqual(thinking["status"], "running")
-                    app._poll_live()
+                    app._poll_now()
                     await pilot.pause()
                     self.assertTrue(app.live_frozen)
                     self.assertEqual(thinking["status"], "done")
@@ -821,7 +821,7 @@ class Conversation(unittest.TestCase):
                     await pilot.pause()
                     app.start_live(run_dir, "run-demo")
                     await pilot.pause()
-                    app._poll_live()
+                    app._poll_now()
                     await pilot.pause()
                     answers = [block for block in app.transcript.blocks
                                if block["kind"] == tui_app.transcript_mod.ASSISTANT]
@@ -1148,7 +1148,7 @@ class ComposerFlow(unittest.TestCase):
                     # The run ended as interrupted: the line says so.
                     (run_dir / "run.json").write_text(json.dumps(
                         {"status": "failed", "interrupted": True}))
-                    app._poll_live()
+                    app._poll_now()
                     await pilot.pause()
                     status = str(app.query_one("#status-bar").render())
                     self.assertIn("stopped", status)
@@ -1242,6 +1242,35 @@ class Dialogs(unittest.TestCase):
                         self.assertEqual(saved["volumePath"], resolved)
                         # The app uses the new settings for the next run.
                         self.assertEqual(app.settings["model"], "probe-model")
+        asyncio.run(_run())
+
+    def test_the_settings_probe_answers_in_the_screen(self):
+        import asyncio
+        import tempfile
+
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "settings.json"
+                with patch.object(tui_app.cfg, "SETTINGS_FILE", target):
+                    app = tui_app.VolumeAgentApp()
+                    async with app.run_test(size=(100, 32)) as pilot:
+                        await pilot.pause()
+                        app._open_settings()
+                        await pilot.pause()
+                        screen = app.screen
+                        # The probe answers about the endpoint in the form.
+                        screen.query_one("#set-h200", tui_app.Input).value = "http://127.0.0.1:1"
+                        screen.query_one("#btn-h200-probe", tui_app.Button).press()
+                        import time
+                        deadline = time.time() + 20
+                        text = ""
+                        while time.time() < deadline:
+                            await pilot.pause()
+                            await asyncio.sleep(0.05)
+                            text = str(screen.query_one("#settings-status").render())
+                            if "H200" in text and "Probing" not in text:
+                                break
+                        self.assertIn("H200 DOWN", text)
         asyncio.run(_run())
 
     def test_the_runs_dialog_opens_a_run(self):

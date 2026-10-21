@@ -80,7 +80,7 @@
       "lane": "ui",
       "col": 5,
       "type": "frontend",
-      "label": "Live 事件流与校验",
+      "label": "对话与证据校验",
       "sublabel": "实时跟随 · 证据校验",
       "width": 132
     },

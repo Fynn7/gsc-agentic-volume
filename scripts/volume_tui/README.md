@@ -192,9 +192,11 @@ Every exit path (quit, hard stop, crash, closed window) runs one shutdown:
    left alone and reported as such.
 
 The result is cached, so the quit path and the safety net in `main()` never
-stop the same process twice. The **hard stop** (Ctrl+P → *Hard stop…*) also
-stops every `ollama*` process, including one that predates this TUI. `Ctrl+C`
-is the terminal's copy key and does not stop anything — use Ctrl+Q, the hard
+stop the same process twice. `main()`'s safety net runs on **every** exit
+path (quit, hard stop, crash, closed window) and stops the agent tree, the
+local Ollama and the owned services — with `hard=True`, so it also stops
+every `ollama*` process, including one that predates this TUI. `Ctrl+C` is
+the terminal's copy key and does not stop anything — use Ctrl+Q, the hard
 stop, or close the window.
 
 ## Busy feedback (every waiting operation animates)

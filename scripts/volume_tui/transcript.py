@@ -229,10 +229,6 @@ class Transcript:
         is a line of the model's own, like its answer.
         """
         reason = str(event.get("reason") or "").strip()
-        tool = event.get("tool")
-        block = self.find(THINKING)
-        if block is not None and tool:
-            block["data"]["next"] = tool
         if not reason:
             return []
         return [self.add(ASSISTANT, title=reason, ts=event.get("ts"))]

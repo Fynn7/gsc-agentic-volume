@@ -59,6 +59,15 @@ PARAM_MEANING = (
 _PARAM_KEYS = tuple(key for key, _label in PARAM_MEANING)
 
 
+def is_number(value) -> bool:
+    """Is this a number? (a bool is not a number here)
+
+    The shared type check of the TUI: a bool passes isinstance(int) but is
+    never a measurement.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def brief(text, limit=200):
     """One line, capped, with an ellipsis when something was cut."""
     text = " ".join(str(text if text is not None else "").split())

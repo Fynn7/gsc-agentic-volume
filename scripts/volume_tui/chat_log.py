@@ -44,25 +44,30 @@ def _stamp(ts) -> str:
         return "---------- --:--:--"
 
 
-def _body_lines(body: str, mark: str = "") -> list[str]:
-    """The lines under a row, indented like the screen indents them."""
-    lines = []
-    for line in str(body or "").splitlines():
-        text = "%s %s" % (mark, line) if mark else line
-        lines.append("  %s" % text)
-    return lines
+def _lines(text: str, mark: str = "", every_line: bool = False,
+           indent_first: bool = False) -> list[str]:
+    """The lines of a text, indented like the screen indents them.
+
+    The mark goes in front of the first line, or of every line when the
+    text is the model's own words (the reasoning chain, the claim). The
+    first line of a row carries the time, so it is not indented; the lines
+    under it are.
+    """
+    out = []
+    for number, line in enumerate(str(text or "").splitlines()):
+        if mark and (every_line or number == 0):
+            line = "%s %s" % (mark, line)
+        if number == 0 and not indent_first:
+            out.append(line)
+        else:
+            out.append("  %s" % line)
+    return out
 
 
 def _tool_head(block: dict) -> str:
     """The tool row: what the step does, what it changed and how it ended."""
-    title = str(block.get("title") or "")
-    subtitle = str(block.get("subtitle") or "")
-    head = "%s %s" % (transcript_mod.block_mark(transcript_mod.TOOL), title)
-    if subtitle:
-        head += "  %s" % subtitle
-    # How the step ended: the same parts the screen paints.
-    head += "".join(part for part, _role in transcript_mod.tool_row_parts(block))
-    return head
+    # The row is built once (transcript.tool_row_parts); the log writes it.
+    return "".join(part for part, _role in transcript_mod.tool_row_parts(block))
 
 
 def _row_lines(mark: str, title: str) -> list[str]:
@@ -71,11 +76,7 @@ def _row_lines(mark: str, title: str) -> list[str]:
     A multi-line text (the model's answer, the welcome note) stays one
     row: the lines under it belong to it.
     """
-    lines = str(title or "").splitlines() or [""]
-    out = ["%s %s" % (mark, lines[0])]
-    for line in lines[1:]:
-        out.append("  %s" % line)
-    return out
+    return _lines(title, mark) or ["%s " % mark]
 
 
 def block_lines(block: dict) -> list[str]:
@@ -93,25 +94,25 @@ def block_lines(block: dict) -> list[str]:
     mark = transcript_mod.block_mark(kind)
 
     if kind == transcript_mod.THINKING:
-        head_mark, words = transcript_mod.thinking_headline(block)
-        head = "%s %s" % (head_mark, words)
-        if subtitle:
-            head += "  %s" % subtitle
-        # The screen folds the chain away; the log opens it: the reasoning
-        # is part of the record.
-        return [head] + _body_lines(body, MODEL_MARK)
+        # The row is built once (transcript.thinking_row_parts); the log
+        # writes it. The screen folds the chain away, the log opens it: the
+        # reasoning is part of the record.
+        head = "".join(part for part, _role
+                       in transcript_mod.thinking_row_parts(block))
+        return [head] + _lines(body, MODEL_MARK, every_line=True, indent_first=True)
     if kind == transcript_mod.TOOL:
-        return [_tool_head(block)] + _body_lines(body)
+        return [_tool_head(block)] + _lines(body, indent_first=True)
     if kind == transcript_mod.FINISH:
-        return _row_lines(mark, title) + _body_lines(body, MODEL_MARK)
+        return _row_lines(mark, title) + _lines(body, MODEL_MARK,
+                                                every_line=True, indent_first=True)
     if kind == transcript_mod.ERROR:
-        return _row_lines(mark, title) + _body_lines(body)
+        return _row_lines(mark, title) + _lines(body, indent_first=True)
     if kind == transcript_mod.NOTICES:
         # The screen folds the notices behind Ctrl+H; the log opens them
         # (a file has no keys). The label itself is the screen's.
         count = len(data.get("notices") or [])
         headline = text_mod.notices_label(count) if count else title
-        return ["%s %s" % (mark, headline)] + _body_lines(body)
+        return ["%s %s" % (mark, headline)] + _lines(body, indent_first=True)
     if kind == transcript_mod.IMAGE:
         head = "%s %s" % (mark, title)
         if subtitle:

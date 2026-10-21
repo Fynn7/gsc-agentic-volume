@@ -114,6 +114,18 @@ except Exception:
 # are drawn with it, exactly like a coding agent app marks its own output.
 ACCENT = "cyan"
 
+# How the screen paints the roles of a tool row (the row itself is built
+# once, in transcript.tool_row_parts; the chat log writes the same parts).
+TOOL_ROW_STYLES = {
+    "mark": ACCENT,
+    "title": "bold %s" % ACCENT,
+    "sub": "dim",
+    "wait": "dim",
+    "ok": "green",
+    "fail": "red",
+    "time": "dim",
+}
+
 # Settings form fields: (label, widget id, setting key, kind). One list, used
 # by the form, by "Save settings" and by "Reset to defaults", so they cannot
 # drift apart.
@@ -149,6 +161,8 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # In front of every word the model wrote itself. event_text owns the mark.
 MODEL_MARK = getattr(event_text_mod, "MODEL_MARK", "»")
+if transcript_mod is not None:
+    MODEL_MARK = transcript_mod.block_mark(transcript_mod.ASSISTANT)
 
 
 def _spinner_frame() -> str:
@@ -185,15 +199,10 @@ def render_block(block: dict):
         text.append(title)
         return text
     if kind == transcript_mod.TOOL:
-        text.append("%s " % transcript_mod.block_mark(kind), style=ACCENT)
-        text.append(title, style="bold %s" % ACCENT)
-        if subtitle:
-            text.append("  %s" % subtitle, style="dim")
-        # How the step ended: the chat log writes the same parts.
+        # The row is built once (transcript.tool_row_parts); the screen
+        # paints the roles.
         for part, role in transcript_mod.tool_row_parts(block):
-            style = {"wait": "dim", "ok": "green", "fail": "red",
-                     "time": "dim"}.get(role, "dim")
-            text.append(part, style=style)
+            text.append(part, style=TOOL_ROW_STYLES.get(role, "dim"))
         if body:
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
@@ -246,18 +255,19 @@ def render_thinking(block: dict, expanded: bool = False):
     from rich.text import Text
 
     text = Text()
-    status = block.get("status")
     body = str(block.get("body") or "")
-    head_mark, words = transcript_mod.thinking_headline(block)
-    if status == "running":
-        text.append(str(block.get("spinner") or head_mark), style=ACCENT)
-        text.append(" %s" % words, style="italic dim")
-    else:
-        text.append(head_mark, style="green")
-        text.append(" %s" % words, style="dim")
-    subtitle = str(block.get("subtitle") or "")
-    if subtitle:
-        text.append("  %s" % subtitle, style="dim")
+    running = block.get("status") == "running"
+    # The row is built once (transcript.thinking_row_parts); the screen
+    # paints the roles.
+    for part, role in transcript_mod.thinking_row_parts(block):
+        if role == "spin":
+            text.append(part, style=ACCENT)
+        elif role == "ok":
+            text.append(part, style="green")
+        elif role == "words":
+            text.append(part, style="italic dim" if running else "dim")
+        else:
+            text.append(part, style="dim")
     if not expanded:
         # Closed: the arrow says the chain is there, the words stay inside.
         if body:
@@ -1428,26 +1438,37 @@ if _TEXTUAL:
             The steps of the run carry the time they happened; the task
             row carries the time the run began, so the log reads in order.
             """
-            if run_dir is None:
+            if run_dir is None or runs_mod is None:
                 return None
             try:
-                run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                return runs_mod.run_started_at(run_dir)
+            except Exception:
                 return None
-            started = run.get("startedAt")
-            if isinstance(started, (int, float)) and not isinstance(started, bool):
-                return float(started)
-            return None
 
-        def _task_text(self, run_dir: Path | None) -> str:
-            """What the run was asked to do (the task of its config)."""
+        def _run_config(self, run_dir: Path | None) -> dict:
+            """The config of the run (the task and the model it ran with)."""
             if run_dir is None:
-                return ""
+                return {}
             try:
                 config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                return ""
-            return str(config.get("task") or "").strip()
+                return {}
+            return config if isinstance(config, dict) else {}
+
+        def _task_text(self, run_dir: Path | None) -> str:
+            """What the run was asked to do (the task of its config)."""
+            return str(self._run_config(run_dir).get("task") or "").strip()
+
+        def _run_model(self) -> str:
+            """The model of the open run (not the model of the TUI).
+
+            An older run was made with another model: the log has to name
+            the model that did the work.
+            """
+            model = str(self._run_config(self.live_dir).get("model") or "").strip()
+            if model:
+                return model
+            return str(self.settings.get("model") or "")
 
         def _poll_now(self):
             """Read the evidence right now, on this thread.
@@ -1882,7 +1903,7 @@ if _TEXTUAL:
             return chat_log_mod.chat_log_text(
                 self._chat_log_blocks(),
                 run_id=self.live_run_id,
-                model=self.settings.get("model"),
+                model=self._run_model(),
                 run_dir=str(self.live_dir) if self.live_dir else None)
 
         def _copy_chat_log(self, button=None) -> None:
@@ -1891,6 +1912,10 @@ if _TEXTUAL:
             The conversation in plain text: the task, the model's thinking,
             the tool calls with their numbers, the frames and the answer.
             """
+            if not self.live_dir:
+                self.notify("No run is open - open one first.",
+                            severity="warning", timeout=4, markup=False)
+                return
             if not self._chat_log_blocks():
                 self.notify("Nothing to copy - the conversation is empty.",
                             severity="warning", timeout=4, markup=False)
@@ -1908,13 +1933,17 @@ if _TEXTUAL:
 
             The file lands in runtime/tui/chat-logs/, one file per export.
             """
+            if not self.live_dir:
+                self.notify("No run is open - open one first.",
+                            severity="warning", timeout=4, markup=False)
+                return
             blocks = self._chat_log_blocks()
             if not blocks:
                 self.notify("Nothing to export - the conversation is empty.",
                             severity="warning", timeout=4, markup=False)
                 return
             run_id = self.live_run_id
-            model = self.settings.get("model")
+            model = self._run_model()
             run_dir = str(self.live_dir) if self.live_dir else None
 
             def _work() -> None:

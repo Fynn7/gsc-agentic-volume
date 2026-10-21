@@ -72,26 +72,45 @@ def is_plumbing(kind: str) -> bool:
 
 
 def tool_row_parts(block: dict) -> list[tuple[str, str]]:
-    """How the step ended, as parts: (text, role).
+    """The tool row as parts: (text, role).
 
-    Roles: "wait" (the call is still running), "ok" (it returned), "fail"
-    (the renderer refused it), "time" (the seconds it took). The screen
-    paints the roles, the chat log writes them - one rule, two
-    presentations.
+    Roles: "mark", "title", "sub" (the subtitle), "wait" (the call is
+    still running), "ok" (it returned), "fail" (the renderer refused it),
+    "time" (the seconds it took). The screen paints the roles, the chat
+    log writes them - one rule, two presentations.
     """
+    parts = [(block_mark(TOOL) + " ", "mark"), (str(block.get("title") or ""), "title")]
+    subtitle = str(block.get("subtitle") or "")
+    if subtitle:
+        parts.append(("  %s" % subtitle, "sub"))
     status = block.get("status")
     data = block.get("data") or {}
     if status == "running":
-        return [("  …", "wait")]
-    if status == "failed":
-        return [("  ✗", "fail")]
-    if status == "done":
-        parts = [("  ✓", "ok")]
+        parts.append(("  …", "wait"))
+    elif status == "failed":
+        parts.append(("  ✗", "fail"))
+    elif status == "done":
+        parts.append(("  ✓", "ok"))
         seconds = data.get("seconds")
-        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+        if text_mod.is_number(seconds):
             parts.append((" %ds" % int(seconds + 0.5), "time"))
-        return parts
-    return []
+    return parts
+
+
+def thinking_row_parts(block: dict) -> list[tuple[str, str]]:
+    """The model turn as parts: (text, role).
+
+    Roles: "spin" (the turn is still running), "ok" (it is over), "words"
+    (Thinking / Thought / Working / Model answered), "sub" (the tokens).
+    """
+    mark, words = thinking_headline(block)
+    running = block.get("status") == "running"
+    head = (str(block.get("spinner") or mark) if running else mark)
+    parts = [(head, "spin" if running else "ok"), (" %s" % words, "words")]
+    subtitle = str(block.get("subtitle") or "")
+    if subtitle:
+        parts.append(("  %s" % subtitle, "sub"))
+    return parts
 
 
 def thinking_headline(block: dict) -> tuple[str, str]:
@@ -181,9 +200,7 @@ def _lit_share(lit, size) -> str:
 
 def _as_epoch(value) -> float | None:
     """The value as epoch seconds; None when it is neither a number nor a time."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
+    if text_mod.is_number(value):
         return float(value)
     if isinstance(value, str):
         text = value.strip()

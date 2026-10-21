@@ -22,6 +22,19 @@ def _read_json(path: Path):
         return None
 
 
+def run_started_at(run_dir: str | Path) -> float | None:
+    """When the run started (run.json), None when the file says nothing.
+
+    One place reads the start of a run: the chat log puts the task first
+    with this time, so the log reads in order.
+    """
+    run = _read_json(Path(run_dir) / "run.json") or {}
+    started = run.get("startedAt")
+    if isinstance(started, (int, float)) and not isinstance(started, bool):
+        return float(started)
+    return None
+
+
 def task_label(directory: Path, run: dict) -> str:
     """Human task name from the run's own config.json; falls back to the taskKey hash."""
     try:
@@ -303,10 +316,10 @@ def summary_numbers(entry: dict) -> dict:
 _IMAGE_BLOB_KEYS = ("data", "image_url", "b64_json", "imageData", "image_base64")
 _BLOB_MIN_CHARS = 512
 
-# A list of numbers this long is a bulk array, not a fact about the run: the
-# statistics of the volume carry an exact histogram with 65536 bins, and that
-# one array alone is 130000 lines of the copy. The copy keeps the count and
-# drops the numbers - the file on the disk still has every one of them.
+# A list of more than 512 numbers is a bulk array, not a fact about the run:
+# the statistics of the volume carry an exact histogram with 65536 bins, and
+# that one array alone is 130000 lines of the copy. The copy keeps the count
+# and drops the numbers - the file on the disk still has every one of them.
 _BULK_MIN_ITEMS = 512
 
 

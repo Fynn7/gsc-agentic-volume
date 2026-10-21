@@ -46,6 +46,7 @@ class ChatLogText(unittest.TestCase):
         self.assertEqual(len(rows), 5)
         for row in rows:
             self.assertRegex(row, r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d] ")
+
     def test_the_marks_are_the_marks_of_the_screen(self):
         text = tui_chat_log.chat_log_text(_conversation())
         self.assertIn("▌ Set the camera", text)      # the user's task

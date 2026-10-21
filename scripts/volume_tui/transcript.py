@@ -65,16 +65,8 @@ def tool_detail(name: str, arguments: dict) -> str:
     The row above already says what the call does; the body only adds what
     the model said and what the changed numbers mean.
     """
-    arguments = arguments if isinstance(arguments, dict) else {}
-    lines = []
-    reason = arguments.get("reason")
-    if reason:
-        # The marker says: these words are the model's, not the screen's.
-        lines.append("%s %s" % (text_mod.MODEL_MARK, brief(reason, 300)))
+    lines = text_mod.model_words(name, arguments)
     lines.extend(text_mod.effect_lines(arguments.get("parameters")))
-    if name == "finish_task" and arguments.get("summary"):
-        lines.append("%s %s" % (text_mod.MODEL_MARK,
-                                 brief(arguments.get("summary"), 300)))
     return "\n".join(lines)
 
 

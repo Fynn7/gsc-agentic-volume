@@ -759,6 +759,51 @@ class Conversation(unittest.TestCase):
                 self.assertNotIn(".", subtitle)
         asyncio.run(_run())
 
+    def test_the_busy_button_locks_against_a_second_click(self):
+        import asyncio
+        import threading
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                button = app.query_one("#btn-send", tui_app.Button)
+                gate = threading.Event()
+
+                def _work():
+                    gate.wait(3)
+
+                app._run_guarded("Testing", _work, button)
+                await pilot.pause()
+                # Textual only blocks a press on a disabled button.
+                self.assertTrue(button.disabled)
+                gate.set()
+                for _ in range(30):
+                    await pilot.pause()
+                    if not button.disabled:
+                        break
+                self.assertFalse(button.disabled)
+        asyncio.run(_run())
+
+    def test_the_evidence_of_another_run_is_dropped(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.live_run_id = "run-old"
+                app._ingest_events([{"kind": "assistant", "text": "old"}])
+                app.live_run_id = "run-new"
+                app._apply_poll(("run-old", [{"kind": "assistant", "text": "stale"}],
+                                 [], None))
+                await pilot.pause()
+                answers = [block for block in app.transcript.blocks
+                           if block["kind"] == tui_app.transcript_mod.ASSISTANT]
+                self.assertEqual(len(answers), 1)
+                self.assertEqual(answers[0]["title"], "old")
+        asyncio.run(_run())
+
     def test_the_model_stream_reaches_the_conversation(self):
         import asyncio
         import tempfile

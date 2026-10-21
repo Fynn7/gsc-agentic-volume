@@ -222,6 +222,8 @@ GLOSSARY = (
                       "picture. It changes nothing."),
     ("finish_task", "the tool that saves an already rendered picture as the "
                     "result of the run."),
+    ("finish_exploration", "the older name of finish_task: it saves the last "
+                           "rendered picture as the result and ends the run."),
     ("model call", "one request to the model. Technical detail (Ctrl+H)."),
     ("HTTP 200", "the model answered without an error. Technical detail (Ctrl+H)."),
     ("harness", "the program that runs the model and hands it the renderer tools."),

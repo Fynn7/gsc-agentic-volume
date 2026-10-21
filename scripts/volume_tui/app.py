@@ -273,8 +273,6 @@ def render_thinking(block: dict, expanded: bool = False):
         # The model's own words, marked as such - no label in front.
         for line in body.splitlines():
             text.append("\n  %s %s" % (MODEL_MARK, line), style="italic dim")
-    if data.get("next"):
-        text.append("\n  next: %s" % data["next"], style="dim")
     return text
 
 
@@ -635,7 +633,12 @@ class SettingsScreen(DismissibleModal):
 
     def _probe(self) -> None:
         """The probe runs in a worker: the screen must not freeze on it."""
-        endpoint = str(self.settings.get("h200Endpoint", "")).rstrip("/")
+        # The field, not the saved settings: the probe answers about what
+        # is written in the form right now.
+        try:
+            endpoint = str(self.query_one("#set-h200", Input).value).rstrip("/")
+        except Exception:
+            endpoint = str(self.settings.get("h200Endpoint", "")).rstrip("/")
 
         def _work() -> None:
             import urllib.request
@@ -651,20 +654,19 @@ class SettingsScreen(DismissibleModal):
                 pass
 
         self._status("Probing %s ..." % endpoint)
+        button = None
         try:
             button = self.query_one("#btn-h200-probe", Button)
-            button.loading = True
         except Exception:
             pass
-        self.run_worker(_work, thread=True)
+        guarded = getattr(self.app, "_run_guarded", None)
+        if guarded is not None:
+            guarded("Probing H200", _work, button)
+        else:  # pragma: no cover - the app is always there
+            self.run_worker(_work, thread=True)
 
     def _probe_done(self, message: str) -> None:
-        """The probe answered: the button stops spinning, the text shows."""
-        try:
-            button = self.query_one("#btn-h200-probe", Button)
-            button.loading = False
-        except Exception:
-            pass
+        """The probe answered: the text shows the result."""
         self._status(message)
 
 
@@ -992,9 +994,9 @@ if _TEXTUAL:
             self._busy_count = 0
             self.transcript = transcript_mod.Transcript() if transcript_mod else None
             self._widgets: list[tuple[dict, object]] = []
-            # One read of the evidence at a time, and the run it belongs to.
+            # One read of the evidence at a time.
             self._poll_running = False
-            self._poll_run: str | None = None
+            self._poll_lock = threading.Lock()
             # The technical rows (model calls, HTTP status) stay hidden until
             # Ctrl+H asks for them: the steps of the run are the story.
             self.show_plumbing = False
@@ -1037,6 +1039,9 @@ if _TEXTUAL:
             if button is not None:
                 try:
                     button.loading = True
+                    # Textual only blocks a press on a disabled button, so
+                    # the spinner alone would not stop a double click.
+                    button.disabled = True
                 except Exception:
                     pass
             self._busy_inc()
@@ -1045,6 +1050,7 @@ if _TEXTUAL:
                 if button is not None:
                     try:
                         button.loading = False
+                        button.disabled = False
                     except Exception:
                         pass
                 self._busy_dec()
@@ -1297,13 +1303,12 @@ if _TEXTUAL:
         def _start_poll(self) -> None:
             """Start one read of the evidence (in a worker thread)."""
             self._poll_running = True
-            self._poll_run = self.live_run_id
 
             def _work() -> None:
                 try:
                     payload = self._read_evidence()
                 except Exception:
-                    payload = ([], [], None)
+                    payload = (None, [], [], None)
                 try:
                     self.call_from_thread(self._apply_poll, payload)
                 except Exception:
@@ -1312,37 +1317,44 @@ if _TEXTUAL:
             self.run_worker(_work, thread=True)
 
         def _read_evidence(self):
-            """Read the run's evidence. Worker thread: no UI here."""
-            assert self.live_tail is not None and self.live_dir is not None
-            # Re-resolve session dir once the launcher writes session.json.
-            if self.live_tail.session_dir is None:
-                found = trace_mod.resolve_session_dir(self.live_dir)
-                if found:
-                    self.live_tail.session_dir = found
-            fresh = self.live_tail.poll()
-            # The recorded model stream: the answer and the reasoning arrive
-            # while the model is still writing them.
-            streamed = []
-            if self.stream_tail is not None:
+            """Read the run's evidence. Worker thread: no UI here.
+
+            The lock keeps one read at a time, so two readers never walk
+            the same tail at once. The run id is read under the lock, so
+            the payload always belongs to the run it was read from.
+            """
+            with self._poll_lock:
+                assert self.live_tail is not None and self.live_dir is not None
+                run_id = self.live_run_id
+                # Re-resolve session dir once the launcher writes session.json.
+                if self.live_tail.session_dir is None:
+                    found = trace_mod.resolve_session_dir(self.live_dir)
+                    if found:
+                        self.live_tail.session_dir = found
+                fresh = self.live_tail.poll()
+                # The recorded model stream: the answer and the reasoning
+                # arrive while the model is still writing them.
+                streamed = []
+                if self.stream_tail is not None:
+                    try:
+                        streamed = self.stream_tail.poll()
+                    except Exception:
+                        streamed = []
+                # Finished/failed freezes the view (no more polling).
                 try:
-                    streamed = self.stream_tail.poll()
-                except Exception:
-                    streamed = []
-            # Finished/failed freezes the view (no more polling).
-            try:
-                status = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8")).get("status")
-            except (OSError, ValueError):
-                status = None
-            if status in ("finished", "failed"):
-                for _ in range(2):
-                    fresh.extend(self.live_tail.poll())
-            return fresh, streamed, status
+                    status = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8")).get("status")
+                except (OSError, ValueError):
+                    status = None
+                if status in ("finished", "failed"):
+                    for _ in range(2):
+                        fresh.extend(self.live_tail.poll())
+                return run_id, fresh, streamed, status
 
         def _apply_poll(self, payload) -> None:
             """Put the new evidence on the screen. UI thread."""
-            fresh, streamed, status = payload
+            run_id, fresh, streamed, status = payload
             self._poll_running = False
-            if self._poll_run is not None and self._poll_run != self.live_run_id:
+            if run_id is not None and run_id != self.live_run_id:
                 return  # the run changed while the read was running
             if fresh:
                 self.live_events.extend(fresh)
@@ -1373,11 +1385,13 @@ if _TEXTUAL:
         # -- live ---------------------------------------------------------
         def start_live(self, run_dir: str | Path, run_id: str | None = None):
             """Open a run: the conversation starts with the task again."""
-            self.live_dir = Path(run_dir)
-            self.live_run_id = run_id or self.live_dir.name
-            self.live_tail = trace_mod.EventTail(self.live_dir,
-                                                trace_mod.resolve_session_dir(self.live_dir))
-            self.stream_tail = stream_mod.StreamTail(self.live_dir) if stream_mod else None
+            with self._poll_lock:
+                self.live_dir = Path(run_dir)
+                self.live_run_id = run_id or self.live_dir.name
+                self.live_tail = trace_mod.EventTail(
+                    self.live_dir, trace_mod.resolve_session_dir(self.live_dir))
+                self.stream_tail = (stream_mod.StreamTail(self.live_dir)
+                                    if stream_mod else None)
             self.live_events = []
             self.live_frozen = False
             self._live_following = True
@@ -1407,47 +1421,7 @@ if _TEXTUAL:
 
         def _poll_live(self):
             """Read the evidence and paint it (the synchronous path)."""
-            fresh, streamed, status = self._read_evidence()
-            self._apply_poll((fresh, streamed, status))
-
-        def _unused_poll_live(self):
-            assert self.live_tail is not None and self.live_dir is not None
-            # Re-resolve session dir once the launcher writes session.json.
-            if self.live_tail.session_dir is None:
-                found = trace_mod.resolve_session_dir(self.live_dir)
-                if found:
-                    self.live_tail.session_dir = found
-            fresh = self.live_tail.poll()
-            if fresh:
-                self.live_events.extend(fresh)
-            # The recorded model stream: the answer and the reasoning arrive
-            # while the model is still writing them.
-            streamed = []
-            if self.stream_tail is not None:
-                try:
-                    streamed = self.stream_tail.poll()
-                except Exception:
-                    streamed = []
-            # Finished/failed freezes the view (no more polling).
-            try:
-                status = json.loads((self.live_dir / "run.json").read_text(encoding="utf-8")).get("status")
-            except (OSError, ValueError):
-                status = None
-            if status in ("finished", "failed"):
-                for _ in range(2):
-                    extra = self.live_tail.poll()
-                    if extra:
-                        self.live_events.extend(extra)
-                self.live_frozen = True
-                self._close_thinking()
-                self._announce_the_end()
-            self._ingest_events(fresh)
-            self._ingest_events(streamed)
-            self._render_live()
-            # The poll learned the state of the run: the line and the button
-            # follow it right away, not at the next tick.
-            self._render_status()
-            self._sync_send_button()
+            self._apply_poll(self._read_evidence())
 
         def _announce_the_end(self) -> None:
             """Say how the run ended - a stop must be visible, not guessed."""
@@ -2084,7 +2058,7 @@ if _TEXTUAL:
             self._settle_launch()
 
     def main() -> int:
-        """Crash-safe entry: no model call, non-TTY exits 2, Ctrl+C hard stop."""
+        """Crash-safe entry: no model call, non-TTY exits 2, hard stop on close."""
         import sys as _sys
         if not _sys.stdin.isatty():
             print("Volume Agent TUI needs an interactive terminal.")
@@ -2104,7 +2078,7 @@ if _TEXTUAL:
             print("\nInterrupted - stopping agent, local Ollama and owned services...")
             return 130
         finally:
-            # Every exit path (quit, Ctrl+C, crash, closed window) leaves no
+            # Every exit path (quit, hard stop, crash, closed window) leaves no
             # process behind: the agent tree, the local Ollama and the services
             # this TUI started are stopped here.
             try:

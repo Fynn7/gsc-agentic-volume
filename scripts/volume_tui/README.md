@@ -32,8 +32,8 @@ Evidence is read-only except new runs, `verification.json`, and
  ● volume-agent  qwen3.6:35b  ·  volume 246x246x221 voxels  ·  run-20261019-131431  ·  running  ·  2 of 4 observations used
  ▌ Set the camera rotationXYZ to [25,-35,10] degrees.
  ✓ Model answered  in 12278, out 96 tokens
- ● Read the scene (inspect_scene)  camera, opacity window, crop box, current picture · nothing changes  ✓ 0s
- ● Render a picture (render_scene)  camera rotation 25,-35,10 · a new PNG of the volume · the scene changes  ✓ 1s
+ ● Read the scene  camera, opacity window, crop box, current picture · nothing changes  ✓ 0s
+ ● Render a picture  camera rotation 25,-35,10 · a new PNG of the volume · the scene changes  ✓ 1s
    » Rotate the camera as the task asks.
    the camera turns 25° around X, then -35° around Y, then 10° around Z
  ▣ frame revision 1 · 148491 lit px (56.6% of the picture) · 512x512

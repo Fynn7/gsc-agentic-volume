@@ -320,7 +320,7 @@ class SlashFuzzyMatch(unittest.TestCase):
         return [slash for slash, _action, _tip in tui_app.match_slash_commands(prefix)]
 
     def test_prefix_still_matches(self):
-        self.assertEqual(self._slashes("/v"), ["/verify"])
+        self.assertEqual(self._slashes("/v"), ["/verify", "/volume"])
         self.assertEqual(self._slashes("/ver"), ["/verify"])
 
     def test_in_order_chars_match(self):
@@ -1669,13 +1669,13 @@ class NoCtrlPShortcut(unittest.TestCase):
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 composer = app.query_one("#composer", tui_app.Composer)
-                # A single char filters instantly: /v shows only /verify.
+                # A single char filters instantly: /v shows /verify and /volume.
                 composer.text = "/v"
                 await pilot.pause()
                 slashes = [slash for slash, _action, _tip in app._slash_items]
-                self.assertEqual(slashes, ["/verify"])
+                self.assertEqual(slashes, ["/verify", "/volume"])
                 shown = [b for b in app.query("#slash-list .slash-item") if b.display]
-                self.assertEqual(len(shown), 1)
+                self.assertEqual(len(shown), 2)
                 # VSCode-style fuzzy: chars in order match (/rify hits /verify).
                 composer.text = "/rify"
                 await pilot.pause()
@@ -1702,11 +1702,17 @@ class NoCtrlPShortcut(unittest.TestCase):
 
     def test_the_palette_knows_the_run_commands(self):
         actions = [action for _label, action, _tooltip in tui_app.CommandScreen.COMMANDS]
-        for action in ("run-task-a", "run-task-b", "live-stop", "live-verify",
+        for action in ("live-stop", "live-verify",
                        "live-copy", "live-copy-chat", "live-export-chat",
-                       "live-open-png", "live-open", "runs-open",
+                       "live-open-png", "live-open", "runs-open", "volume-switch",
                        "settings", "theme", "help", "hard-stop", "quit"):
             self.assertIn(action, actions)
+        for action in ("run-task-a", "run-task-b"):
+            self.assertNotIn(action, actions)
+        slashes = [slash for slash, _action, _tip in tui_app.slash_commands()]
+        self.assertIn("/volume", slashes)
+        self.assertNotIn("/task-a", slashes)
+        self.assertNotIn("/task-b", slashes)
 
     def test_the_hard_stop_kills_everything_and_leaves(self):
         import asyncio
@@ -1818,7 +1824,7 @@ class ModalEscape(unittest.TestCase):
 
     def test_every_modal_has_the_escape_binding(self):
         for screen in (tui_app.HelpScreen, tui_app.CommandScreen, tui_app.ConfirmScreen,
-                       tui_app.RunsScreen, tui_app.SettingsScreen):
+                       tui_app.RunsScreen, tui_app.VolumesScreen, tui_app.SettingsScreen):
             keys = [binding.key for binding in screen.BINDINGS]
             self.assertIn("escape", keys, screen.__name__)
 

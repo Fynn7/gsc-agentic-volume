@@ -422,10 +422,6 @@ class CommandScreen(DismissibleModal):
     # (label, action id, tooltip) — the id is stable, the label spells out the
     # effect and the tooltip says it once more (every button carries one).
     COMMANDS = [
-        ("Run: the audited Task A", "run-task-a",
-         "Start the audited Task A prompt (rotate the camera, save the frame)."),
-        ("Run: the audited Task B", "run-task-b",
-         "Start the audited Task B prompt (find a more informative view)."),
         ("Run: stop the agent", "live-stop",
          "Ask the agent to stop now; evidence already written is kept."),
         ("Live: verify the evidence (read-only)", "live-verify",
@@ -444,6 +440,8 @@ class CommandScreen(DismissibleModal):
          "Open the file explorer at the folder that holds the PNGs."),
         ("Runs: open another run", "runs-open",
          "Pick one of the runs on this machine and open it here."),
+        ("Volume: switch the volume", "volume-switch",
+         "Pick the volume the next run works on; writes runtime/tui-settings.json."),
         ("Settings: model, endpoints, budget", "settings",
          "Show the form that writes runtime/tui-settings.json."),
         ("Theme: light or dark", "theme",
@@ -472,8 +470,6 @@ class CommandScreen(DismissibleModal):
 # The labels/tooltips stay on CommandScreen.COMMANDS (single source); this only
 # names the slash form of each stable action id.
 SLASH_NAMES = {
-    "run-task-a": "/task-a",
-    "run-task-b": "/task-b",
     "live-stop": "/stop",
     "live-verify": "/verify",
     "live-copy": "/copy-json",
@@ -482,6 +478,7 @@ SLASH_NAMES = {
     "live-open-png": "/open-png",
     "live-open": "/open-folder",
     "runs-open": "/runs",
+    "volume-switch": "/volume",
     "settings": "/settings",
     "theme": "/theme",
     "help": "/help",
@@ -572,6 +569,44 @@ class RunsScreen(DismissibleModal):
         row = event.cursor_row
         if 0 <= row < len(self._runs):
             self.dismiss(result=self._runs[row])
+
+
+class VolumesScreen(DismissibleModal):
+    """The volumes on this machine; one becomes the next run's volume."""
+
+    def __init__(self, volumes: list[dict], current: str = ""):
+        super().__init__()
+        self._volumes = list(volumes or [])
+        self._current = str(current or "")
+
+    def compose(self):
+        with Vertical(classes="dlg"):
+            yield Static("Volumes (Enter switches, Esc closes)",
+                         id="volumes-title")
+            # cursor_type="row": Enter picks the volume, not a single cell.
+            yield DataTable(id="volumes-modal-table", cursor_type="row")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#volumes-modal-table", DataTable)
+        table.add_columns("volume", "dimensions", "note")
+        for item in self._volumes:
+            dims = item.get("dimensions")
+            dims_text = "x".join(str(v) for v in dims) if dims else "dims unknown"
+            path = str(item.get("path") or "")
+            if path and path == self._current:
+                note = "in use"
+            elif item.get("default"):
+                note = "default"
+            else:
+                note = ""
+            table.add_row(_escape_markup(str(item.get("label") or path or "?")),
+                          _escape_markup(dims_text),
+                          _escape_markup(note))
+
+    async def on_data_table_row_selected(self, event):
+        row = event.cursor_row
+        if 0 <= row < len(self._volumes):
+            self.dismiss(result=self._volumes[row])
 
 
 class SettingsScreen(DismissibleModal):
@@ -1229,6 +1264,29 @@ if _TEXTUAL:
             except Exception:
                 return []
 
+        def _volumes_mod(self):
+            if self.ctx is not None and getattr(self.ctx, "discover_volumes", None):
+                return self.ctx
+            return volumes_mod
+
+        def discover_volumes_list(self) -> list[dict]:
+            """Volumes from volumes/ + current selection (read-only)."""
+            current = ""
+            try:
+                selected = cfg.selected_volume(self.settings) if cfg else None
+                current = str(selected) if selected else ""
+            except Exception:
+                current = ""
+            mod = self._volumes_mod()
+            try:
+                if mod is self.ctx:
+                    return list(mod.discover_volumes(current or None))
+                if mod is None:
+                    return []
+                return list(mod.discover_volumes(current or None))
+            except Exception:
+                return []
+
         # -- layout -------------------------------------------------------
         def compose(self) -> ComposeResult:
             with Horizontal(id="status-row"):
@@ -1775,15 +1833,7 @@ if _TEXTUAL:
             # (slash-...) route here.
             if result.startswith("slash-"):
                 result = "cmd-" + result[len("slash-"):]
-            if result in ("cmd-run-task-a", "cmd-run-task-b"):
-                if self._run_state() == "running":
-                    # One run at a time, like the composer: the agent has
-                    # to stop first (Esc).
-                    self.notify("The agent is still working - press Esc or Stop first.",
-                                severity="warning", timeout=4, markup=False)
-                    return
-                self._start_run("task-a" if result == "cmd-run-task-a" else "task-b", "")
-            elif result == "cmd-live-stop":
+            if result == "cmd-live-stop":
                 self._stop_run()
             elif result == "cmd-live-verify":
                 self._verify_live()
@@ -1799,6 +1849,8 @@ if _TEXTUAL:
                 self._open_live_folder()
             elif result == "cmd-runs-open":
                 self._open_runs()
+            elif result == "cmd-volume-switch":
+                self._open_volumes()
             elif result == "cmd-settings":
                 self._open_settings()
             elif result == "cmd-theme":
@@ -2328,6 +2380,47 @@ if _TEXTUAL:
                 return
             self.start_live(run["directory"], run.get("runId"))
             self._start_poll()
+
+        # -- volumes --------------------------------------------------------
+        def _open_volumes(self) -> None:
+            """Pick the volume the next run works on."""
+            items = self.discover_volumes_list()
+            if not items:
+                self.notify("No volumes found in volumes/.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            current = ""
+            try:
+                selected = cfg.selected_volume(self.settings) if cfg else None
+                current = str(selected) if selected else ""
+            except Exception:
+                current = ""
+            self.push_screen(VolumesScreen(items, current), callback=self._volume_chosen)
+
+        def _volume_chosen(self, volume) -> None:
+            if not volume:
+                return
+            path = str((volume or {}).get("path") or "")
+            if not path:
+                return
+            self.settings = dict(self.settings)
+            self.settings["volumePath"] = path
+            try:
+                if self.ctx is not None and getattr(self.ctx, "put_settings", None):
+                    self.ctx.put_settings(self.settings)
+                elif cfg:
+                    cfg.save_settings(self.settings)
+            except Exception:
+                pass
+            label = str((volume or {}).get("label") or path)
+            try:
+                self.notify("Volume: %s" % label, timeout=4, markup=False)
+            except Exception:
+                pass
+            try:
+                self._render_status()
+            except Exception:
+                pass
 
         # -- settings --------------------------------------------------------
         def _open_settings(self) -> None:

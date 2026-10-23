@@ -1696,6 +1696,34 @@ class NoCtrlPShortcut(unittest.TestCase):
                 self.assertTrue(str(composer.text).startswith("/verify"))
         asyncio.run(_run())
 
+    def test_enter_runs_the_highlighted_command(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                composer = app.query_one("#composer", tui_app.Composer)
+                # "/v" matches /verify and /volume; moving down highlights
+                # /volume, and Enter must run it even though the text is
+                # only the "/v" prefix (no Tab, no exact match typed).
+                composer.text = "/v"
+                await pilot.pause()
+                self.assertEqual([slash for slash, _action, _tip in app._slash_items],
+                                 ["/verify", "/volume"])
+                app._slash_move(1)
+                await pilot.pause()
+                self.assertEqual(app._slash_items[app._slash_selected][0], "/volume")
+                with patch.object(app, "discover_volumes_list",
+                                   return_value=[{"path": "v:/x.dat", "label": "x.dat",
+                                                  "dimensions": [1, 2, 3]}]):
+                    composer.focus()
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, tui_app.VolumesScreen)
+        asyncio.run(_run())
+
     def test_every_command_palette_button_carries_a_tooltip(self):
         for _label, _action, tooltip in tui_app.CommandScreen.COMMANDS:
             self.assertTrue(str(tooltip).strip())

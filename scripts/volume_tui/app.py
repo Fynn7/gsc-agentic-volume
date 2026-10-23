@@ -1029,6 +1029,18 @@ class Composer(TextArea if _TEXTUAL else object):
                     except Exception:
                         pass
                     return
+                if event.key == "enter":
+                    try:
+                        handled = app._run_slash_selection()
+                    except Exception:
+                        handled = False
+                    if handled:
+                        event.stop()
+                        event.prevent_default()
+                        return
+                    # No highlighted entry (e.g. no match): fall through to
+                    # the normal submit so the composer reports the
+                    # "Unknown command ..." notice instead of going quiet.
             if event.key == "enter":
                 event.stop()
                 event.prevent_default()
@@ -2001,6 +2013,47 @@ if _TEXTUAL:
                 pass
             self._refresh_slash_menu()
 
+        def _run_slash_selection(self) -> bool:
+            """Run the highlighted slash menu entry. True when it ran."""
+            if not getattr(self, "_slash_open", False):
+                return False
+            items = list(getattr(self, "_slash_items", []) or [])
+            if not items:
+                return False
+            # Bare "/": the user is still browsing, not running - keep the
+            # menu open instead of firing the first entry by accident.
+            try:
+                current = str(self.query_one("#composer", Composer).text or "")
+            except Exception:
+                current = ""
+            stripped = current.lstrip()
+            token = stripped.split(None, 1)[0] if stripped else ""
+            if token == "/":
+                return False
+            try:
+                selected = int(getattr(self, "_slash_selected", 0))
+            except Exception:
+                selected = 0
+            if not (0 <= selected < len(items)):
+                selected = 0
+            try:
+                action = items[selected][1]
+            except Exception:
+                return False
+            try:
+                self.query_one("#composer", Composer).clear()
+            except Exception:
+                pass
+            try:
+                self._close_slash_menu()
+            except Exception:
+                pass
+            try:
+                self._command_chosen("cmd-" + str(action))
+            except Exception:
+                return False
+            return True
+
         def _run_slash_text(self, text: str) -> bool:
             """Run a '/command' composer line. True when the line was slash."""
             if not str(text or "").lstrip().startswith("/"):
@@ -2441,6 +2494,15 @@ if _TEXTUAL:
             if not task:
                 return
             # Slash first (opencode-style): a command never starts a run.
+            # When the menu is open with a highlight, Enter/Send runs the
+            # highlighted entry even if the typed text is only a prefix
+            # (e.g. "/v" with "/volume" highlighted runs /volume).
+            if str(task).lstrip().startswith("/"):
+                try:
+                    if self._run_slash_selection():
+                        return
+                except Exception:
+                    pass
             try:
                 if self._run_slash_text(task):
                     return

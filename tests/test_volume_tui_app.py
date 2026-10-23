@@ -1546,6 +1546,8 @@ class ChatLog(unittest.TestCase):
                         # Slash menu (opencode-style): /export-chat exports.
                         app.query_one("#composer", tui_app.Composer).text = "/export-chat"
                         await pilot.pause()
+                        app.query_one("#composer", tui_app.Composer).focus()
+                        await pilot.pause()
                         await pilot.press("enter")
                         await pilot.pause()
                         for _ in range(200):
@@ -1649,7 +1651,10 @@ class NoCtrlPShortcut(unittest.TestCase):
                 self.assertFalse(app._slash_open)
                 self.assertEqual(app.query_one("#composer").text, "")
                 # The slash menu still runs its action when a command is picked.
-                app.query_one("#composer", tui_app.Composer).text = "/settings"
+                composer = app.query_one("#composer", tui_app.Composer)
+                composer.text = "/settings"
+                await pilot.pause()
+                composer.focus()
                 await pilot.pause()
                 await pilot.press("enter")
                 await pilot.pause()

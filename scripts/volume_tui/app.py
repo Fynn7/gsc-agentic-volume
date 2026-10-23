@@ -285,10 +285,10 @@ def render_thinking(block: dict, expanded: bool = False):
 class DismissibleModal(ModalScreen if _TEXTUAL else object):
     """Modal screen that closes with Esc.
 
-    Textual's ModalScreen ships no escape binding of its own (only the
-    built-in command palette has one), so the help screen and the command
-    palette ignored Esc even though both advertise it. The binding lives on
-    the screen, so it wins over the app bindings while the modal is up.
+    Textual's ModalScreen ships no escape binding of its own, so the help
+    screen and the dialogs ignored Esc even though they advertise it. The
+    binding lives on the screen, so it wins over the app bindings while the
+    modal is up.
     """
 
     if _TEXTUAL:
@@ -311,8 +311,8 @@ class HelpScreen(DismissibleModal):
                     "  Enter          send the composer text: it starts a new run\n"
                     "  Ctrl+Up/Down   scroll the conversation (the composer keeps the cursor)\n"
                     "  Esc            stop the running agent (evidence already written stays)\n"
-                    "  Ctrl+P         commands: presets, stop, verify, copy log,\n"
-                    "                 chat log, switch run\n"
+                    "  /              slash commands with a menu (like opencode: type\n"
+                    "                 / to list them, Enter runs the match)\n"
                     "  F1             this help\n"
                     "  F2             the glossary: what the words of the screen mean\n"
                     "  Ctrl+H         the technical rows (model calls, HTTP status)\n"
@@ -350,8 +350,8 @@ class HelpScreen(DismissibleModal):
                     "\n"
                     "LEAVING\n"
                     "  Ctrl+Q stops the agent run, the local Ollama and the services\n"
-                    "  this TUI started, then leaves. The hard stop (Ctrl+P ->\n"
-                    "  'Hard stop...') also stops a local Ollama this TUI did not start.\n"
+                    "  this TUI started, then leaves. The hard stop (/hard-stop)\n"
+                    "  also stops a local Ollama this TUI did not start.\n"
                     "  Closing the window stops everything as well.\n"
                     "\n"
                     "Press Esc to close.",
@@ -414,6 +414,11 @@ class ConfirmScreen(DismissibleModal):
 
 
 class CommandScreen(DismissibleModal):
+    """Retired modal palette (kept for COMMANDS data + old tests).
+
+    The UI no longer opens it: '/' opens the inline slash menu in
+    the composer instead. COMMANDS stays the single source of labels/tooltips.
+    """
     # (label, action id, tooltip) — the id is stable, the label spells out the
     # effect and the tooltip says it once more (every button carries one).
     COMMANDS = [
@@ -461,6 +466,82 @@ class CommandScreen(DismissibleModal):
 
     async def on_button_pressed(self, event):
         self.dismiss(result=event.button.id)
+
+
+# Slash commands (opencode-style): typed in the composer, picked from a menu.
+# The labels/tooltips stay on CommandScreen.COMMANDS (single source); this only
+# names the slash form of each stable action id.
+SLASH_NAMES = {
+    "run-task-a": "/task-a",
+    "run-task-b": "/task-b",
+    "live-stop": "/stop",
+    "live-verify": "/verify",
+    "live-copy": "/copy-json",
+    "live-copy-chat": "/copy-chat",
+    "live-export-chat": "/export-chat",
+    "live-open-png": "/open-png",
+    "live-open": "/open-folder",
+    "runs-open": "/runs",
+    "settings": "/settings",
+    "theme": "/theme",
+    "help": "/help",
+    "glossary": "/glossary",
+    "hard-stop": "/hard-stop",
+    "quit": "/quit",
+}
+
+
+def slash_commands() -> list[tuple[str, str, str]]:
+    """All slash commands as (slash, action, tooltip)."""
+    out: list[tuple[str, str, str]] = []
+    for _label, action, tooltip in CommandScreen.COMMANDS:
+        slash = SLASH_NAMES.get(action)
+        if slash:
+            out.append((slash, action, tooltip))
+    # Glossary has no palette entry of its own; it is still a slash command.
+    if "glossary" not in [action for _slash, action, _tip in out]:
+        out.append(("/glossary", "glossary", "What the words of the screen mean."))
+    return out
+
+
+def _fuzzy_match(needle: str, haystack: str) -> bool:
+    """VSCode-style: every char of needle appears in haystack, in order."""
+    pos = 0
+    for char in needle:
+        pos = haystack.find(char, pos)
+        if pos < 0:
+            return False
+        pos += 1
+    return True
+
+
+def match_slash_commands(prefix: str) -> list[tuple[str, str, str]]:
+    """Fuzzy filter like VSCode: prefix chars must appear in order.
+
+    /rify, /rfy, /eiy all hit /verify; /var (wrong char 'a') hits nothing.
+    Matching is against the command name only, case-insensitive.
+    """
+    needle = (prefix or "").strip().lower()
+    if needle.startswith("/"):
+        needle = needle[1:]
+    items = slash_commands()
+    if not needle:
+        return items
+    return [item for item in items if _fuzzy_match(needle, item[0][1:].lower())]
+
+
+def parse_slash_command(text: str):
+    """The action id for a '/command ...' composer line, or None."""
+    if text is None:
+        return None
+    stripped = str(text).lstrip()
+    if not stripped.startswith("/"):
+        return None
+    token = stripped.split(None, 1)[0].lower()
+    for slash, action, _tooltip in slash_commands():
+        if slash.lower() == token:
+            return action
+    return None
 
 
 class RunsScreen(DismissibleModal):
@@ -883,6 +964,36 @@ class Composer(TextArea if _TEXTUAL else object):
             super().__init__(*args, **kwargs)
 
         async def _on_key(self, event) -> None:
+            try:
+                app = self.app
+            except Exception:
+                app = None
+            slash_open = bool(app is not None and getattr(app, "_slash_open", False))
+            if slash_open:
+                if event.key == "escape":
+                    event.stop()
+                    event.prevent_default()
+                    try:
+                        app._close_slash_menu()
+                    except Exception:
+                        pass
+                    return
+                if event.key in ("up", "down"):
+                    event.stop()
+                    event.prevent_default()
+                    try:
+                        app._slash_move(-1 if event.key == "up" else 1)
+                    except Exception:
+                        pass
+                    return
+                if event.key == "tab":
+                    event.stop()
+                    event.prevent_default()
+                    try:
+                        app._slash_complete()
+                    except Exception:
+                        pass
+                    return
             if event.key == "enter":
                 event.stop()
                 event.prevent_default()
@@ -922,6 +1033,10 @@ def start_owned_services(settings: dict) -> None:
 if _TEXTUAL:
     class VolumeAgentApp(App):
         TITLE = "Volume Agent"
+        # No Ctrl+P anywhere: slash commands in the composer are the only
+        # menu. Disabling the palette also stops Textual from auto-adding
+        # its own ctrl+p system-palette binding.
+        ENABLE_COMMAND_PALETTE = False
         CSS = """
         Screen { layout: vertical; }
         ModalScreen { align: center middle; background: $background 80%; }
@@ -944,6 +1059,13 @@ if _TEXTUAL:
         #composer-row { height: auto; padding: 0 1; }
         #composer { height: 3; border: round $accent; }
         #btn-send { height: 3; min-width: 10; }
+        #slash-menu { height: auto; max-height: 10; padding: 0 1; display: none; }
+        #slash-menu.open { display: block; }
+        #slash-title { height: 1; padding: 0 1; color: $text-muted; }
+        #slash-list { height: auto; max-height: 8; }
+        .slash-item { height: 1; width: 1fr; min-width: 0; border: none; padding: 0 1; text-align: left; content-align: left middle; align: left middle; }
+        .slash-item.selected { background: $accent; text-style: bold; }
+        .slash-item:focus { border: none; }
         .panel { height: auto; padding: 1 2; }
         .row { height: 3; }
         .row > Input { width: 1fr; }
@@ -963,11 +1085,6 @@ if _TEXTUAL:
         """
 
         BINDINGS = [
-            # "app.command_palette" is the name Textual looks for: declaring it
-            # stops Textual from adding its own ctrl+p binding, so Ctrl+P opens
-            # the TUI palette (the curated list) and not the generic system
-            # palette, which Textual would otherwise bind with priority.
-            Binding("ctrl+p", "app.command_palette", "Commands", show=False),
             Binding("f1", "help", "Help"),
             Binding("f2", "glossary", "Glossary"),
             Binding("ctrl+h", "toggle_plumbing", "Technical"),
@@ -1018,6 +1135,10 @@ if _TEXTUAL:
             # The technical rows (model calls, HTTP status) stay hidden until
             # Ctrl+H asks for them: the steps of the run are the story.
             self.show_plumbing = False
+            # Slash menu (opencode-style): typed in the composer, not a modal.
+            self._slash_open = False
+            self._slash_selected = 0
+            self._slash_items: list[tuple[str, str, str]] = []
 
         # -- busy feedback --------------------------------------------------
         def _busy_inc(self) -> None:
@@ -1115,10 +1236,20 @@ if _TEXTUAL:
                 yield Static("", id="status-bar")
             with TranscriptScroll(id="transcript"):
                 yield Vertical(id="blocks")
+            with Vertical(id="slash-menu"):
+                yield Static("Commands (Up/Down moves, Tab completes, Enter runs, Esc closes)",
+                             id="slash-title")
+                with VerticalScroll(id="slash-list"):
+                    # Built once: filtering only toggles visibility, so each
+                    # keystroke updates instantly with no remount flicker.
+                    for _slash, _action, _tooltip in slash_commands():
+                        yield Button("%s  - %s" % (_slash, _tooltip), id="slash-%s" % _action,
+                                     classes="slash-item", tooltip=_tooltip)
             with Horizontal(id="composer-row"):
                 yield Composer(id="composer")
                 yield Button("Send", id="btn-send", variant="primary",
-                             tooltip="Start a run with this task (Enter does the same).")
+                             tooltip="Start a run with this task (Enter does the same). "
+                             "A line starting with / runs a slash command.")
             yield Footer()
 
         # -- lifecycle ----------------------------------------------------
@@ -1136,7 +1267,7 @@ if _TEXTUAL:
                 "Volume Agent - you write a task, the model asks the renderer for\n"
                 "pictures and picks one as the result.\n"
                 "Each picture costs one observation (the top line shows the budget).\n"
-                "F2 the words - Ctrl+P the commands - Ctrl+H the technical rows"))
+                "F2 the words - / the commands - Ctrl+H the technical rows"))
             self._sync_transcript()
 
         # -- the conversation ----------------------------------------------
@@ -1633,21 +1764,17 @@ if _TEXTUAL:
                     int(budget) if isinstance(budget, (int, float)) else 0)
 
         # -- actions ------------------------------------------------------
-        def action_command_palette(self):
-            """Ctrl+P (and the header icon) opens the TUI palette.
-
-            Textual binds ctrl+p to its own system palette; the binding above
-            uses the "app.command_palette" name so Textual keeps its hands off
-            it, and this override routes the key to the curated list.
-            """
-            self.action_commands()
-
         def action_commands(self):
-            self.push_screen(CommandScreen(), callback=self._command_chosen)
+            # The only menu: slash commands in the composer (no Ctrl+P).
+            self._open_slash_menu()
 
         def _command_chosen(self, result):
             if not result:
                 return
+            # Both the retired modal ids (cmd-...) and the slash ids
+            # (slash-...) route here.
+            if result.startswith("slash-"):
+                result = "cmd-" + result[len("slash-"):]
             if result in ("cmd-run-task-a", "cmd-run-task-b"):
                 if self._run_state() == "running":
                     # One run at a time, like the composer: the agent has
@@ -1678,10 +1805,181 @@ if _TEXTUAL:
                 self.action_toggle_dark()
             elif result == "cmd-help":
                 self.action_help()
+            elif result in ("cmd-glossary", "glossary"):
+                self.action_glossary()
             elif result == "cmd-hard-stop":
                 self._hard_stop()
             elif result == "cmd-quit":
                 self.action_quit_confirm()
+
+        # -- slash menu (opencode-style) ------------------------------------
+        def _slash_prefix(self):
+            """What was typed after '/' in the composer, or None."""
+            try:
+                text = self.query_one("#composer", Composer).text
+            except Exception:
+                return None
+            stripped = str(text).lstrip()
+            if not stripped.startswith("/"):
+                return None
+            first = stripped.split(None, 1)[0]
+            return first[1:]
+
+        def _refresh_slash_menu(self) -> None:
+            """Show the opencode-style menu while the composer holds '/...'.
+
+            The buttons are built once in compose(); filtering only toggles
+            their visibility, so every keystroke (even a single char like /v)
+            updates instantly with no remount flicker or lost frames.
+            """
+            try:
+                menu = self.query_one("#slash-menu")
+            except Exception:
+                return
+            prefix = self._slash_prefix()
+            if prefix is None:
+                self._slash_open = False
+                self._slash_items = []
+                try:
+                    menu.remove_class("open")
+                except Exception:
+                    pass
+                return
+            items = match_slash_commands(prefix)
+            self._slash_items = items
+            if self._slash_selected >= len(items):
+                self._slash_selected = 0
+            self._slash_open = True
+            visible = {action for _slash, action, _tip in items}
+            selected_action = items[self._slash_selected][1] if items else None
+            try:
+                menu.add_class("open")
+                try:
+                    if items:
+                        self.query_one("#slash-title", Static).update(
+                            "%d command%s (Up/Down moves, Tab completes, Enter runs, Esc closes)"
+                            % (len(items), "" if len(items) == 1 else "s"))
+                    else:
+                        self.query_one("#slash-title", Static).update(
+                            "No match - try /help (Esc closes)")
+                except Exception:
+                    pass
+                for button in self.query("#slash-list .slash-item"):
+                    try:
+                        action = str(getattr(button, "id", "") or "")
+                        if action.startswith("slash-"):
+                            action = action[len("slash-"):]
+                    except Exception:
+                        continue
+                    try:
+                        button.display = action in visible
+                    except Exception:
+                        try:
+                            button.styles.display = "block" if action in visible else "none"
+                        except Exception:
+                            pass
+                    try:
+                        button.set_class(action == selected_action, "selected")
+                    except Exception:
+                        pass
+                if selected_action:
+                    try:
+                        widget = self.query_one("#slash-%s" % selected_action, Button)
+                        self.query_one("#slash-list", VerticalScroll).scroll_to_widget(widget)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def _open_slash_menu(self) -> None:
+            """Focus the composer with '/' so the menu lists every command."""
+            try:
+                composer = self.query_one("#composer", Composer)
+            except Exception:
+                return
+            try:
+                text = str(composer.text or "")
+            except Exception:
+                text = ""
+            if not text.lstrip().startswith("/"):
+                try:
+                    composer.text = "/"
+                except Exception:
+                    pass
+            self._slash_selected = 0
+            try:
+                composer.focus()
+            except Exception:
+                pass
+            self._refresh_slash_menu()
+
+        def _close_slash_menu(self) -> None:
+            self._slash_open = False
+            self._slash_selected = 0
+            try:
+                self.query_one("#slash-menu").remove_class("open")
+            except Exception:
+                pass
+
+        def _slash_move(self, delta: int) -> None:
+            if not self._slash_open or not self._slash_items:
+                return
+            self._slash_selected = (self._slash_selected + delta) % len(self._slash_items)
+            self._refresh_slash_menu()
+
+        def _slash_complete(self) -> None:
+            """Tab completes the composer with the highlighted command."""
+            if not self._slash_open or not self._slash_items:
+                return
+            if not (0 <= self._slash_selected < len(self._slash_items)):
+                return
+            slash = self._slash_items[self._slash_selected][0]
+            try:
+                composer = self.query_one("#composer", Composer)
+                rest = ""
+                try:
+                    current = str(composer.text or "")
+                    parts = current.lstrip().split(None, 1)
+                    if len(parts) > 1:
+                        rest = " " + parts[1]
+                except Exception:
+                    rest = ""
+                composer.text = slash + (rest if rest else " ")
+            except Exception:
+                pass
+            self._refresh_slash_menu()
+
+        def _run_slash_text(self, text: str) -> bool:
+            """Run a '/command' composer line. True when the line was slash."""
+            if not str(text or "").lstrip().startswith("/"):
+                return False
+            action = parse_slash_command(text)
+            if action is None:
+                prefix = str(text).lstrip().split(None, 1)[0]
+                if prefix.strip() == "/":
+                    # Bare '/': keep the menu open, nothing to run.
+                    self._refresh_slash_menu()
+                    return True
+                self._say(transcript_mod.NOTICE,
+                          "Unknown command %s - type / to list every command." % prefix)
+                self._close_slash_menu()
+                return True
+            try:
+                self.query_one("#composer", Composer).clear()
+            except Exception:
+                pass
+            self._close_slash_menu()
+            self._command_chosen("cmd-" + action)
+            return True
+
+        def on_text_area_changed(self, event) -> None:
+            try:
+                changed = getattr(event, "text_area", None)
+                if changed is not None and getattr(changed, "id", "") != "composer":
+                    return
+            except Exception:
+                pass
+            self._refresh_slash_menu()
 
         def action_help(self):
             self.push_screen(HelpScreen())
@@ -1726,7 +2024,10 @@ if _TEXTUAL:
             self._live_following = self._at_bottom()
 
         def action_interrupt_run(self) -> None:
-            """Esc stops the agent: the evidence written so far stays."""
+            """Esc closes the slash menu first, else stops the agent."""
+            if getattr(self, "_slash_open", False):
+                self._close_slash_menu()
+                return
             self._stop_run()
 
         def action_quit(self) -> None:
@@ -1762,7 +2063,7 @@ if _TEXTUAL:
             """The hard stop: kill the agent tree, the local Ollama, the services.
 
             Textual uses Ctrl+C for copying the selection, so the hard stop
-            lives in the command palette (and in closing the window).
+            lives in the slash menu (/hard-stop) and in closing the window.
             """
             self._busy_inc()
             try:
@@ -2038,7 +2339,7 @@ if _TEXTUAL:
 
         # -- the composer ----------------------------------------------------
         def action_submit_task(self) -> None:
-            """Enter in the composer starts a run with that task."""
+            """Enter in the composer starts a run - or runs a /command."""
             try:
                 composer = self.query_one("#composer", Composer)
             except Exception:
@@ -2046,6 +2347,12 @@ if _TEXTUAL:
             task = composer.text.strip()
             if not task:
                 return
+            # Slash first (opencode-style): a command never starts a run.
+            try:
+                if self._run_slash_text(task):
+                    return
+            except Exception:
+                pass
             if self._run_state() == "running":
                 # One run at a time: the agent has to stop first (Esc).
                 self.notify("The agent is still working - press Esc or Stop first.",
@@ -2063,6 +2370,20 @@ if _TEXTUAL:
             self.action_submit_task()
 
         async def on_button_pressed(self, event):
+            bid = getattr(event.button, "id", "")
+            if bid and bid.startswith("slash-"):
+                action = bid[len("slash-"):]
+                try:
+                    self.query_one("#composer", Composer).clear()
+                except Exception:
+                    pass
+                self._close_slash_menu()
+                try:
+                    self.query_one("#composer", Composer).focus()
+                except Exception:
+                    pass
+                self._command_chosen("cmd-" + action)
+                return
             if event.button.id != "btn-send":
                 return
             state = self._run_state()

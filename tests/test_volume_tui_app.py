@@ -312,6 +312,30 @@ class NewRunFlow(unittest.TestCase):
         self.assertEqual(effective["task"], "rotate a little")
 
 
+@unittest.skipUnless(tui_app is not None, "volume_tui app not loaded")
+class SlashFuzzyMatch(unittest.TestCase):
+    """Slash filtering is VSCode-style fuzzy (subsequence, in order)."""
+
+    def _slashes(self, prefix: str) -> list[str]:
+        return [slash for slash, _action, _tip in tui_app.match_slash_commands(prefix)]
+
+    def test_prefix_still_matches(self):
+        self.assertEqual(self._slashes("/v"), ["/verify"])
+        self.assertEqual(self._slashes("/ver"), ["/verify"])
+
+    def test_in_order_chars_match(self):
+        for prefix in ("/rify", "/rfy", "/eiy"):
+            self.assertEqual(self._slashes(prefix), ["/verify"], prefix)
+
+    def test_wrong_char_matches_nothing(self):
+        self.assertEqual(self._slashes("/var"), [])
+
+    def test_empty_lists_everything(self):
+        self.assertEqual(len(self._slashes("/")),
+                         len(tui_app.slash_commands()))
+        self.assertTrue(self._slashes("/"))
+
+
 def _conversation_text(app) -> str:
     """Everything the conversation shows, as plain text."""
     parts = []
@@ -1196,7 +1220,7 @@ class ComposerFlow(unittest.TestCase):
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
 class Dialogs(unittest.TestCase):
-    """The pages that were deleted are now dialogs behind the palette."""
+    """The pages that were deleted are now dialogs behind the slash menu."""
 
     def test_the_settings_dialog_saves_the_form(self):
         import asyncio
@@ -1519,11 +1543,8 @@ class ChatLog(unittest.TestCase):
                         {"task": "Set the camera rotationXYZ."}))
                     app.start_live(run_dir, "run-demo")
                     with patch.object(tui_app.chat_log_mod, "LOG_DIR", log_dir):
-                        await pilot.press("ctrl+p")
-                        await pilot.pause()
-                        self.assertIsInstance(app.screen, tui_app.CommandScreen)
-                        app.screen.query_one("#cmd-live-export-chat",
-                                             tui_app.Button).focus()
+                        # Slash menu (opencode-style): /export-chat exports.
+                        app.query_one("#composer", tui_app.Composer).text = "/export-chat"
                         await pilot.pause()
                         await pilot.press("enter")
                         await pilot.pause()
@@ -1606,16 +1627,16 @@ class ChatLog(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual not installed")
-class CtrlPOpensTheTuiPalette(unittest.TestCase):
-    """Ctrl+P must open the TUI palette, not Textual's system palette."""
+class NoCtrlPShortcut(unittest.TestCase):
+    """No Ctrl+P anywhere: slash in the composer is the only menu."""
 
-    def test_ctrl_p_is_not_taken_over_by_textual(self):
+    def test_no_ctrl_p_binding_and_palette_disabled(self):
         app = tui_app.VolumeAgentApp()
+        self.assertFalse(app.ENABLE_COMMAND_PALETTE)
         bindings = app._bindings.key_to_bindings.get("ctrl+p", ())
-        self.assertEqual(len(bindings), 1)
-        self.assertEqual(bindings[0].action, "app.command_palette")
+        self.assertFalse(list(bindings))
 
-    def test_ctrl_p_opens_the_tui_palette(self):
+    def test_ctrl_p_does_nothing(self):
         import asyncio
 
         async def _run():
@@ -1624,13 +1645,50 @@ class CtrlPOpensTheTuiPalette(unittest.TestCase):
                 await pilot.pause()
                 await pilot.press("ctrl+p")
                 await pilot.pause()
-                self.assertIsInstance(app.screen, tui_app.CommandScreen)
-                # The palette runs its action when a command is picked.
-                app.screen.query_one("#cmd-settings", tui_app.Button).focus()
+                # No menu, no text: slash is the only way in.
+                self.assertFalse(app._slash_open)
+                self.assertEqual(app.query_one("#composer").text, "")
+                # The slash menu still runs its action when a command is picked.
+                app.query_one("#composer", tui_app.Composer).text = "/settings"
                 await pilot.pause()
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, tui_app.SettingsScreen)
+        asyncio.run(_run())
+
+    def test_slash_menu_filters_and_runs(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                composer = app.query_one("#composer", tui_app.Composer)
+                # A single char filters instantly: /v shows only /verify.
+                composer.text = "/v"
+                await pilot.pause()
+                slashes = [slash for slash, _action, _tip in app._slash_items]
+                self.assertEqual(slashes, ["/verify"])
+                shown = [b for b in app.query("#slash-list .slash-item") if b.display]
+                self.assertEqual(len(shown), 1)
+                # VSCode-style fuzzy: chars in order match (/rify hits /verify).
+                composer.text = "/rify"
+                await pilot.pause()
+                self.assertEqual(
+                    [slash for slash, _action, _tip in app._slash_items], ["/verify"])
+                # A wrong char matches nothing (/var: 'a' is not in verify).
+                composer.text = "/var"
+                await pilot.pause()
+                self.assertEqual(app._slash_items, [])
+                composer.text = "/ver"
+                await pilot.pause()
+                slashes = [slash for slash, _action, _tip in app._slash_items]
+                self.assertIn("/verify", slashes)
+                self.assertNotIn("/settings", slashes)
+                # Tab completes, Enter runs.
+                app._slash_complete()
+                await pilot.pause()
+                self.assertTrue(str(composer.text).startswith("/verify"))
         asyncio.run(_run())
 
     def test_every_command_palette_button_carries_a_tooltip(self):
@@ -1718,7 +1776,7 @@ class ModalEscape(unittest.TestCase):
                 self.assertTrue(app.is_running)
         asyncio.run(_run())
 
-    def test_escape_closes_the_command_palette(self):
+    def test_escape_closes_the_slash_menu(self):
         import asyncio
 
         async def _run():
@@ -1727,10 +1785,10 @@ class ModalEscape(unittest.TestCase):
                 await pilot.pause()
                 app.action_commands()
                 await pilot.pause()
-                self.assertIsInstance(app.screen, tui_app.CommandScreen)
+                self.assertTrue(app._slash_open)
                 await pilot.press("escape")
                 await pilot.pause()
-                self.assertNotIsInstance(app.screen, tui_app.DismissibleModal)
+                self.assertFalse(app._slash_open)
                 self.assertTrue(app.is_running)
         asyncio.run(_run())
 

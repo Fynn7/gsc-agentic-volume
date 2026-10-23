@@ -22,8 +22,8 @@ Evidence is read-only except new runs, `verification.json`,
 - The TUI itself starts the missing **Local loopback** services on entry (see
   "Service lifecycle"); it never downloads a model and never calls one.
 - Non-interactive shells exit 2 with guidance. `Ctrl+Q` quits and stops every
-  process the TUI owns (see "Leaving the TUI"); the hard stop (Ctrl+P →
-  *Hard stop…*) also stops a local Ollama the TUI did not start. `Ctrl+C`
+  process the TUI owns (see "Leaving the TUI"); the hard stop (`/hard-stop`)
+  also stops a local Ollama the TUI did not start. `Ctrl+C`
   copies the selected text — the terminal default, not a hard stop.
 
 ## The screen (one screen, no workspaces)
@@ -95,7 +95,7 @@ Evidence is read-only except new runs, `verification.json`,
 | Enter | send the composer text: it starts a new run |
 | Ctrl+Up / Ctrl+Down | scroll the conversation (the composer keeps the cursor) |
 | Esc | stop the running agent (the evidence already written stays) |
-| Ctrl+P | the commands (below) |
+| / + Up/Down/Tab/Enter/Esc | the slash menu: filter, move, complete, run, close |
 | F1 | help |
 | F2 | the glossary: what the words of the screen mean |
 | Ctrl+H | the technical rows (the model calls, the HTTP status) |
@@ -125,25 +125,29 @@ back to the bottom resumes it (there is no Follow button).
   ended; the Thinking block stops spinning and the conversation says how the
   run ended.
 
-### Commands (Ctrl+P)
+### Slash commands (type / in the composer, like opencode)
 
-| Command | What it does |
+| Slash | What it does |
 | --- | --- |
-| Run: the audited Task A / Task B | start the audited preset prompts |
-| Run: stop the agent | cooperative stop; the launcher records `interrupted` |
-| Live: verify the evidence | read-only check → `verification.json` |
-| Live: copy the JSON log | the run's meta data, every event and every JSON log file |
-| Live: copy the chat log | the conversation as plain text: the task, the model's thinking, the tool calls, the frames and the answer |
-| Live: export the chat log | the same conversation written to `runtime/tui/chat-logs/<runId>-<time>.log` (the run folder stays read-only) |
-| Live: view the current PNG | opens the previewed PNG in the system viewer |
-| Live: open the PNG folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
-| Runs: open another run | picks one of the runs on this machine and opens it here |
-| Settings: model, endpoints, budget | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, timeouts, max output tokens and the Think toggle |
-| Theme / Help | light or dark, the help screen |
-| Hard stop: kill everything this TUI owns | agent tree, local Ollama, owned services — then leave |
-| Quit the TUI | stops what the TUI owns, then leaves (asks first while a run is live) |
+| /task-a, /task-b | start the audited preset prompts |
+| /stop | cooperative stop; the launcher records `interrupted` |
+| /verify | read-only check → `verification.json` |
+| /copy-json | the run's meta data, every event and every JSON log file |
+| /copy-chat | the conversation as plain text: the task, the model's thinking, the tool calls, the frames and the answer |
+| /export-chat | the same conversation written to `runtime/tui/chat-logs/<runId>-<time>.log` (the run folder stays read-only) |
+| /open-png | opens the previewed PNG in the system viewer |
+| /open-folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
+| /runs | picks one of the runs on this machine and opens it here |
+| /settings | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, timeouts, max output tokens and the Think toggle |
+| /theme, /help, /glossary | light or dark, the help screen, the glossary |
+| /hard-stop | agent tree, local Ollama, owned services — then leave |
+| /quit | stops what the TUI owns, then leaves (asks first while a run is live) |
 
-Every command carries a tooltip that says what it does.
+Type `/` to list every command in a menu (Up/Down moves, Tab completes,
+Enter runs, Esc closes, click runs). Filtering is fuzzy like VSCode
+(`/rify` hits `/verify`, a wrong char like `/var` hits nothing).
+There is no Ctrl+P shortcut.
+Every menu entry carries the same tooltip as the retired modal palette.
 
 ### What was removed
 
@@ -151,8 +155,8 @@ The old workspaces (Dashboard, New Run, Runs, Live, Volumes, Services,
 Settings) are gone. What they did lives in the coding agent screen:
 
 - **Dashboard** → the status line.
-- **New Run** → the composer (a free task) plus the audited presets in the
-  command palette.
+- **New Run** → the composer (a free task) plus the audited presets as
+  slash commands (`/task-a`, `/task-b`).
 - **Runs** → *Runs: open another run* (a dialog, not a page).
 - **Live** → the conversation itself.
 - **Volumes / Services** → not part of a coding agent app: the volume is

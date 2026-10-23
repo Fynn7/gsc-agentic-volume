@@ -806,9 +806,15 @@ class TranscriptScroll(VerticalScroll if _TEXTUAL else object):
 
     It tells the app when the view moves, so a user who scrolls up to read
     the history is not yanked back to the newest entry.
+
+    Never focusable: the TextArea draws its solid block cursor only while
+    focused, so any click that moved focus here would hide the composer's
+    cursor. Scrolling (mouse wheel, Ctrl+Up/Down) works unfocused.
     """
 
     if _TEXTUAL:
+        can_focus = False
+
         def watch_scroll_y(self, old_value: float, new_value: float) -> None:
             super().watch_scroll_y(old_value, new_value)
             try:
@@ -857,6 +863,9 @@ class SafeSelection:
 class SafeStatic(SafeSelection, Static if _TEXTUAL else object):
     """A plain static whose selection never points past its content."""
 
+    if _TEXTUAL:
+        can_focus = False
+
 
 class FramePreview(SafeSelection, Static if _TEXTUAL else object):
     """Preview pane for a frame in the conversation.
@@ -865,7 +874,12 @@ class FramePreview(SafeSelection, Static if _TEXTUAL else object):
     exactly, otherwise the terminal folds the row and the picture is cut in
     half. The widget therefore asks the app to re-fit the frame whenever its
     own size changes (window resize, scrollbar appearing).
+
+    Never focusable: clicks here must not steal the composer's cursor.
     """
+
+    if _TEXTUAL:
+        can_focus = False
 
     def on_resize(self, event) -> None:
         try:
@@ -881,8 +895,12 @@ class TranscriptBlock(SafeSelection, Static if _TEXTUAL else object):
     """One entry of the conversation.
 
     The content is pushed with update(), so the block grows with the text
-    (the answer arrives word by word).
+    (the answer arrives word by word). Never focusable: clicks here must
+    not steal the composer's cursor.
     """
+
+    if _TEXTUAL:
+        can_focus = False
 
     def __init__(self, block: dict):
         super().__init__()
@@ -899,8 +917,12 @@ class ThinkingBlock(SafeSelection, Static if _TEXTUAL else object):
     """The model's thinking: one line, a click opens the reasoning chain.
 
     The block is the same one the model streams its reasoning into, so the
-    chain grows while the model works - open or closed.
+    chain grows while the model works - open or closed. Never focusable:
+    clicks here must not steal the composer's cursor.
     """
+
+    if _TEXTUAL:
+        can_focus = False
 
     def __init__(self, block: dict):
         super().__init__()
@@ -939,6 +961,9 @@ class ThinkingBlock(SafeSelection, Static if _TEXTUAL else object):
 
 class ImageBlock(Vertical if _TEXTUAL else object):
     """A frame in the conversation: the caption, the path and the picture."""
+
+    if _TEXTUAL:
+        can_focus = False
 
     def __init__(self, block: dict):
         super().__init__(classes="image-block block")
@@ -1084,6 +1109,10 @@ if _TEXTUAL:
         # menu. Disabling the palette also stops Textual from auto-adding
         # its own ctrl+p system-palette binding.
         ENABLE_COMMAND_PALETTE = False
+        # The solid block cursor lives in the composer (TextArea only draws
+        # its cursor while focused): the app boots with it there and hands
+        # focus straight back after any click on the main screen.
+        AUTO_FOCUS = "#composer"
         CSS = """
         Screen { layout: vertical; }
         ModalScreen { align: center middle; background: $background 80%; }
@@ -1328,6 +1357,43 @@ if _TEXTUAL:
             self.set_interval(UI_TICK_SECONDS, self._animate_thinking)
             self.set_interval(BACKEND_TICK_SECONDS, self._tick)
             self._say_welcome()
+            self._focus_composer()
+
+        def _focus_composer(self) -> None:
+            """Keep the solid block cursor in the composer.
+
+            TextArea only draws its cursor while focused, so every path
+            that could move focus (clicks, buttons, modals, Esc) hands it
+            back here on the main screen.
+            """
+            try:
+                self.query_one("#composer", Composer).focus()
+            except Exception:
+                pass
+
+        def _modal_closed(self, _result=None) -> None:
+            """A dialog went away: the cursor belongs to the composer again."""
+            try:
+                self.call_after_refresh(self._focus_composer)
+            except Exception:
+                self._focus_composer()
+
+        def on_click(self, event) -> None:
+            """Any mouse click on the main screen keeps the composer's cursor.
+
+            Buttons stop the click themselves (their Pressed handler
+            refocuses afterwards); a modal owns focus while it is open.
+            Everything else hands focus straight back after the click.
+            """
+            try:
+                if isinstance(self.screen, ModalScreen):
+                    return
+            except Exception:
+                pass
+            try:
+                self.call_after_refresh(self._focus_composer)
+            except Exception:
+                pass
 
         def _say_welcome(self) -> None:
             """The empty state: what this screen is and how to use it."""
@@ -2087,11 +2153,11 @@ if _TEXTUAL:
             self._refresh_slash_menu()
 
         def action_help(self):
-            self.push_screen(HelpScreen())
+            self.push_screen(HelpScreen(), callback=self._modal_closed)
 
         def action_glossary(self) -> None:
             """F2: the words the screen uses, explained."""
-            self.push_screen(GlossaryScreen())
+            self.push_screen(GlossaryScreen(), callback=self._modal_closed)
 
         def action_toggle_plumbing(self) -> None:
             """Ctrl+H: the technical rows (model calls, HTTP status).
@@ -2134,6 +2200,7 @@ if _TEXTUAL:
                 self._close_slash_menu()
                 return
             self._stop_run()
+            self._focus_composer()
 
         def action_quit(self) -> None:
             """Ctrl+Q asks first while a run is live, then leaves."""
@@ -2150,7 +2217,7 @@ if _TEXTUAL:
                     "  - the local Ollama this TUI started (model unloaded from VRAM)\n\n"
                     "Nothing is left running. The run keeps its evidence on disk."
                     % ", ".join(live),
-                    on_yes=self._quit_and_stop))
+                    on_yes=self._quit_and_stop), callback=self._modal_closed)
             else:
                 self._quit_and_stop()
 
@@ -2430,9 +2497,11 @@ if _TEXTUAL:
 
         def _run_chosen(self, run) -> None:
             if not run:
+                self._focus_composer()
                 return
             self.start_live(run["directory"], run.get("runId"))
             self._start_poll()
+            self._focus_composer()
 
         # -- volumes --------------------------------------------------------
         def _open_volumes(self) -> None:
@@ -2452,9 +2521,11 @@ if _TEXTUAL:
 
         def _volume_chosen(self, volume) -> None:
             if not volume:
+                self._focus_composer()
                 return
             path = str((volume or {}).get("path") or "")
             if not path:
+                self._focus_composer()
                 return
             self.settings = dict(self.settings)
             self.settings["volumePath"] = path
@@ -2474,6 +2545,7 @@ if _TEXTUAL:
                 self._render_status()
             except Exception:
                 pass
+            self._focus_composer()
 
         # -- settings --------------------------------------------------------
         def _open_settings(self) -> None:
@@ -2482,6 +2554,7 @@ if _TEXTUAL:
         def _settings_saved(self, settings) -> None:
             if settings:
                 self.settings = dict(settings)
+            self._focus_composer()
 
         # -- the composer ----------------------------------------------------
         def action_submit_task(self) -> None:
@@ -2550,6 +2623,9 @@ if _TEXTUAL:
                             timeout=3, markup=False)
             else:
                 self.action_submit_task()
+            # The click moved focus to the button: hand it back so the
+            # composer's solid block cursor never disappears.
+            self._focus_composer()
 
         # -- starting a run --------------------------------------------------
         def _start_run(self, task_kind: str, prompt: str) -> None:

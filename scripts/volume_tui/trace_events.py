@@ -13,6 +13,7 @@ verify_local_agent.py.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -145,6 +146,7 @@ class EventTail:
         events: list[dict] = []
         events += self._poll_harness()
         events += self._poll_session_json()
+        events += self._poll_live_meta()
         events += self._poll_events()
         events += self._poll_http()
         return events
@@ -356,6 +358,31 @@ class EventTail:
             return "%sx%s" % (output[0], output[1])
         return "?"
 
+    def _poll_live_meta(self) -> list[dict]:
+        """The live budget, read from the renderer's own session.json.
+
+        The run directory's session.json is only written when the run ends;
+        while the run is live the renderer rewrites
+        runtime/<session>/session.json on every event (goal, model, budget,
+        used, state). Without this the status line falls back to
+        config.json and shows 0 observations used for the whole run.
+        """
+        if self.session_dir is None:
+            return []
+        try:
+            data = json.loads((self.session_dir / "session.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        live = {key: data.get(key) for key in ("goal", "model", "budget", "used", "state")
+                if data.get(key) is not None}
+        if live:
+            merged = dict(self.meta)
+            merged.update(live)
+            self.meta = merged
+        return []
+
     # -- runtime/<session>/events.jsonl (tools + images) ------------------
     def _poll_events(self) -> list[dict]:
         out = []
@@ -424,7 +451,7 @@ def resolve_session_dir(run_dir: Path) -> Path | None:
         except (OSError, ValueError):
             continue
         if session_id:
-            candidate = Path(__file__).resolve().parents[2] / "runtime" / session_id
+            candidate = _ROOT / "runtime" / session_id
             if candidate.is_dir():
                 return candidate
     # Fallback: session id from run.json (runtime/<session> layout used by codex runs).
@@ -433,7 +460,36 @@ def resolve_session_dir(run_dir: Path) -> Path | None:
     except (OSError, ValueError):
         session_id = None
     if session_id:
-        candidate = Path(__file__).resolve().parents[2] / "runtime" / session_id
+        candidate = _ROOT / "runtime" / session_id
         if candidate.is_dir():
             return candidate
+    # Fallback: the launcher's lock file. While the run is live the lock
+    # holds the session id (written right after /api/tools/open) together
+    # with the run directory and run id, so the live session resolves even
+    # before run.json carries the session id.
+    try:
+        locks = sorted((_ROOT / "runtime" / "locks").glob("*.lock"))
+    except OSError:
+        locks = []
+    wanted = {run_dir.name, str(run_dir)}
+    try:
+        wanted.add(str(run_dir.resolve()))
+    except OSError:
+        pass
+    wanted = {os.path.normcase(item) for item in wanted}
+    for lock_path in locks:
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        candidates = {os.path.normcase(str(payload.get("runId") or "")),
+                      os.path.normcase(str(payload.get("directory") or ""))}
+        if candidates & wanted:
+            session_id = payload.get("sessionId")
+            if session_id:
+                candidate = _ROOT / "runtime" / session_id
+                if candidate.is_dir():
+                    return candidate
     return None

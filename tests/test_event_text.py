@@ -18,19 +18,23 @@ class ToolActions(unittest.TestCase):
     """The step in words: what the agent is doing right now."""
 
     def test_every_tool_has_a_short_verb(self):
-        self.assertEqual(event_text.tool_action("render_scene", {}), "Render a picture")
-        self.assertEqual(event_text.tool_action("inspect_scene", {}), "Read the scene")
-        self.assertEqual(event_text.tool_action("inspect_slice", {}), "Read one slice")
+        self.assertEqual(event_text.tool_action("render_scene", {}), "Rendering the frame")
+        self.assertEqual(event_text.tool_action("inspect_scene", {}), "Inspecting the scene")
+        self.assertEqual(event_text.tool_action("inspect_slice", {}), "Inspecting the slice")
+        # Done: the past tense, never the present.
+        self.assertEqual(event_text.tool_action_done("render_scene"), "Rendered the frame")
+        self.assertEqual(event_text.tool_action_done("inspect_scene"), "Inspected the scene")
+        self.assertEqual(event_text.tool_action_done("finish_task"), "Saved the result")
 
     def test_the_facts_say_input_output_and_effect(self):
         facts = event_text.tool_facts("render_scene", {
             "parameters": {"rotationXYZ": [25, -35, 10]}})
         self.assertIn("camera rotation 25,-35,10", facts)
         self.assertIn("a new PNG of the volume", facts)
-        self.assertIn("the scene changes", facts)
+        self.assertIn("updated the scene", facts)
         read = event_text.tool_facts("inspect_scene", {})
         self.assertIn("camera, opacity window, crop box, current picture", read)
-        self.assertIn("nothing changes", read)
+        self.assertIn("read-only", read)
 
     def test_the_numbers_are_explained_in_words(self):
         lines = event_text.effect_lines({
@@ -82,9 +86,9 @@ class ToolCalls(unittest.TestCase):
         self.assertIn("Tilt camera down", event["title"])
         self.assertIn("scene revision 0", event["detail"])
 
-    def test_read_only_tools_say_that_they_change_nothing(self):
+    def test_read_only_tools_say_so(self):
         event = event_text.tool_call("inspect_scene", {})
-        self.assertIn("changes nothing", event["title"])
+        self.assertIn("read-only", event["title"])
         slice_event = event_text.tool_call("inspect_slice", {"axis": "z", "index": 120})
         self.assertIn("slice z=120", slice_event["title"])
 
@@ -162,6 +166,25 @@ class ModelTurns(unittest.TestCase):
         event = event_text.harness_warning("Model metadata not found")
         self.assertIn("WARN", event["title"])
         self.assertIn("Model metadata not found", event["title"])
+
+
+class Compaction(unittest.TestCase):
+    def test_the_headline_names_what_is_left(self):
+        self.assertIn("24 observations left", event_text.compaction_headline("24"))
+        self.assertEqual(event_text.compaction_headline(None), "Context checkpoint")
+
+    def test_the_glossary_explains_the_checkpoint(self):
+        words = dict(event_text.GLOSSARY)
+        self.assertIn("context checkpoint", words)
+
+    def test_durations_stay_short(self):
+        self.assertEqual(event_text.format_duration(5), "5s")
+        self.assertEqual(event_text.format_duration(59.4), "59s")
+        self.assertEqual(event_text.format_duration(60), "1min 0s")
+        self.assertEqual(event_text.format_duration(125), "2min 5s")
+        self.assertEqual(event_text.format_duration(3599), "59min 59s")
+        self.assertEqual(event_text.format_duration(3661), "1h 1min 1s")
+        self.assertEqual(event_text.format_duration(7200), "2h 0min 0s")
 
 
 class EndOfRun(unittest.TestCase):

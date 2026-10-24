@@ -16,21 +16,30 @@ MODEL_MARK = "\u00bb"
 
 # What each renderer tool does, in words a newcomer can act on.
 TOOL_MEANING = {
-    "inspect_scene": "read the current scene, its numbers and its PNG (changes nothing)",
+    "inspect_scene": "read the current scene, its numbers and its PNG (read-only)",
     "render_scene": "render a new frame from the volume",
-    "inspect_slice": "read one raw voxel slice (changes nothing)",
+    "inspect_slice": "read one raw voxel slice (read-only)",
     "finish_task": "save an already rendered frame as the final result",
 }
 
-# The step, in three words. No parentheses, no explanation: the facts that
-# follow the verb on the row say what the call does.
+# The step, while it runs. Present progressive: the call is still working.
 TOOL_ACTION = {
-    "inspect_scene": "Read the scene",
-    "render_scene": "Render a picture",
-    "inspect_slice": "Read one slice",
-    "finish_task": "Save the result",
+    "inspect_scene": "Inspecting the scene",
+    "render_scene": "Rendering the frame",
+    "inspect_slice": "Inspecting the slice",
+    "finish_task": "Saving the result",
 }
-DEFAULT_ACTION = "Call the renderer"
+DEFAULT_ACTION = "Calling the renderer"
+
+# The step, once it returned. Past tense: the work is done (an ✗ behind it
+# says the renderer refused it, the title still names the attempt).
+TOOL_ACTION_DONE = {
+    "inspect_scene": "Inspected the scene",
+    "render_scene": "Rendered the frame",
+    "inspect_slice": "Inspected the slice",
+    "finish_task": "Saved the result",
+}
+DEFAULT_ACTION_DONE = "Called the renderer"
 
 # What the call hands back.
 TOOL_OUTPUT = {
@@ -40,12 +49,12 @@ TOOL_OUTPUT = {
     "finish_task": "the chosen frame, as the result",
 }
 
-# What the call changes.
+# What the call changed. Past tense: the row describes a call that ran.
 TOOL_EFFECT = {
-    "inspect_scene": "nothing changes",
-    "render_scene": "the scene changes",
-    "inspect_slice": "nothing changes",
-    "finish_task": "nothing changes",
+    "inspect_scene": "read-only",
+    "render_scene": "updated the scene",
+    "inspect_slice": "read-only",
+    "finish_task": "read-only",
 }
 
 # Parameter name -> short human label, in the order they are shown.
@@ -68,6 +77,26 @@ def is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def format_duration(seconds) -> str:
+    """A duration for the screen: "45s", "2min 5s", "1h 2min 3s".
+
+    Under a minute only seconds; under an hour minutes and seconds; beyond
+    that hours, minutes and seconds. Whole units, no decimals — the screen
+    ticks, it never shows fractions.
+    """
+    try:
+        total = int(float(seconds) + 0.5)
+    except (TypeError, ValueError, OverflowError):
+        return "?"
+    if total < 0:
+        total = 0
+    if total < 60:
+        return "%ds" % total
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return "%dmin %ds" % (minutes, secs)
+    hours, minutes = divmod(minutes, 60)
+    return "%dh %dmin %ds" % (hours, minutes, secs)
 def brief(text, limit=200):
     """One line, capped, with an ellipsis when something was cut."""
     text = " ".join(str(text if text is not None else "").split())
@@ -131,8 +160,13 @@ def parameter_lines(parameters):
 
 
 def tool_action(name, arguments=None):
-    """The step, in three words: what the agent is doing right now."""
+    """The step, while it runs: what the agent is doing right now."""
     return TOOL_ACTION.get(str(name or ""), DEFAULT_ACTION)
+
+
+def tool_action_done(name):
+    """The step, once it returned: what the agent did."""
+    return TOOL_ACTION_DONE.get(str(name or ""), DEFAULT_ACTION_DONE)
 
 
 def tool_input(name, arguments=None):
@@ -212,6 +246,13 @@ def notice_headline(count):
     return "%s · %s" % (notices_label(count), hint)
 
 
+def compaction_headline(left) -> str:
+    """One line for the compaction row: what is left of the budget."""
+    if left is None:
+        return "Context checkpoint"
+    return "Context checkpoint · %s observations left" % count(left)
+
+
 # The words the screen uses, explained for someone who never saw this system.
 GLOSSARY = (
     ("observation", "one look at the volume: a rendered picture or a raw slice. "
@@ -230,17 +271,20 @@ GLOSSARY = (
     ("crop", "the part of the volume that is shown (voxel bounds, not a "
              "percentage)."),
     ("inspect_scene", "the tool that reads the current scene: its camera, its "
-                      "opacity window, its crop box and its picture. It changes "
-                      "nothing."),
+                      "opacity window, its crop box and its picture. It is "
+                      "read-only."),
     ("render_scene", "the tool that draws a new picture from the volume with "
                      "the settings you name."),
     ("inspect_slice", "the tool that reads one raw voxel layer as a grayscale "
-                      "picture. It changes nothing."),
+                      "picture. It is read-only."),
     ("finish_task", "the tool that saves an already rendered picture as the "
                     "result of the run."),
     ("finish_exploration", "the older name of finish_task: it ends the run "
                            "without rendering and cannot produce a new "
                            "picture."),
+    ("context checkpoint", "the model's summary of what the run knew when its "
+                          "context filled up. Housekeeping, not an answer: it "
+                          "gets its own row (◈), never a » line."),
     ("model call", "one request to the model. Technical detail (Ctrl+H)."),
     ("HTTP 200", "the model answered without an error. Technical detail (Ctrl+H)."),
     ("harness", "the program that runs the model and hands it the renderer tools."),
@@ -299,7 +343,7 @@ def _tool_subject(name, arguments):
     if name == "inspect_slice":
         axis = arguments.get("axis", "?")
         index = arguments.get("index", "?")
-        return ("read slice %s=%s (changes nothing)" % (axis, count(index)),
+        return ("read slice %s=%s (read-only)" % (axis, count(index)),
                 ["axis %s, index %s" % (axis, count(index))])
     if name == "finish_task":
         revision = arguments.get("frameRevision", "?")

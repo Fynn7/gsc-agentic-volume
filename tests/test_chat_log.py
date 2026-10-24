@@ -22,7 +22,7 @@ def _conversation():
                    subtitle="in 120, out 40 tokens",
                    body="Rotate the camera as the task asks.",
                    data={"reasoning": True})
-    transcript.add(tui_transcript.TOOL, title="Render a picture",
+    transcript.add(tui_transcript.TOOL, title="Rendered the frame",
                    subtitle="camera rotation 25,-35,10 · a new PNG of the volume",
                    status="done", body="» to see the top")
     transcript.add(tui_transcript.IMAGE, title="frame revision 1",
@@ -36,7 +36,7 @@ class ChatLogText(unittest.TestCase):
     def test_the_log_carries_the_task_the_call_and_the_answer(self):
         text = tui_chat_log.chat_log_text(_conversation())
         self.assertIn("Set the camera rotationXYZ to [25,-35,10] degrees.", text)
-        self.assertIn("Render a picture", text)
+        self.assertIn("Rendered the frame", text)
         self.assertIn("camera rotation 25,-35,10", text)
         self.assertIn("The camera is now rotated to [25,-35,10].", text)
 
@@ -51,7 +51,7 @@ class ChatLogText(unittest.TestCase):
         text = tui_chat_log.chat_log_text(_conversation())
         self.assertIn("▌ Set the camera", text)      # the user's task
         self.assertIn("» The camera is now rotated", text)  # the model's words
-        self.assertIn("● Render a picture", text)    # a step of the agent
+        self.assertIn("● Rendered the frame", text)    # a step of the agent
         self.assertIn("▣ frame revision 1", text)    # a picture
         self.assertIn("✓", text)                      # a done turn
 
@@ -140,6 +140,17 @@ class ChatLogText(unittest.TestCase):
         # The log opens what the screen folds behind Ctrl+H.
         self.assertIn("Under-development features enabled", text)
         self.assertNotIn("Ctrl+H", text)
+
+    def test_the_checkpoint_summary_opens_in_the_log(self):
+        transcript = tui_transcript.Transcript()
+        transcript.ingest({"kind": "message_done",
+                           "text": "# Context Checkpoint\n24 remaining observations",
+                           "compaction": True, "call": 8})
+        text = tui_chat_log.chat_log_text(transcript.blocks)
+        self.assertIn("◈ Context checkpoint", text)
+        self.assertIn("24 observations left", text)
+        # The screen folds it away; the log keeps the model's words.
+        self.assertIn("» # Context Checkpoint", text)
 
 
 class ChatLogExport(unittest.TestCase):

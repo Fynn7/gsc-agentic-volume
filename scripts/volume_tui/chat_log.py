@@ -100,6 +100,12 @@ def block_lines(block: dict) -> list[str]:
         head = "".join(part for part, _role
                        in transcript_mod.thinking_row_parts(block))
         return [head] + _lines(body, MODEL_MARK, every_line=True, indent_first=True)
+    if kind == transcript_mod.COMPACTION:
+        # The checkpoint summary: the screen folds it away, the log opens
+        # it like the reasoning chain (a file has no keys).
+        head = "".join(part for part, _role
+                       in transcript_mod.compaction_row_parts(block))
+        return [head] + _lines(body, MODEL_MARK, every_line=True, indent_first=True)
     if kind == transcript_mod.TOOL:
         return [_tool_head(block)] + _lines(body, indent_first=True)
     if kind == transcript_mod.FINISH:

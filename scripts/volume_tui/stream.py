@@ -11,6 +11,7 @@ Pure functions plus one small tailing helper - no Textual, no model.
 from __future__ import annotations
 
 import json
+import re as _re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,13 @@ for _extra in (_ROOT / "scripts", Path(__file__).resolve().parent):
 
 # The events of the OpenAI Responses API this app records. The reasoning
 # events only appear when the model is asked to think (settings: Think).
+_HTTP_INDEX = _re.compile(r"http-(\d+)")
+
+
+def _http_index(path) -> int:
+    """The model call number of a recorded http file (http-NNN.*)."""
+    match = _HTTP_INDEX.search(str(getattr(path, "name", path)))
+    return int(match.group(1)) if match else 0
 _TEXT_DELTA = "response.output_text.delta"
 _REASONING_DELTAS = ("response.reasoning_summary_text.delta",
                      "response.reasoning_text.delta")
@@ -121,13 +129,42 @@ class StreamTail:
     """Tails the recorded model streams of one run.
 
     The files grow while the model answers, so the tail reads only what is
-    new and never parses a half-written event.
+    new and never parses a half-written event. Every event carries the model
+    call it came from (`call`, the http-NNN index) and whether that call is
+    a context checkpoint compaction (`compaction`), read from the recorded
+    request body — so the transcript can keep one thinking block per call
+    and give the compaction summary its own row.
     """
+
+    # The marker the launcher forwards when the model call is a context
+    # checkpoint compaction, not a step of the run.
+    COMPACTION_MARKER = "CONTEXT CHECKPOINT COMPACTION"
 
     def __init__(self, run_dir: Path):
         self.run_dir = Path(run_dir)
         self._offsets: dict[str, int] = {}
         self._parsers: dict[str, SseParser] = {}
+        self._compaction: dict[str, bool] = {}
+
+    def _is_compaction(self, key: str) -> bool:
+        """Is this recorded model call a context checkpoint compaction?"""
+        if key in self._compaction:
+            return self._compaction[key]
+        index = _http_index(Path(key))
+        found = False
+        for name in ("http-%03d.forwarded.bin" % index, "http-%03d.request.bin" % index):
+            path = self.run_dir / "http" / name
+            try:
+                if path.stat().st_size > 32 * 1024 * 1024:
+                    continue
+                head = path.read_bytes()[:4 * 1024 * 1024]
+            except OSError:
+                continue
+            if self.COMPACTION_MARKER.encode("utf-8") in head:
+                found = True
+                break
+        self._compaction[key] = found
+        return found
 
     def poll(self) -> list[dict]:
         """The chunks that arrived since the last poll."""
@@ -153,4 +190,10 @@ class StreamTail:
             return []
         if not data:
             return []
-        return parser.feed(data)
+        import time as _time
+        stamp = _time.time()
+        call = _http_index(path)
+        compaction = self._is_compaction(key)
+        return [dict(event, call=call, ts=stamp,
+                     **({"compaction": True} if compaction else {}))
+                for event in parser.feed(data)]

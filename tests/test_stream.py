@@ -128,5 +128,47 @@ class StreamTail(unittest.TestCase):
             self.assertIn("text_delta", kinds)
 
 
+class StreamCallTags(unittest.TestCase):
+    """Every streamed event knows which model call it came from."""
+
+    def test_the_tail_tags_each_event_with_its_model_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            http = run_dir / "http"
+            http.mkdir()
+            (http / "http-001.response.bin").write_text(
+                _sse({"type": "response.output_text.delta", "delta": "one"}),
+                encoding="utf-8")
+            (http / "http-002.response.bin").write_text(
+                _sse({"type": "response.output_text.delta", "delta": "two"}),
+                encoding="utf-8")
+            tail = tui_stream.StreamTail(run_dir)
+            events = tail.poll()
+            self.assertEqual([(e["call"], e["delta"]) for e in events],
+                             [(1, "one"), (2, "two")])
+            self.assertTrue(all("ts" in e for e in events))
+            self.assertTrue(all("compaction" not in e for e in events))
+
+    def test_a_compaction_call_is_flagged_from_the_request_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            http = run_dir / "http"
+            http.mkdir()
+            (http / "http-009.forwarded.bin").write_text(json.dumps({
+                "model": "qwen3.6:35b",
+                "input": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text",
+                     "text": "You are performing a CONTEXT CHECKPOINT COMPACTION."}]}]}),
+                encoding="utf-8")
+            (http / "http-009.response.bin").write_text(
+                _sse({"type": "response.output_text.delta", "delta": "# Context"}),
+                encoding="utf-8")
+            tail = tui_stream.StreamTail(run_dir)
+            events = tail.poll()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["call"], 9)
+            self.assertTrue(events[0]["compaction"])
+
+
 if __name__ == "__main__":
     unittest.main()

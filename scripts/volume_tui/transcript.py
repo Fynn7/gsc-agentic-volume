@@ -12,6 +12,7 @@ model - so the wording can be checked without a run.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ import event_text as text_mod
 USER = "user"
 THINKING = "thinking"
 ASSISTANT = "assistant"
+COMPACTION = "compaction"
 TOOL = "tool"
 IMAGE = "image"
 NOTICE = "notice"
@@ -46,6 +48,7 @@ META = "meta"
 MARKS = {
     USER: "▌",
     ASSISTANT: text_mod.MODEL_MARK,
+    COMPACTION: "◈",
     TOOL: "●",
     IMAGE: "▣",
     NOTICES: "⚠",
@@ -126,6 +129,49 @@ def thinking_headline(block: dict) -> tuple[str, str]:
     if status == "running":
         return ("✳", "Thinking" if reasoned else "Working")
     return ("✓", "Thought" if reasoned else "Model answered")
+
+
+# The head of a context checkpoint compaction: the model's summary of what
+# the run knew when its context filled up. It is the model's own words, but
+# it is housekeeping, not an answer — so it gets its own row, never a "»" one.
+_COMPACTION_HEAD = "# Context Checkpoint"
+_REMAINING_BEFORE = re.compile(r"(\d+)\s+remaining observations?", re.IGNORECASE)
+_REMAINING_AFTER = re.compile(r"remaining observations\*?\*?\s*:?\s*(\d+)",
+                              re.IGNORECASE)
+
+
+def is_checkpoint_text(text) -> bool:
+    """Is this the model's compaction summary rather than its answer?"""
+    return str(text or "").lstrip().startswith(_COMPACTION_HEAD)
+
+
+def compaction_remaining(text) -> str | None:
+    """The observations the checkpoint says are left ("24"), if it says so."""
+    match = _REMAINING_BEFORE.search(str(text or ""))
+    if match:
+        return match.group(1)
+    match = _REMAINING_AFTER.search(str(text or ""))
+    return match.group(1) if match else None
+
+
+def compaction_row_parts(block: dict) -> list[tuple[str, str]]:
+    """The compaction row as parts: (text, role).
+
+    Roles mirror the thinking row: "spin" (the summary is still arriving),
+    "ok" (it is complete), "words" (Context checkpoint), "sub" (the
+    observations left).
+    """
+    running = block.get("status") == "running"
+    mark = "◈"
+    if running:
+        head = str(block.get("spinner") or mark)
+        parts = [(head, "spin"), (" Context checkpoint", "words")]
+    else:
+        parts = [(mark, "ok"), (" Context checkpoint", "words")]
+    subtitle = str(block.get("subtitle") or "")
+    if subtitle:
+        parts.append(("  %s" % subtitle, "sub"))
+    return parts
 
 
 def brief(text, limit=200) -> str:
@@ -235,6 +281,20 @@ def _with_event_time(event: dict) -> dict:
     return stamped
 
 
+def _thinking_elapsed(block: dict) -> str:
+    """The frozen duration of a finished thinking row ("for 45s").
+
+    The row keeps the time it took, the way the tool rows keep theirs —
+    only while it runs does the screen count.
+    """
+    started = block.get("ts") or time.time()
+    try:
+        elapsed = max(0.0, time.time() - float(started))
+    except (TypeError, ValueError):
+        elapsed = 0.0
+    return "for " + text_mod.format_duration(elapsed)
+
+
 class Transcript:
     """The conversation with one run.
 
@@ -246,6 +306,7 @@ class Transcript:
     def __init__(self):
         self.blocks: list[dict] = []
         self._thinking = None      # the open "Thinking" block
+        self._thinking_call = None  # the model call the open block reasons about
         self._tools: dict[str, dict] = {}   # tool name -> open tool block
         self._answer_text = ""    # the answer as the model stream delivers it
         self._notices: list[str] = []   # the harness notices, one row for all
@@ -254,6 +315,7 @@ class Transcript:
     def clear(self) -> None:
         self.blocks = []
         self._thinking = None
+        self._thinking_call = None
         self._tools = {}
         self._answer_text = ""
         self._notices = []
@@ -335,6 +397,16 @@ class Transcript:
     def _ingest_thinking_end(self, event: dict) -> list[dict]:
         block = self._thinking
         if block is None:
+            # The chain of the last call already closed when its tool call
+            # arrived: mark it done instead of opening an empty row.
+            last = self.find(THINKING)
+            if last is not None:
+                last["status"] = "done"
+                usage = event.get("usage") or {}
+                last["subtitle"] = "in %s, out %s tokens" % (
+                    text_mod.count(usage.get("input_tokens")),
+                    text_mod.count(usage.get("output_tokens")))
+                return [last]
             block = self.add(THINKING, title="Thinking", status="done",
                              ts=event.get("ts"))
         usage = event.get("usage") or {}
@@ -344,6 +416,7 @@ class Transcript:
         block["status"] = "done"
         block["subtitle"] = tokens
         self._thinking = None
+        self._thinking_call = None
         return [block]
 
     def _ingest_thinking(self, event: dict) -> list[dict]:
@@ -357,9 +430,28 @@ class Transcript:
             return []
         return [self.add(ASSISTANT, title=reason, ts=event.get("ts"))]
 
-    def _thinking_block(self, ts=None) -> dict:
-        """The open Thinking block (created when the model starts working)."""
+    def _thinking_block(self, ts=None, call=None) -> dict:
+        """The open Thinking block (created when the model starts working).
+
+        One model call gets one block: when the stream of a new call arrives
+        while the previous block is still open, the previous chain is
+        complete and a new block starts. Otherwise the whole run would read
+        as a single Thinking row.
+        """
         block = self._thinking
+        if block is not None:
+            if call is None or self._thinking_call in (None, call):
+                if call is not None:
+                    self._thinking_call = call
+                return block
+            # A new model call reasons in a new row: the old chain is over,
+            # and its elapsed time freezes into the row (an ended row never
+            # counts, it keeps its final duration like the tool rows do).
+            block["status"] = "done"
+            block["subtitle"] = _thinking_elapsed(block)
+            self._thinking = None
+            self._thinking_call = None
+            block = None
         if block is None:
             last = self.find(THINKING)
             if last is not None and not str(last.get("body") or "").strip():
@@ -370,14 +462,78 @@ class Transcript:
             else:
                 block = self.add(THINKING, title="Thinking", status="running", ts=ts)
             self._thinking = block
+            self._thinking_call = call
         return block
+
+    def _is_compaction(self, event: dict, text) -> bool:
+        """Is this text the compaction summary, not an answer?
+
+        The stream tags the events of a compaction call (read from the
+        recorded request body); the harness text is recognised by its head,
+        so a reopened run folds it the same way.
+        """
+        return bool(event.get("compaction")) or is_checkpoint_text(text)
+
+    def _compaction_block(self, event: dict) -> dict:
+        """The open compaction row, one per compaction call."""
+        call = event.get("call")
+        last = None
+        for block in reversed(self.blocks):
+            if block["kind"] == COMPACTION:
+                last = block
+                break
+        if (last is not None and last.get("data", {}).get("open")
+                and (call is None or last.get("data", {}).get("call") == call)):
+            if event.get("ts") is not None:
+                last["ts"] = event["ts"]
+            return last
+        if last is not None and last.get("data", {}).get("open"):
+            last["data"]["open"] = False
+            last["status"] = "done"
+        block = self.add(COMPACTION, title="Context checkpoint", status="running",
+                         ts=event.get("ts"))
+        block["data"]["open"] = True
+        block["data"]["call"] = call
+        return block
+
+    @staticmethod
+    def _stamp_compaction(block: dict) -> None:
+        """The row names what the checkpoint says is left."""
+        left = compaction_remaining(block.get("body") or "")
+        block["subtitle"] = ("%s observations left" % left) if left else ""
+
+    def _ingest_compaction_delta(self, event: dict, delta: str) -> list[dict]:
+        block = self._compaction_block(event)
+        block["body"] = (block.get("body") or "") + delta
+        self._stamp_compaction(block)
+        return [block]
+
+    def _ingest_compaction_full(self, event: dict, text: str) -> list[dict]:
+        """The whole summary as the harness reports it (grows per update)."""
+        text = str(text or "").strip()
+        if not text:
+            return []
+        block = self._compaction_block(event)
+        if block.get("body") == text and not block.get("data", {}).get("open"):
+            return []
+        block["body"] = text
+        self._stamp_compaction(block)
+        return [block]
+
+    def _close_compaction(self, event: dict, text: str) -> list[dict]:
+        text = str(text or "").strip()
+        blocks = self._ingest_compaction_full(event, text)
+        for block in blocks:
+            block["status"] = "done"
+            block["data"]["open"] = False
+        return blocks
 
     def _ingest_reasoning_delta(self, event: dict) -> list[dict]:
         """A piece of the model's thinking: the block grows with it."""
         delta = str(event.get("delta") or "")
         if not delta:
             return []
-        block = self._thinking_block(event.get("ts"))
+        block = self._thinking_block(event.get("ts"), event.get("call"))
         block["body"] = (block.get("body") or "") + delta
         block["data"]["reasoning"] = True
         return [block]
@@ -387,7 +543,7 @@ class Transcript:
         delta = str(event.get("delta") or "")
         if not delta:
             return []
-        block = self._thinking_block(event.get("ts"))
+        block = self._thinking_block(event.get("ts"), event.get("call"))
         block["body"] = (block.get("body") or "") + delta
         block["data"]["reasoning"] = True
         return [block]
@@ -397,7 +553,7 @@ class Transcript:
         text = str(event.get("text") or "").strip()
         if not text:
             return []
-        block = self._thinking_block(event.get("ts"))
+        block = self._thinking_block(event.get("ts"), event.get("call"))
         block["body"] = text
         block["data"]["reasoning"] = True
         return [block]
@@ -409,10 +565,13 @@ class Transcript:
         arrives first owns the block; the other one is recognised and does not
         write it twice. The words the model writes before a tool call are its
         thinking - they move into the Thinking block when the call arrives.
+        A compaction summary is not an answer: it grows its own row.
         """
         delta = str(event.get("delta") or "")
         if not delta:
             return []
+        if self._is_compaction(event, delta):
+            return self._ingest_compaction_delta(event, delta)
         self._answer_text += delta
         last = self._last_assistant()
         if last is not None:
@@ -455,6 +614,8 @@ class Transcript:
     def _ingest_message_done(self, event: dict) -> list[dict]:
         """The finished answer: the streamed block is complete."""
         text = str(event.get("text") or "").strip()
+        if self._is_compaction(event, text):
+            return self._close_compaction(event, text)
         last = self._last_assistant()
         if last is not None:
             if (last.get("data") or {}).get("open"):
@@ -481,6 +642,8 @@ class Transcript:
         text = str(event.get("text") or "").strip()
         if not text:
             return []
+        if self._is_compaction(event, text):
+            return self._ingest_compaction_full(event, text)
         last = self._last_assistant()
         if last is not None:
             if (last.get("data") or {}).get("open"):
@@ -498,6 +661,8 @@ class Transcript:
         text = str(event.get("text") or "").strip()
         if not text:
             return []
+        if self._is_compaction(event, text):
+            return self._ingest_compaction_full(event, text)
         last = self._last_assistant()
         if last is not None and (last.get("data") or {}).get("open"):
             last["title"] = text
@@ -537,8 +702,9 @@ class Transcript:
         block["data"]["source"] = source
         block["data"]["tool"] = name
         self._tools[name] = block
-        # The row leads with the step in words; the tool name stays in the
-        # data, so the screen can show it quietly next to the sentence.
+        # The row leads with the step in words (present tense: it is still
+        # running); the tool name stays in the data, so the screen can show
+        # it quietly next to the sentence.
         block["title"] = text_mod.tool_action(name, arguments)
         block["subtitle"] = tool_summary(name, arguments)
         block["body"] = tool_detail(name, arguments)
@@ -557,10 +723,12 @@ class Transcript:
         if block is None:
             block = self.last_tool(name)
         if block is None:
-            block = self.add(TOOL, title=text_mod.tool_action(name),
+            block = self.add(TOOL, title=text_mod.tool_action_done(name),
                              status="done", ts=event.get("ts"))
             block["data"]["tool"] = name
         block["status"] = "done"
+        # The work is over: the row says what was done, in the past tense.
+        block["title"] = text_mod.tool_action_done(name)
         if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
             block["data"]["seconds"] = seconds
         self._tools.pop(name, None)
@@ -577,10 +745,11 @@ class Transcript:
         if block is None:
             block = self.last_tool(name)
         if block is None:
-            block = self.add(TOOL, title=text_mod.tool_action(name),
+            block = self.add(TOOL, title=text_mod.tool_action_done(name),
                              status="failed", ts=event.get("ts"))
             block["data"]["tool"] = name
         block["status"] = "failed"
+        block["title"] = text_mod.tool_action_done(name)
         block["body"] = tool_error_detail(message, block.get("data", {}).get("changes"))
         self._tools.pop(name, None)
         return [block]

@@ -15,15 +15,15 @@ class ToolSummary(unittest.TestCase):
         summary = tui_transcript.tool_summary(
             "render_scene", {"parameters": {"rotationXYZ": [25, -35, 10]}})
         self.assertIn("camera rotation 25,-35,10", summary)
-        # What comes out, and what changes.
+        # What comes out, and what changed.
         self.assertIn("a new PNG of the volume", summary)
-        self.assertIn("the scene changes", summary)
+        self.assertIn("updated the scene", summary)
 
     def test_the_summary_of_a_slice_names_the_axis_and_the_index(self):
         summary = tui_transcript.tool_summary("inspect_slice", {"axis": "z", "index": 3})
         self.assertIn("axis z", summary)
         self.assertIn("index 3", summary)
-        self.assertIn("nothing changes", summary)
+        self.assertIn("read-only", summary)
 
     def test_the_summary_of_the_finish_call_names_the_revision(self):
         summary = tui_transcript.tool_summary("finish_task", {"frameRevision": 3})
@@ -250,22 +250,33 @@ class TranscriptBlocks(unittest.TestCase):
             "kind": "tool_call", "name": "render_scene", "source": "service",
             "arguments": {"parameters": {"rotationXYZ": [25, -35, 10]}}})
         block = self.transcript.find(tui_transcript.TOOL)
-        self.assertEqual(block["title"], "Render a picture")
+        # Still running: the present tense.
+        self.assertEqual(block["title"], "Rendering the frame")
         self.assertNotIn("render_scene", block["title"])
         # The tool name stays available: the screen shows it next to the words.
         self.assertEqual(block["data"]["tool"], "render_scene")
         self.assertIn("camera rotation 25,-35,10", block["subtitle"])
 
-    def test_a_read_only_call_says_that_it_changes_nothing(self):
+    def test_the_finished_row_says_what_was_done(self):
+        self.transcript.ingest({
+            "kind": "tool_call", "name": "render_scene", "source": "service",
+            "arguments": {}})
+        self.transcript.ingest({"kind": "tool_result", "name": "render_scene",
+                                "source": "service", "seconds": 0.2})
+        block = self.transcript.find(tui_transcript.TOOL)
+        # Done: the past tense, never the present.
+        self.assertEqual(block["title"], "Rendered the frame")
+
+    def test_a_read_only_call_says_so(self):
         self.transcript.ingest({
             "kind": "tool_call", "name": "inspect_scene", "source": "service",
             "arguments": {}})
         block = self.transcript.find(tui_transcript.TOOL)
-        self.assertEqual(block["title"], "Read the scene")
-        # What comes out, and that nothing changes.
+        self.assertEqual(block["title"], "Inspecting the scene")
+        # What comes out, and that the call is read-only.
         self.assertIn("camera, opacity window, crop box, current picture",
                       block["subtitle"])
-        self.assertIn("nothing changes", block["subtitle"])
+        self.assertIn("read-only", block["subtitle"])
 
     def test_the_harness_notices_are_one_row(self):
         self.transcript.ingest({"kind": "warn", "message": "Under-development features enabled"})
@@ -302,6 +313,79 @@ class TranscriptBlocks(unittest.TestCase):
         self.transcript.ingest({"kind": "assistant", "text": "hi"})
         self.transcript.clear()
         self.assertEqual(self.transcript.blocks, [])
+
+
+class CompactionAndPerCallThinking(unittest.TestCase):
+    """One thinking block per model call; the checkpoint gets its own row."""
+
+    def setUp(self):
+        self.transcript = tui_transcript.Transcript()
+
+    def test_each_model_call_gets_its_own_thinking_block(self):
+        self.transcript.ingest({"kind": "thinking_start"})
+        self.transcript.ingest({"kind": "reasoning_delta", "delta": "look", "call": 1})
+        # The live tick wrote the elapsed seconds into the open row.
+        first = self.transcript.find(tui_transcript.THINKING)
+        first["subtitle"] = "45s"
+        self.transcript.ingest({"kind": "tool_call", "name": "render_scene",
+                                "source": "service", "arguments": {}})
+        self.transcript.ingest({"kind": "reasoning_delta", "delta": "again", "call": 2})
+        thinking = [block for block in self.transcript.blocks
+                    if block["kind"] == tui_transcript.THINKING]
+        self.assertEqual(len(thinking), 2)
+        self.assertEqual(thinking[0]["body"], "look")
+        self.assertEqual(thinking[1]["body"], "again")
+        # The first chain closed when the next call started reasoning: it is
+        # done, and its final duration freezes into the row (like the tool
+        # rows keep theirs).
+        self.assertEqual(thinking[0]["status"], "done")
+        self.assertRegex(thinking[0]["subtitle"], r"^for \d+s$")
+        self.assertEqual(thinking[1]["status"], "running")
+
+    def test_the_checkpoint_summary_is_not_an_answer(self):
+        self.transcript.ingest({"kind": "thinking_start"})
+        self.transcript.ingest({"kind": "text_delta", "delta": "# Context Checkpoint",
+                                "compaction": True, "call": 8})
+        self.transcript.ingest({"kind": "text_delta", "delta": "\n24 remaining observations",
+                                "compaction": True, "call": 8})
+        self.transcript.ingest({"kind": "message_done",
+                                "text": "# Context Checkpoint\n24 remaining observations",
+                                "compaction": True, "call": 8})
+        compactions = [block for block in self.transcript.blocks
+                       if block["kind"] == tui_transcript.COMPACTION]
+        self.assertEqual(len(compactions), 1)
+        self.assertIn("24 observations left", compactions[0]["subtitle"])
+        self.assertEqual(compactions[0]["status"], "done")
+        answers = [block for block in self.transcript.blocks
+                   if block["kind"] == tui_transcript.ASSISTANT]
+        self.assertEqual(answers, [])
+
+    def test_the_harness_checkpoint_text_folds_into_the_same_row(self):
+        self.transcript.ingest({"kind": "assistant",
+                                "text": "# Context Checkpoint: 24 remaining observations"})
+        compactions = [block for block in self.transcript.blocks
+                       if block["kind"] == tui_transcript.COMPACTION]
+        self.assertEqual(len(compactions), 1)
+        answers = [block for block in self.transcript.blocks
+                   if block["kind"] == tui_transcript.ASSISTANT]
+        self.assertEqual(answers, [])
+
+    def test_two_compactions_are_two_rows(self):
+        self.transcript.ingest({"kind": "message_done",
+                                "text": "# Context Checkpoint\n24 remaining observations",
+                                "compaction": True, "call": 8})
+        self.transcript.ingest({"kind": "message_done",
+                                "text": "# Context Checkpoint\n20 remaining observations",
+                                "compaction": True, "call": 15})
+        compactions = [block for block in self.transcript.blocks
+                       if block["kind"] == tui_transcript.COMPACTION]
+        self.assertEqual(len(compactions), 2)
+        self.assertIn("20 observations left", compactions[1]["subtitle"])
+
+    def test_the_bold_remaining_count_is_read(self):
+        self.assertEqual(
+            tui_transcript.compaction_remaining("**Remaining observations**: 24"),
+            "24")
 
 
 class BlockTime(unittest.TestCase):

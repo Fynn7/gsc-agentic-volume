@@ -32,8 +32,8 @@ Evidence is read-only except new runs, `verification.json`,
  ● volume-agent  qwen3.6:35b  ·  volume 246x246x221 voxels  ·  run-20261019-131431  ·  running  ·  2 of 4 observations used
  ▌ Set the camera rotationXYZ to [25,-35,10] degrees.
  ✓ Model answered  in 12278, out 96 tokens
- ● Read the scene  camera, opacity window, crop box, current picture · nothing changes  ✓ 0s
- ● Render a picture  camera rotation 25,-35,10 · a new PNG of the volume · the scene changes  ✓ 1s
+ ● Inspected the scene  camera, opacity window, crop box, current picture · read-only  ✓ 0s
+ ● Rendered the frame  camera rotation 25,-35,10 · a new PNG of the volume · updated the scene  ✓ 1s
    » Rotate the camera as the task asks.
    the camera turns 25° around X, then -35° around Y, then 10° around Z
  ▣ frame revision 1 · 148491 lit px (56.6% of the picture) · 512x512
@@ -45,7 +45,7 @@ Evidence is read-only except new runs, `verification.json`,
 ```
 
 - The **status line** names the model, the volume, the open run, its state and
-  how much of the observation budget is already spent. It carries the spinner
+  how much of the observation budget is already spent and what is left. It carries the spinner
   while a worker runs.
 - The **screen and the backend run on their own clocks**: the screen ticks
   every 0.1s (the spinner, the seconds) and the evidence is read in a worker
@@ -62,9 +62,9 @@ Evidence is read-only except new runs, `verification.json`,
   fitted into the panel, never cropped) and the answer. Every line says what
   happened — the wording lives in `transcript.py`, `event_text.py` and
   `app.py`.
-- Every row is **facts, not labels**: what goes in, what comes out, what
-  changes ("Render a picture  camera rotation 25,-35,10 · a new PNG of the
-  volume · the scene changes"). No parentheses of explanation, no "what that
+- Every row is **facts, not labels**: what went in, what came out, what
+  changes ("Rendered the frame  camera rotation 25,-35,10 · a new PNG of the
+  volume · updated the scene"). No parentheses of explanation, no "what that
   does:" in front of the numbers — the numbers say themselves. The raw tool
   names are not on the rows either; the glossary (F2) names them.
 - The **transport is hidden**: the model calls and the HTTP status are written
@@ -241,18 +241,31 @@ the window.
   owned services (`runtime/tui/services.json` + heartbeat, ownership
   re-verified). One run per process, cached report.
 - Events: `trace_events.EventTail` tails harness.jsonl, run `session.json`
-  (mtime/size gated), `runtime/<session>/events.jsonl` (seq gap-fill),
-  http request/metadata (request summaries, no base64). All events carry `ts`
-  and a `kind` plus the raw payload the transcript needs. The kinds are
-  `thinking_start`, `thinking_end`, `thinking`, `assistant`, `assistant_update`,
-  `tool_call`, `tool_result`, `tool_error`, `image`, `notice`, `warn`, `error`,
-  `finish`, `meta` (from the harness and the service log) and `text_delta`,
-  `reasoning_delta`, `message_done`, `done` (from the recorded model stream).
+  (mtime/size gated), the live budget from `runtime/<session>/session.json`
+  (the run's own copy only lands when the run ends), `runtime/<session>/
+  events.jsonl` (seq gap-fill), http request/metadata (request summaries, no
+  base64). The session resolves while the run is live: run `session.json`
+  id, then live `run.json` `sessionId` (written right after `/api/tools/
+  open`), then the launcher lock file (`runtime/locks/*.lock`, matched by
+  run id or directory). All events carry `ts` and a `kind` plus the raw
+  payload the transcript needs. The kinds are `thinking_start`,
+  `thinking_end`, `thinking`, `assistant`, `assistant_update`, `tool_call`,
+  `tool_result`, `tool_error`, `image`, `notice`, `warn`, `error`, `finish`,
+  `meta` (from the harness and the service log) and `text_delta`,
+  `reasoning_delta`, `message_done`, `done` (from the recorded model stream,
+  each tagged with its model call `call`, its poll time `ts`, and
+  `compaction` when the recorded request body carries the context
+  checkpoint marker).
 - Transcript: `transcript.Transcript` folds the events into the blocks the
   screen shows. The service log is the authoritative source of a tool call,
   the model stream and the harness are the fallback — a call that several
   sources see is shown once, and the answer that the stream and the harness
-  both report is written once.
+  both report is written once. One model call gets one Thinking block (the
+  block closes when the call's tool call arrives or the next call streams);
+  the model's own words keep their order because the stream folds in before
+  the service/harness evidence. A context checkpoint compaction is not an
+  answer: it gets its own `compaction` row (◈, foldable, names the
+  observations left) instead of a » line.
 - Model stream: `stream.StreamTail` tails the recorded SSE responses
   (`http/http-NNN.response.bin`, written chunk by chunk while the model
   answers). The words the model writes **before** a tool call are its

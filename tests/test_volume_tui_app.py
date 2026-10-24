@@ -107,6 +107,37 @@ class TraceTimestamps(unittest.TestCase):
             # Second poll with unchanged mtime/size yields nothing new.
             self.assertEqual(tail.poll(), [])
 
+    def test_the_live_session_budget_reaches_the_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run-live"
+            run_dir.mkdir()
+            session_dir = Path(tmp) / "sid-live"
+            session_dir.mkdir()
+            (session_dir / "session.json").write_text(json.dumps(
+                {"used": 6, "budget": 30, "state": "running"}))
+            tail = tui_trace.EventTail(run_dir, session_dir)
+            self.assertEqual(tail.poll(), [])
+            self.assertEqual(tail.meta.get("used"), 6)
+            self.assertEqual(tail.meta.get("budget"), 30)
+
+    def test_resolve_session_dir_falls_back_to_the_launcher_lock(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_dir = root / "runtime" / "sid-lock"
+            session_dir.mkdir(parents=True)
+            locks = root / "runtime" / "locks"
+            locks.mkdir(parents=True)
+            run_dir = root / "run-lock"
+            run_dir.mkdir()
+            (run_dir / "run.json").write_text(json.dumps(
+                {"runId": "run-lock", "status": "running"}))
+            (locks / "abc123.lock").write_text(json.dumps(
+                {"runId": "run-lock", "directory": str(run_dir),
+                 "phase": "inference", "sessionId": "sid-lock"}))
+            with patch.object(tui_trace, "_ROOT", root):
+                self.assertEqual(tui_trace.resolve_session_dir(run_dir), session_dir)
+
 
 class RunHelpers(unittest.TestCase):
     def test_config_diff_and_frame_images(self):
@@ -457,6 +488,45 @@ class CodingAgentScreen(unittest.TestCase):
                 self.assertNotIn("obs", status.replace("observations", ""))
         asyncio.run(_run())
 
+    def test_the_status_line_says_what_is_left(self):
+        import asyncio
+        import types
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.live_run_id = "run-demo"
+                app.live_tail = types.SimpleNamespace(meta={"used": 2, "budget": 4})
+                app._render_status()
+                await pilot.pause()
+                status = str(app.query_one("#status-bar").render())
+                self.assertIn("2 of 4 observations used", status)
+                self.assertIn("2 left", status)
+        asyncio.run(_run())
+
+    def test_the_compaction_summary_gets_its_own_foldable_row(self):
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([{
+                    "kind": "message_done",
+                    "text": "# Context Checkpoint\n24 remaining observations",
+                    "compaction": True, "call": 8}])
+                await pilot.pause()
+                text = _conversation_text(app)
+                self.assertIn("Context checkpoint", text)
+                self.assertIn("24 observations left", text)
+                # Housekeeping, not an answer: never a » line.
+                self.assertNotIn("» # Context Checkpoint", text)
+                rows = [widget for widget in app.query(".block")
+                        if "Context checkpoint" in str(widget.render())]
+                self.assertTrue(rows)
+        asyncio.run(_run())
+
     def test_the_volume_is_named_in_voxels(self):
         import asyncio
         import tempfile
@@ -490,7 +560,7 @@ class CodingAgentScreen(unittest.TestCase):
                 await pilot.pause()
                 text = _conversation_text(app)
                 # The step is the story; the transport is behind a key press.
-                self.assertIn("Render a picture", text)
+                self.assertIn("Rendering the frame", text)
                 # The raw tool name is not on the row: the row is facts.
                 self.assertNotIn("render_scene", text)
                 rows = [widget for widget in app.query(".block")
@@ -583,7 +653,7 @@ class Conversation(unittest.TestCase):
                 # The turn carried the agent's reason, not reasoning.
                 self.assertIn("Working", text)
                 self.assertNotIn("render_scene", text)
-                self.assertIn("Render a picture", text)
+                self.assertIn("Rendered the frame", text)
                 self.assertIn("camera rotation 25,-35,10", text)
                 self.assertIn("a new PNG of the volume", text)
                 # The model's own words are marked, the screen's are not.
@@ -819,6 +889,51 @@ class Conversation(unittest.TestCase):
                 # Whole seconds, no decimals.
                 self.assertTrue(subtitle.endswith("s"), subtitle)
                 self.assertNotIn(".", subtitle)
+        asyncio.run(_run())
+
+    def test_a_long_think_counts_minutes_not_just_seconds(self):
+        import asyncio
+        import time
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([{"kind": "thinking_start"}])
+                await pilot.pause()
+                block = app.transcript.find(tui_app.transcript_mod.THINKING)
+                block["ts"] = time.time() - 125
+                app._animate_thinking()
+                await pilot.pause()
+                self.assertEqual(str(block.get("subtitle")), "for 2min 5s")
+        asyncio.run(_run())
+
+    def test_an_ended_thinking_block_keeps_its_time(self):
+        import asyncio
+        import time
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._ingest_events([{"kind": "thinking_start"}])
+                await pilot.pause()
+                block = app.transcript.find(tui_app.transcript_mod.THINKING)
+                block["ts"] = time.time() - 125
+                app._ingest_events([{"kind": "reasoning_delta", "delta": "looking"}])
+                app._close_thinking()
+                await pilot.pause()
+                self.assertEqual(block["status"], "done")
+                # The row freezes its final duration instead of counting on.
+                self.assertEqual(str(block.get("subtitle") or ""), "for 2min 5s")
+                line = str(list(app.query(tui_app.ThinkingBlock))[0].render())
+                self.assertIn("Thought", line)
+                self.assertIn("for 2min 5s", line)
+                # A later tick does not recount an ended row.
+                block["ts"] = time.time() - 5000
+                app._animate_thinking()
+                await pilot.pause()
+                self.assertEqual(str(block.get("subtitle") or ""), "for 2min 5s")
         asyncio.run(_run())
 
     def test_the_busy_button_locks_against_a_second_click(self):

@@ -193,6 +193,8 @@ def render_block(block: dict):
         return text
     if kind == transcript_mod.THINKING:
         return render_thinking(block, False)
+    if kind == transcript_mod.COMPACTION:
+        return render_compaction(block, False)
     if kind == transcript_mod.ASSISTANT:
         # The model's own words, marked as such.
         text.append("%s " % transcript_mod.block_mark(kind), style=ACCENT)
@@ -282,6 +284,39 @@ def render_thinking(block: dict, expanded: bool = False):
     return text
 
 
+def render_compaction(block: dict, expanded: bool = False):
+    """The context checkpoint: one line that opens into the summary.
+
+    The checkpoint is the model's own words, but it is housekeeping, not an
+    answer — so it gets its own row (◈), never a "»" line. Closed it shows
+    the arrow only; a click opens the summary the model wrote when its
+    context filled up.
+    """
+    from rich.text import Text
+
+    text = Text()
+    body = str(block.get("body") or "")
+    running = block.get("status") == "running"
+    for part, role in transcript_mod.compaction_row_parts(block):
+        if role == "spin":
+            text.append(part, style="magenta")
+        elif role == "ok":
+            text.append(part, style="green")
+        elif role == "words":
+            text.append(part, style="italic dim" if running else "dim")
+        else:
+            text.append(part, style="dim")
+    if not expanded:
+        if body:
+            text.append("  ▸", style="dim")
+        return text
+    text.append("  ▾", style="dim")
+    if body:
+        for line in body.splitlines():
+            text.append("\n  %s %s" % (MODEL_MARK, line), style="italic dim")
+    return text
+
+
 class DismissibleModal(ModalScreen if _TEXTUAL else object):
     """Modal screen that closes with Esc.
 
@@ -333,11 +368,14 @@ class HelpScreen(DismissibleModal):
                     "                 its claim - never written by the screen\n"
                     "  ✳ Thinking      the model reasoned; the line opens the chain\n"
                     "  ✓ Thought       the chain is closed; click it to read it\n"
+                    "  ◈ Context checkpoint the model's summary when its context\n"
+                    "                 filled up; click it to read it\n"
                     "  ✳ Working       a model turn that did not reason (Think is off)\n"
                     "  ✓ Model answered the turn is over, there is nothing to open\n"
-                    "  ● <step>       what the agent does now, then what goes in,\n"
-                    "                 what comes out and what changes; ✓ when it\n"
-                    "                 returned, ✗ when the renderer refused it\n"
+                    "  ● <step>       what the agent is doing (past tense once\n"
+                    "                 it returned), then what went in, what came\n"
+                    "                 out and what changed; ✓ when it returned,\n"
+                    "                 ✗ when the renderer refused it\n"
                     "  ▣ frame        a PNG the renderer wrote (the picture is inline)\n"
                     "  ✓ Run finished what the agent picked and what it claims\n"
                     "  ⚠ / ✗          a notice and a failure\n"
@@ -977,6 +1015,52 @@ class ThinkingBlock(SafeSelection, Static if _TEXTUAL else object):
         return bool(str((self.block.get("body") or "")).strip())
 
 
+class CompactionBlock(SafeSelection, Static if _TEXTUAL else object):
+    """The context checkpoint: one line, a click opens the summary.
+
+    The same foldable behaviour as the Thinking block: the summary grows
+    while the model writes it, open or closed. Never focusable: clicks here
+    must not steal the composer's cursor.
+    """
+
+    if _TEXTUAL:
+        can_focus = False
+
+    def __init__(self, block: dict):
+        super().__init__()
+        self.block = block
+        self.expanded = False
+        self.add_class("block")
+        self.add_class("compaction")
+
+    def set_block(self, block: dict) -> None:
+        self.block = block
+        self.update(render_compaction(block, self.expanded))
+
+    def on_click(self, event=None) -> None:
+        """A click opens the summary, a second click closes it."""
+        if not self._can_open():
+            return
+        self.expanded = not self.expanded
+        self.update(render_compaction(self.block, self.expanded))
+        if event is not None:
+            try:
+                event.stop()
+            except Exception:
+                pass
+
+    def action_toggle(self) -> None:
+        """The same, from the keyboard."""
+        if not self._can_open():
+            return
+        self.expanded = not self.expanded
+        self.update(render_compaction(self.block, self.expanded))
+
+    def _can_open(self) -> bool:
+        """Only a written summary opens: without it the line is a plain row."""
+        return bool(str((self.block.get("body") or "")).strip())
+
+
 class ImageBlock(Vertical if _TEXTUAL else object):
     """A frame in the conversation: the caption, the path and the picture."""
 
@@ -1026,6 +1110,10 @@ class ImageBlock(Vertical if _TEXTUAL else object):
             pass
 
 
+COMPOSER_MIN_ROWS = 1
+COMPOSER_MAX_ROWS = 10
+
+
 class Composer(TextArea if _TEXTUAL else object):
     """The chat input: Enter sends the task, Shift+Enter adds a line."""
 
@@ -1040,6 +1128,72 @@ class Composer(TextArea if _TEXTUAL else object):
         def __init__(self, *args, **kwargs):
             kwargs.setdefault("soft_wrap", True)
             super().__init__(*args, **kwargs)
+            try:
+                self.show_vertical_scrollbar = False
+            except Exception:
+                pass
+
+        def _composer_visual_rows(self) -> tuple[int, int]:
+            """(capped_rows, total_rows) for the current text with wrapping."""
+            try:
+                text = str(self.text or "")
+            except Exception:
+                return COMPOSER_MIN_ROWS, COMPOSER_MIN_ROWS
+            lines = text.split("\n") if text else [""]
+            try:
+                width = int(self.size.width) - 2
+            except Exception:
+                width = 0
+            if not width or width < 4:
+                total = len(lines) or 1
+            else:
+                total = 0
+                for line in lines:
+                    try:
+                        cells = len(line)
+                    except Exception:
+                        cells = 1
+                    total += max(1, -(-cells // width))
+                    if total > 256:
+                        break
+                total = max(1, total)
+            capped = min(max(total, COMPOSER_MIN_ROWS), COMPOSER_MAX_ROWS)
+            return capped, total
+
+        def _fit_composer(self) -> None:
+            """Grow the input with content, scroll past 10 rows."""
+            capped, total = self._composer_visual_rows()
+            try:
+                wanted = capped + 2
+                if int(self.styles.height.value or 0) != wanted:
+                    self.styles.height = wanted
+            except Exception:
+                try:
+                    self.styles.height = capped + 2
+                except Exception:
+                    pass
+            try:
+                self.show_vertical_scrollbar = total > COMPOSER_MAX_ROWS
+            except Exception:
+                pass
+
+        def on_mount(self) -> None:
+            try:
+                self.call_after_refresh(self._fit_composer)
+            except Exception:
+                pass
+
+        def on_resize(self, event) -> None:
+            try:
+                self._fit_composer()
+            except Exception:
+                pass
+
+        def on_text_area_changed(self, event) -> None:
+            try:
+                self._fit_composer()
+            except Exception:
+                pass
 
         async def _on_key(self, event) -> None:
             try:
@@ -1161,7 +1315,7 @@ if _TEXTUAL:
         #blocks { height: auto; padding: 0 2; }
         .block { height: auto; margin-bottom: 1; }
         #composer-row { height: auto; padding: 0 1; }
-        #composer { height: 3; border: round $accent; }
+        #composer { height: auto; min-height: 3; max-height: 12; border: round $accent; }
         #btn-send { height: 3; min-width: 10; }
         #slash-menu { height: auto; max-height: 10; padding: 0 1; display: none; }
         #slash-menu.open { display: block; }
@@ -1494,6 +1648,8 @@ if _TEXTUAL:
             kind = str(block.get("kind"))
             if kind == transcript_mod.THINKING:
                 return ThinkingBlock(block)
+            if kind == transcript_mod.COMPACTION:
+                return CompactionBlock(block)
             if kind == transcript_mod.IMAGE:
                 return ImageBlock(block)
             return TranscriptBlock(block)
@@ -1684,8 +1840,12 @@ if _TEXTUAL:
                 self.live_frozen = True
                 self._close_thinking()
                 self._announce_the_end()
-            self._ingest_events(fresh)
+            # The stream is the model's own order of work (thinking, then the
+            # call): it folds in first, then the service/harness evidence that
+            # the work caused (the tool row, the frame). The other order shows
+            # the call before the thinking that chose it.
             self._ingest_events(streamed)
+            self._ingest_events(fresh)
             self._render_live()
             # The poll learned the state of the run: the line and the button
             # follow it right away, not at the next tick.
@@ -1697,12 +1857,16 @@ if _TEXTUAL:
             if self.transcript is None:
                 return
             block = self.transcript.find(transcript_mod.THINKING)
-            if block is None or block.get("status") != "running":
-                return
-            started = block.get("ts") or time.time()
-            block["spinner"] = _spinner_frame()
-            block["subtitle"] = "%ds" % int(max(0.0, time.time() - started) + 0.5)
-            self._refresh_block_widget(block)
+            if block is not None and block.get("status") == "running":
+                started = block.get("ts") or time.time()
+                block["spinner"] = _spinner_frame()
+                block["subtitle"] = ("for " + event_text_mod.format_duration(
+                    max(0.0, time.time() - started)))
+                self._refresh_block_widget(block)
+            compaction = self.transcript.find(transcript_mod.COMPACTION)
+            if compaction is not None and compaction.get("status") == "running":
+                compaction["spinner"] = _spinner_frame()
+                self._refresh_block_widget(compaction)
 
         # -- live ---------------------------------------------------------
         def start_live(self, run_dir: str | Path, run_id: str | None = None):
@@ -1796,10 +1960,17 @@ if _TEXTUAL:
             """The run is over: the thinking block does not spin any more."""
             if self.transcript is None:
                 return
-            block = self.transcript.find(transcript_mod.THINKING)
-            if block is not None and block.get("status") == "running":
-                block["status"] = "done"
-                self._refresh_block_widget(block)
+            for kind in (transcript_mod.THINKING, transcript_mod.COMPACTION):
+                block = self.transcript.find(kind)
+                if block is not None and block.get("status") == "running":
+                    block["status"] = "done"
+                    # The ticking ends with the run: a thinking row freezes
+                    # its final duration instead of counting on.
+                    if kind == transcript_mod.THINKING:
+                        block["subtitle"] = transcript_mod._thinking_elapsed(block)
+                    if isinstance(block.get("data"), dict):
+                        block["data"]["open"] = False
+                    self._refresh_block_widget(block)
 
         def _ingest_events(self, events: list[dict]) -> None:
             """Fold the new evidence into the conversation."""
@@ -1842,6 +2013,9 @@ if _TEXTUAL:
             if budget:
                 text.append("  ·  %s of %s observations used" % (used, budget),
                            style="dim")
+                left = budget - used
+                if left >= 0:
+                    text.append("  ·  %s left" % left, style="dim")
             try:
                 self.query_one("#status-bar", Static).update(text)
             except Exception:

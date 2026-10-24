@@ -264,6 +264,12 @@ def execute(context, show_images=False, open_images=False):
     session = http(service, '/api/tools/open', {'source': config['volumePath'], 'goal': config['task'], 'model': config['model'], 'budget': config['renderBudget']})
     write_json(directory / 'initial.json', session)
     context.lock.update(phase='inference', sessionId=session['id'])
+    # The live TUI resolves runtime/<session>/events.jsonl through run.json,
+    # so the session id must land there while the run is live, not only at
+    # the end: without it the frames and the budget stay invisible until the
+    # run finishes.
+    context.record['sessionId'] = session['id']
+    write_json(directory / 'run.json', context.record)
     print(json.dumps({'event': 'session_opened', 'runId': context.run_id, 'id': session['id'], 'directory': str(directory)}), flush=True)
     trace = ConsoleTrace(directory, ROOT / 'runtime' / session['id'], show_images=show_images, open_images=open_images)
     recorder = InferenceRecorder(endpoint, directory / 'http', config)

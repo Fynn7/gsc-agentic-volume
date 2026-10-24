@@ -129,6 +129,7 @@ back to the bottom resumes it (there is no Follow button).
 
 | Slash | What it does |
 | --- | --- |
+| /new | clear the open run and refresh, ready for the next task (`/new <task>` starts it at once; never stops a live run) |
 | /task-a, /task-b | start the audited preset prompts |
 | /verify | read-only check → `verification.json` |
 | /copy-json | the run's meta data, every event and every JSON log file |

@@ -461,6 +461,9 @@ class CommandScreen(DismissibleModal):
     # (label, action id, tooltip) — the id is stable, the label spells out the
     # effect and the tooltip says it once more (every button carries one).
     COMMANDS = [
+        ("New: clear the conversation and start fresh", "new",
+         "Clear the open run and refresh, ready for the next task. "
+         "Never stops a live run - stop it first (Esc)."),
         ("Run: stop the agent", "live-stop",
          "Ask the agent to stop now; evidence already written is kept."),
         ("Live: verify the evidence (read-only)", "live-verify",
@@ -509,6 +512,7 @@ class CommandScreen(DismissibleModal):
 # The labels/tooltips stay on CommandScreen.COMMANDS (single source); this only
 # names the slash form of each stable action id.
 SLASH_NAMES = {
+    "new": "/new",
     "live-verify": "/verify",
     "live-copy": "/copy-json",
     "live-copy-chat": "/copy-chat",
@@ -2145,7 +2149,9 @@ if _TEXTUAL:
             # (slash-...) route here.
             if result.startswith("slash-"):
                 result = "cmd-" + result[len("slash-"):]
-            if result == "cmd-live-stop":
+            if result == "cmd-new":
+                self._new_conversation()
+            elif result == "cmd-live-stop":
                 self._stop_run()
             elif result == "cmd-live-verify":
                 self._verify_live()
@@ -2434,6 +2440,8 @@ if _TEXTUAL:
                 action = items[selected][1]
             except Exception:
                 return False
+            parts = stripped.split(None, 1)
+            arg = parts[1] if len(parts) > 1 else ""
             try:
                 self.query_one("#composer", Composer).clear()
             except Exception:
@@ -2443,7 +2451,10 @@ if _TEXTUAL:
             except Exception:
                 pass
             try:
-                self._command_chosen("cmd-" + str(action))
+                if str(action) == "new":
+                    self._new_conversation(arg)
+                else:
+                    self._command_chosen("cmd-" + str(action))
             except Exception:
                 return False
             return True
@@ -2468,6 +2479,10 @@ if _TEXTUAL:
             except Exception:
                 pass
             self._close_slash_menu()
+            if action == "new":
+                parts = str(text).lstrip().split(None, 1)
+                self._new_conversation(parts[1] if len(parts) > 1 else "")
+                return True
             self._command_chosen("cmd-" + action)
             return True
 
@@ -2863,6 +2878,54 @@ if _TEXTUAL:
                 return
             self.start_live(run["directory"], run.get("runId"))
             self._start_poll()
+            self._focus_composer()
+
+        def _new_conversation(self, arg: str = "") -> None:
+            """Refresh and open a new run: clear the view, ready for the next task.
+
+            Like opencode's /new: the open run is closed on screen (its
+            evidence stays on disk), the run list is re-read fresh and the
+            conversation returns to the welcome state. A trailing task
+            ("/new rotate a little") starts that run at once.
+            Never touches a live run: stop it first (Esc/Stop).
+            """
+            if self._start_locked:
+                self.notify("A run is already starting - wait for it.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            if self._run_is_live() or self._run_state() in ("running", "stopping"):
+                self.notify("The agent is still working - press Esc or Stop first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            task = str(arg or "").strip()
+            with self._poll_lock:
+                self.live_dir = None
+                self.live_run_id = None
+                self.live_tail = None
+                self.stream_tail = None
+            self.live_events = []
+            self.live_frozen = False
+            self._live_following = True
+            self._stop_requested_for = None
+            self._end_announced = False
+            self.live_image_path = None
+            self.live_image_revision = None
+            self._clear_transcript()
+            self._say_welcome()
+            try:
+                self.runs = self.discover_runs(fresh=True)
+            except Exception:
+                pass
+            self._render_status()
+            self._sync_send_button()
+            if task:
+                try:
+                    self._history_push(task)
+                except Exception:
+                    pass
+                self._focus_composer()
+                self._start_run("custom", task)
+                return
             self._focus_composer()
 
         # -- volumes --------------------------------------------------------

@@ -37,6 +37,7 @@ try:
     import flows as flows_mod
     import imaging as imaging_mod
     import telemetry as telemetry_mod
+    import batches as batches_mod
 except Exception:  # pragma: no cover - import path for tests
     chat_log_mod = None  # type: ignore
     cfg = None  # type: ignore
@@ -54,6 +55,7 @@ except Exception:  # pragma: no cover - import path for tests
     flows_mod = None  # type: ignore
     imaging_mod = None  # type: ignore
     telemetry_mod = None  # type: ignore
+    batches_mod = None  # type: ignore
 
 import re as _re
 
@@ -534,6 +536,12 @@ class CommandScreen(DismissibleModal):
          "Open the file explorer at the folder that holds the PNGs."),
         ("Runs: open another run", "runs-open",
          "Pick one of the runs on this machine and open it here."),
+        ("History: batches and runs", "history",
+         "Batches and runs on this machine; a batch opens its detail first, "
+         "then a member opens its own chat."),
+        ("Batch: run the same task N times", "batch",
+         "Repeat one task N times with the same frozen config; each member "
+         "keeps its own run folder and chat."),
         ("Runs: archive all runs", "runs-archive-all",
          "Move every history run to runtime/archive (live runs are kept). "
          "No unarchive: move the folders back manually to restore them."),
@@ -574,7 +582,8 @@ SLASH_NAMES = {
     "live-export-chat": "/export-chat",
     "live-open-png": "/open-image",
     "live-open": "/open-folder",
-    "runs-open": "/history",
+    "history": "/history",
+    "batch": "/batch",
     "runs-archive-all": "/archive-all",
     "volume-switch": "/change-volume",
     "settings": "/settings",
@@ -678,6 +687,305 @@ class RunsScreen(DismissibleModal):
         row = event.cursor_row
         if 0 <= row < len(self._runs):
             self.dismiss(result=self._runs[row])
+
+
+def batch_form_problems(count_raw, task_text: str, settings: dict) -> list[str]:
+    """Validate the /batch form: positive-int N, required task, valid settings."""
+    problems: list[str] = []
+    try:
+        from batches import parse_count as _parse_count
+    except Exception:
+        _parse_count = None  # type: ignore
+    try:
+        if batches_mod is not None and hasattr(batches_mod, "validate_batch"):
+            problems.extend(batches_mod.validate_batch(count_raw, task_text))
+        elif _parse_count is not None:
+            _parse_count(count_raw)
+            if not str(task_text or "").strip():
+                problems.append("task must not be empty")
+        else:
+            count = int(str(count_raw or "").strip())
+            if count < 1:
+                problems.append("count must be a positive integer")
+            if not str(task_text or "").strip():
+                problems.append("task must not be empty")
+    except (ValueError, TypeError) as error:
+        problems.append(str(error))
+    try:
+        if cfg is not None and isinstance(settings, dict):
+            problems.extend(cfg.validate_settings(settings))
+    except Exception:
+        pass
+    return problems
+
+
+class BatchScreen(DismissibleModal):
+    """One-shot batch form: repeat count + task + frozen run config.
+
+    Settings fields are prefilled with a COPY of current Settings; submitting
+    never writes runtime/tui-settings.json. Task is prefilled with the open
+    run's task, or empty when no run is open.
+    """
+
+    def __init__(self, settings: dict, task_prefill: str = ""):
+        super().__init__()
+        self.settings = dict(settings or {})
+        self.task_prefill = str(task_prefill or "")
+
+    def compose(self):
+        with Vertical(classes="dlg"):
+            with VerticalScroll():
+                with Vertical(classes="panel"):
+                    yield Static("Batch: same frozen config runs N times "
+                                 "(config is frozen at start, settings file untouched)",
+                                 classes="scroll-hint")
+                    with Horizontal(classes="row"):
+                        yield Label("Repeat count N", classes="field-label")
+                        yield Input("", id="batch-count",
+                                    placeholder="positive integer, e.g. 3")
+                    with Horizontal(classes="row"):
+                        yield Label("Task", classes="field-label")
+                        yield Input(self.task_prefill, id="batch-task",
+                                    placeholder="required task text")
+                    for label, wid, key, _kind in SETTINGS_ROWS:
+                        with Horizontal(classes="row"):
+                            yield Label(label, classes="field-label")
+                            yield Input(str(self.settings.get(key, "")),
+                                        id="batch-" + wid)
+                    with Horizontal(classes="row"):
+                        yield Label("Think", classes="field-label")
+                        yield Select([("off", "false"), ("on", "true")],
+                                     value="true" if self.settings.get("think") else "false",
+                                     id="batch-set-think")
+                    with Horizontal(classes="row"):
+                        yield Label("Debug windows", classes="field-label")
+                        yield Select([("off (headless)", "false"), ("on (show popups)", "true")],
+                                     value="true" if self.settings.get("debugWindows") else "false",
+                                     id="batch-set-debug-windows")
+                    with Horizontal(classes="row"):
+                        yield Button("Start batch", id="btn-batch-start", variant="primary",
+                                     tooltip="Freeze this config and run it N times in order.")
+                        yield Button("Cancel", id="btn-batch-cancel",
+                                     tooltip="Close without starting anything.")
+                    yield Static("", id="batch-status", markup=False)
+
+    def _collect_settings(self) -> dict:
+        settings = dict(self.settings)
+        for _label, widget, key, kind in SETTINGS_ROWS:
+            try:
+                raw = self.query_one("#batch-" + widget, Input).value.strip()
+            except Exception:
+                continue
+            try:
+                if kind == "int":
+                    if raw:
+                        settings[key] = int(raw)
+                elif kind == "float":
+                    if raw:
+                        settings[key] = float(raw)
+                else:
+                    settings[key] = raw
+            except ValueError:
+                # Keep raw so validation reports it; int()/float() failure
+                # surfaces via cfg.validate_settings or batch validation.
+                settings[key] = raw
+        try:
+            settings["think"] = str(self.query_one("#batch-set-think", Select).value) == "true"
+        except Exception:
+            pass
+        try:
+            settings["debugWindows"] = str(self.query_one("#batch-set-debug-windows", Select).value) == "true"
+        except Exception:
+            pass
+        return settings
+
+    def _collect(self) -> tuple:
+        try:
+            count_raw = self.query_one("#batch-count", Input).value
+        except Exception:
+            count_raw = ""
+        try:
+            task = self.query_one("#batch-task", Input).value
+        except Exception:
+            task = ""
+        return count_raw, str(task or ""), self._collect_settings()
+
+    def _status(self, text: str) -> None:
+        try:
+            self.query_one("#batch-status", Static).update(text)
+        except Exception:
+            pass
+
+    async def on_button_pressed(self, event):
+        bid = event.button.id
+        if bid == "btn-batch-cancel":
+            self.dismiss(result=None)
+            return
+        if bid == "btn-batch-start":
+            count_raw, task, settings = self._collect()
+            problems = batch_form_problems(count_raw, task, settings)
+            if problems:
+                self._status("Invalid:\n" + "\n".join("- %s" % p for p in problems))
+                return
+            try:
+                from batches import parse_count as _parse
+                count = _parse(count_raw)
+            except Exception:
+                count = int(str(count_raw).strip())
+            # Copy only: the caller must not persist these settings.
+            self.dismiss(result={"count": count, "task": task.strip(),
+                                 "settings": dict(settings)})
+
+
+class HistoryScreen(DismissibleModal):
+    """Batches / Runs tabs. A batch opens its detail first, then a member."""
+
+    def __init__(self, batches: list[dict], runs: list[dict]):
+        super().__init__()
+        self._batches = list(batches or [])
+        self._runs = list(runs or [])
+        self._tab = "batches"
+
+    def compose(self):
+        with Vertical(classes="dlg"):
+            yield Static("History: batches and runs (Enter opens, Esc closes)",
+                         id="history-title")
+            with Horizontal():
+                yield Button("Batches", id="hist-tab-batches", variant="primary",
+                             tooltip="Batch records in runtime/tui/batches.")
+                yield Button("Runs", id="hist-tab-runs",
+                             tooltip="Every single run, including batch members.")
+            yield DataTable(id="hist-batches-table", cursor_type="row")
+            yield DataTable(id="hist-runs-table", cursor_type="row")
+            yield Button("Archive all (runs only; batches stay)",
+                         id="hist-archive-all", variant="warning",
+                         tooltip="Move every history run to runtime/archive. "
+                                 "Batch records stay in Batches history.")
+
+    def on_mount(self) -> None:
+        batches_table = self.query_one("#hist-batches-table", DataTable)
+        batches_table.add_columns("batch", "status", "planned", "task")
+        for batch in self._batches:
+            config = batch.get("config") or {}
+            batches_table.add_row(
+                _escape_markup(str(batch.get("batchId", "?"))),
+                _escape_markup(str(batch.get("status", "?"))),
+                str(batch.get("planned", "?")),
+                _escape_markup(str(config.get("task", ""))[:60]))
+        runs_table = self.query_one("#hist-runs-table", DataTable)
+        runs_table.add_columns("run", "status", "model", "frames", "task")
+        for run in self._runs:
+            runs_table.add_row(_escape_markup(str(run.get("runId", "?"))),
+                               _escape_markup(str(run.get("status", "?"))),
+                               _escape_markup(str(run.get("model", "?"))),
+                               str(run.get("frames", "?")),
+                               _escape_markup(str(run.get("task", "?"))[:60]))
+        self._show_tab(self._tab)
+        try:
+            batches_table.focus()
+        except Exception:
+            pass
+
+    def _show_tab(self, tab: str) -> None:
+        self._tab = tab if tab in ("batches", "runs") else "batches"
+        try:
+            self.query_one("#hist-batches-table", DataTable).display = (self._tab == "batches")
+        except Exception:
+            pass
+        try:
+            self.query_one("#hist-runs-table", DataTable).display = (self._tab == "runs")
+        except Exception:
+            pass
+        for bid, active in (("hist-tab-batches", self._tab == "batches"),
+                            ("hist-tab-runs", self._tab == "runs")):
+            try:
+                self.query_one("#" + bid, Button).variant = ("primary" if active else "default")
+            except Exception:
+                pass
+
+    async def on_button_pressed(self, event):
+        bid = event.button.id
+        if bid == "hist-tab-batches":
+            self._show_tab("batches")
+            return
+        if bid == "hist-tab-runs":
+            self._show_tab("runs")
+            return
+        if bid == "hist-archive-all":
+            self.dismiss(result={"__archive_all__": True})
+            return
+
+    async def on_data_table_row_selected(self, event):
+        table = getattr(event, "data_table", None)
+        table_id = ""
+        try:
+            table_id = str(getattr(table, "id", "") or "")
+        except Exception:
+            table_id = ""
+        row = event.cursor_row
+        # Fall back to the visible tab when the event lacks a table ref.
+        if not table_id:
+            table_id = "hist-batches-table" if self._tab == "batches" else "hist-runs-table"
+        if table_id == "hist-batches-table":
+            if 0 <= row < len(self._batches):
+                self.dismiss(result={"__batch__": self._batches[row]})
+            return
+        if 0 <= row < len(self._runs):
+            self.dismiss(result=self._runs[row])
+
+
+class BatchDetailScreen(DismissibleModal):
+    """One batch: config summary + per-item results; a member opens its chat."""
+
+    def __init__(self, batch: dict):
+        super().__init__()
+        self._batch = dict(batch or {})
+
+    def compose(self):
+        with Vertical(classes="dlg"):
+            yield Static("Batch %s (Enter opens a member, Esc back)" % str(self._batch.get("batchId", "?")),
+                         id="batch-detail-title")
+            yield Static("\n".join(self._summary_lines()) or "(no detail)",
+                         id="batch-detail-summary", markup=False)
+            yield DataTable(id="batch-detail-table", cursor_type="row")
+
+    def _summary_lines(self) -> list[str]:
+        try:
+            if batches_mod is not None and hasattr(batches_mod, "batch_summary_text"):
+                return list(batches_mod.batch_summary_text(self._batch))
+        except Exception:
+            pass
+        config = self._batch.get("config") or {}
+        lines = ["batch=%s status=%s planned=%s" % (
+            self._batch.get("batchId", "?"), self._batch.get("status", "?"),
+            self._batch.get("planned", "?")),
+            "task=%s" % str(config.get("task", ""))[:160]]
+        for item in self._batch.get("items") or []:
+            lines.append("#%s %s runId=%s" % (
+                item.get("seq", "?"), item.get("status", "?"), item.get("runId", "-")))
+        return lines
+
+    def on_mount(self) -> None:
+        table = self.query_one("#batch-detail-table", DataTable)
+        table.add_columns("seq", "status", "run", "seconds", "error")
+        for item in self._batch.get("items") or []:
+            table.add_row(str(item.get("seq", "?")),
+                          _escape_markup(str(item.get("status", "?"))),
+                          _escape_markup(str(item.get("runId") or "-")),
+                          str(item.get("seconds", "-")),
+                          _escape_markup(str(item.get("error") or "")[:60]))
+        table.focus()
+
+    async def on_data_table_row_selected(self, event):
+        row = event.cursor_row
+        items = list(self._batch.get("items") or [])
+        if 0 <= row < len(items):
+            item = items[row]
+            if item.get("runId"):
+                self.dismiss(result={"__batch_member__": item,
+                                     "__batch__": self._batch})
+                return
+        # Items without a run (skipped) have no chat to open; stay open.
 
 
 class VolumesScreen(DismissibleModal):
@@ -1474,6 +1782,12 @@ if _TEXTUAL:
             self._composer_history: list[str] = load_composer_history()
             self._history_index: int | None = None
             self._history_draft: str = ""
+            # One-shot batch: same frozen config runs N times in order.
+            # Chat shows only the current member run; the batch marker is
+            # painted in the status line and announced in the chat.
+            self._batch: dict | None = None
+            self._batch_cancel = threading.Event()
+            self._batch_thread: threading.Thread | None = None
 
         # -- busy feedback --------------------------------------------------
         def _busy_inc(self) -> None:
@@ -2085,6 +2399,9 @@ if _TEXTUAL:
             if self.live_run_id:
                 text.append("  ·  %s" % self.live_run_id, style="dim")
                 text.append("  ·  %s" % self._run_state(), style="dim")
+            batch_label = self._batch_label()
+            if batch_label:
+                text.append("  ·  %s" % batch_label, style="bold %s" % ACCENT)
             used, budget = self._budget()
             if budget:
                 text.append("  ·  %s of %s observations used" % (used, budget),
@@ -2207,6 +2524,62 @@ if _TEXTUAL:
             return (int(used) if isinstance(used, (int, float)) else 0,
                     int(budget) if isinstance(budget, (int, float)) else 0)
 
+        # -- batch (one-shot N repeats, same frozen config) -----------------
+        def _batch_label(self) -> str:
+            """Status-line marker: ◇ BATCH <id> · <current>/<N> (while running)."""
+            batch = getattr(self, "_batch", None)
+            if not isinstance(batch, dict) or not batch.get("batchId"):
+                return ""
+            if not bool(batch.get("running")):
+                return ""
+            try:
+                total = int(batch.get("total") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            if total < 1:
+                return ""
+            try:
+                current = int(batch.get("current") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            current = min(max(current, 1), total) if total else 0
+            return "◇ BATCH %s · %d/%d" % (batch.get("batchId"), current, total)
+
+        def _batch_active(self) -> bool:
+            batch = getattr(self, "_batch", None)
+            if not isinstance(batch, dict):
+                return False
+            return bool(batch.get("running"))
+
+        def _cancel_batch(self, reason: str = "cancelled") -> None:
+            """Stop the queue: current member is stopped, rest are skipped."""
+            try:
+                self._batch_cancel.set()
+            except Exception:
+                pass
+            batch = getattr(self, "_batch", None)
+            if isinstance(batch, dict) and batch.get("running"):
+                batch["running"] = False
+
+        def _batch_task_prefill(self) -> str:
+            """Current open run's task, or empty when no run is open."""
+            try:
+                if self.live_dir is not None:
+                    task = self._task_text(self.live_dir)
+                    if task.strip():
+                        return task.strip()
+            except Exception:
+                pass
+            return ""
+
+        def _discover_batches(self) -> list[dict]:
+            try:
+                if batches_mod is not None and hasattr(batches_mod, "list_batches"):
+                    return list(batches_mod.list_batches())
+            except Exception:
+                return []
+            return []
+
         # -- actions ------------------------------------------------------
         def action_commands(self):
             # The only menu: slash commands in the composer (no Ctrl+P).
@@ -2236,7 +2609,11 @@ if _TEXTUAL:
             elif result == "cmd-live-open":
                 self._open_live_folder()
             elif result == "cmd-runs-open":
-                self._open_runs()
+                self._open_history()
+            elif result == "cmd-history":
+                self._open_history()
+            elif result == "cmd-batch":
+                self._open_batch()
             elif result == "cmd-runs-archive-all":
                 self._archive_all_runs_ask()
             elif result == "cmd-volume-switch":
@@ -2628,6 +3005,11 @@ if _TEXTUAL:
         def action_quit_confirm(self):
             """Quit: stop every process this TUI owns, then leave."""
             live = self._live_run_ids()
+            try:
+                if self._batch_active() and "batch-queue" not in live:
+                    live = list(live) + ["batch-queue"]
+            except Exception:
+                pass
             if live:
                 self.push_screen(ConfirmScreen(
                     "Quit the TUI and stop everything it owns?\n\n"
@@ -2662,6 +3044,10 @@ if _TEXTUAL:
             Textual uses Ctrl+C for copying the selection, so the hard stop
             lives in the slash menu (/hard-stop) and in closing the window.
             """
+            try:
+                self._cancel_batch("hard-stop")
+            except Exception:
+                pass
             self._busy_inc()
             try:
                 services_mod.block_interrupts()
@@ -2688,6 +3074,10 @@ if _TEXTUAL:
             records interrupted/failure.json), everything that survives is
             killed, and the services this TUI started are stopped with it.
             """
+            try:
+                self._cancel_batch("quit")
+            except Exception:
+                pass
             self._busy_inc()
             # The cleanup runs in a worker, so SIGINT is ignored up front (main
             # thread) — a second Ctrl+C must not leave half the tree running.
@@ -2711,7 +3101,17 @@ if _TEXTUAL:
 
         def _stop_run(self) -> None:
             """Ask the agent to stop now; the evidence already written stays."""
+            # A batch queue is cancelled too: the current member stops and the
+            # rest are skipped (batch becomes interrupted, never auto-resumed).
+            batch_running = self._batch_active()
             if not self.live_run_id:
+                if batch_running:
+                    self._cancel_batch("stop")
+                    self._say(transcript_mod.NOTICE,
+                              "Batch stop requested - the current member stops "
+                              "and the queue is skipped.")
+                    self._render_status()
+                    return
                 self.notify("No run is open.", severity="warning", timeout=4, markup=False)
                 return
             if not self._run_is_live():
@@ -2725,11 +3125,19 @@ if _TEXTUAL:
                 # Stop asked for this run already: one request, one line.
                 return
             self._stop_requested_for = run_id
+            if batch_running:
+                try:
+                    self._batch_cancel.set()
+                except Exception:
+                    pass
             try:
                 runner_mod.request_stop(run_id)
                 self._say(transcript_mod.NOTICE,
                           "Stop requested for %s - the harness and its children are "
                           "terminated now, the evidence stays on disk." % run_id)
+                if batch_running:
+                    self._say(transcript_mod.NOTICE,
+                              "Batch queue cancelled - remaining members are skipped.")
             except Exception as error:
                 self._stop_requested_for = None
                 self._say(transcript_mod.ERROR, "Stop failed: %s" % error)
@@ -2940,13 +3348,89 @@ if _TEXTUAL:
 
         # -- runs -----------------------------------------------------------
         def _open_runs(self) -> None:
-            """Open one of the runs on this machine in the conversation."""
+            """Legacy alias: /history now shows Batches + Runs tabs."""
+            self._open_history()
+
+        def _open_history(self) -> None:
+            """Batches / Runs tabs; a batch opens its detail first."""
             runs = self.discover_runs(fresh=True)
             self.runs = runs
-            if not runs:
-                self.notify("No runs on disk yet.", severity="warning", timeout=4, markup=False)
+            batches = self._discover_batches()
+            if not runs and not batches:
+                self.notify("No runs or batches on disk yet.", severity="warning", timeout=4, markup=False)
                 return
-            self.push_screen(RunsScreen(runs), callback=self._run_chosen)
+            self.push_screen(HistoryScreen(batches, runs), callback=self._history_chosen)
+
+        def _history_chosen(self, result) -> None:
+            if not result:
+                self._focus_composer()
+                return
+            if isinstance(result, dict) and result.get("__archive_all__"):
+                self._archive_all_runs_ask()
+                return
+            if isinstance(result, dict) and result.get("__batch__") is not None and result.get("__batch_member__") is None:
+                batch = result.get("__batch__")
+                if isinstance(batch, dict):
+                    self._open_batch_detail(batch)
+                    return
+            if isinstance(result, dict) and result.get("__batch_member__") is not None:
+                self._open_batch_member(result.get("__batch_member__"), result.get("__batch__"))
+                return
+            # Plain run row (Runs tab): open its independent chat.
+            self._run_chosen(result)
+
+        def _open_batch_detail(self, batch: dict) -> None:
+            """Batch detail: config summary + per-item results."""
+            fresh = batch
+            try:
+                if batches_mod is not None and hasattr(batches_mod, "find_batch"):
+                    found = batches_mod.find_batch(str(batch.get("batchId") or ""))
+                    if isinstance(found, dict):
+                        fresh = found
+            except Exception:
+                pass
+            self.push_screen(BatchDetailScreen(fresh), callback=self._history_chosen)
+
+        def _open_batch_member(self, item: dict, batch=None) -> None:
+            """Open one batch member's independent chat (runId survives archive)."""
+            run_id = str((item or {}).get("runId") or "")
+            stored = str((item or {}).get("directory") or "")
+            directory = None
+            if run_id:
+                try:
+                    if batches_mod is not None and hasattr(batches_mod, "find_member_dir"):
+                        directory = batches_mod.find_member_dir(run_id, stored)
+                except Exception:
+                    directory = None
+            if directory is None and stored:
+                directory = Path(stored)
+            if directory is not None:
+                try:
+                    if Path(directory).is_dir():
+                        self.start_live(directory, run_id or Path(directory).name)
+                        self._start_poll()
+                        self._focus_composer()
+                        return
+                except Exception:
+                    pass
+            # Fall back to the live discovery (member still under runtime/).
+            try:
+                if runs_mod is not None and hasattr(runs_mod, "find_run") and run_id:
+                    entry = runs_mod.find_run(run_id)
+                    if isinstance(entry, dict) and entry.get("directory"):
+                        self.start_live(entry["directory"], entry.get("runId"))
+                        self._start_poll()
+                        self._focus_composer()
+                        return
+            except Exception:
+                pass
+            self.notify("Member run %s is gone (folder missing); batch summary stays." % (run_id or "?"),
+                        severity="warning", timeout=5, markup=False)
+            # Keep the detail reachable: reopen it.
+            if isinstance(batch, dict) and batch.get("batchId"):
+                self._open_batch_detail(batch)
+            else:
+                self._focus_composer()
 
         def _run_chosen(self, run) -> None:
             if not run:
@@ -2955,13 +3439,20 @@ if _TEXTUAL:
             if isinstance(run, dict) and run.get("__archive_all__"):
                 self._archive_all_runs_ask()
                 return
+            if isinstance(run, dict) and run.get("__batch__") is not None:
+                # Defensive: batch rows routed here open the detail.
+                if run.get("__batch_member__") is not None:
+                    self._open_batch_member(run.get("__batch_member__"), run.get("__batch__"))
+                else:
+                    self._open_batch_detail(run.get("__batch__"))
+                return
             self.start_live(run["directory"], run.get("runId"))
             self._start_poll()
             self._focus_composer()
 
         def _archive_all_runs_ask(self) -> None:
             """One-click tidy: confirm, then move every history run aside."""
-            if self._run_is_live() or self._run_state() in ("running", "stopping"):
+            if self._run_is_live() or self._run_state() in ("running", "stopping") or self._batch_active():
                 self.notify("The agent is still working - press Esc or Stop first.",
                             severity="warning", timeout=4, markup=False)
                 return
@@ -3069,7 +3560,7 @@ if _TEXTUAL:
             ("/new rotate a little") starts that run at once.
             Never touches a live run: stop it first (Esc/Stop).
             """
-            if self._start_locked:
+            if self._start_locked or self._batch_active():
                 self.notify("A run is already starting - wait for it.",
                             severity="warning", timeout=4, markup=False)
                 return
@@ -3186,7 +3677,7 @@ if _TEXTUAL:
                     return
             except Exception:
                 pass
-            if self._run_state() == "running":
+            if self._run_state() == "running" or self._batch_active():
                 # One run at a time: the agent has to stop first (Esc).
                 self.notify("The agent is still working - press Esc or Stop first.",
                             severity="warning", timeout=4, markup=False)
@@ -3237,9 +3728,306 @@ if _TEXTUAL:
             self._focus_composer()
 
         # -- starting a run --------------------------------------------------
+        def _open_batch(self) -> None:
+            """Open the one-shot batch form (/batch)."""
+            if self._batch_active():
+                self.notify("A batch is already running - stop it first (Esc).",
+                            severity="warning", timeout=4, markup=False)
+                return
+            if self._start_locked:
+                self.notify("A run is already starting - wait for it.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            if self._run_is_live() or self._run_state() in ("running", "stopping"):
+                self.notify("The agent is still working - press Esc or Stop first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            # Prefill: copy of current Settings + current open run's task.
+            prefill_task = self._batch_task_prefill()
+            prefill_settings = dict(self.settings)
+            self.push_screen(BatchScreen(prefill_settings, prefill_task),
+                             callback=self._batch_chosen)
+
+        def _batch_chosen(self, result) -> None:
+            if not result:
+                self._focus_composer()
+                return
+            try:
+                count = int(result.get("count", 0))
+                task = str(result.get("task") or "").strip()
+                settings_snapshot = dict(result.get("settings") or {})
+            except Exception:
+                self._focus_composer()
+                return
+            self._focus_composer()
+            self._start_batch(count, task, settings_snapshot)
+
+        def _start_batch(self, count: int, task: str, settings_snapshot: dict) -> None:
+            """Freeze the effective config once, then run N members in order."""
+            if self._batch_active() or self._start_locked:
+                self.notify("A batch or run is already starting - wait for it.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            if self._run_is_live() or self._run_state() in ("running", "stopping"):
+                self.notify("The agent is still working - press Esc or Stop first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            problems = batch_form_problems(count, task, settings_snapshot)
+            if problems:
+                self._say(transcript_mod.ERROR,
+                          "Batch blocked:\n" + "\n".join("- %s" % p for p in problems[:8]))
+                return
+            self._start_locked = True
+            self.run_worker(lambda: self._batch_worker(count, task, settings_snapshot),
+                            thread=True)
+
+        def _batch_worker(self, count: int, task: str, settings_snapshot: dict) -> None:
+            self._busy_inc()
+            try:
+                self._batch_body(count, task, settings_snapshot)
+            except Exception as error:
+                try:
+                    self.call_from_thread(self._say, transcript_mod.ERROR,
+                                          "Batch failed: %s" % error)
+                except Exception:
+                    pass
+            finally:
+                # Batch owns the start lock for its whole queue (members must
+                # not interleave with single runs); release it here, not via
+                # the single-run _settle_launch flag.
+                def _settle_batch():
+                    self._start_locked = False
+                    self._busy_dec()
+                    try:
+                        self._render_status()
+                    except Exception:
+                        pass
+                    try:
+                        self._sync_send_button()
+                    except Exception:
+                        pass
+                try:
+                    self.call_from_thread(_settle_batch)
+                except Exception:
+                    try:
+                        _settle_batch()
+                    except Exception:
+                        pass
+
+        def _batch_body(self, count: int, task: str, settings_snapshot: dict) -> None:
+            import copy as _copy
+            # Freeze once: same effective config object for every member.
+            # Never writes runtime/tui-settings.json (snapshot only).
+            settings_snapshot = dict(settings_snapshot)
+            effective, problems = flows_mod.build_new_run("custom", task, settings_snapshot, cfg)
+            gate = flows_mod.service_gate(settings_snapshot, env_mod, services_mod)
+            problems = list(problems) + list(gate)
+            if problems:
+                self.call_from_thread(
+                    self._say, transcript_mod.ERROR,
+                    "Batch blocked:\n" + "\n".join(
+                        "- %s" % (p if isinstance(p, str) else p.get("name"))
+                        for p in problems[:8]))
+                return
+            frozen = _copy.deepcopy(effective)
+            try:
+                batch_id = batches_mod.new_batch_id() if batches_mod else "batch-%d" % int(time.time())
+            except Exception:
+                batch_id = "batch-%d" % int(time.time())
+            try:
+                batches_mod.create_batch_record(batch_id, frozen, int(count))
+            except Exception as error:
+                self.call_from_thread(self._say, transcript_mod.ERROR,
+                                      "Batch record failed: %s" % error)
+                return
+            self._batch = {"batchId": str(batch_id), "total": int(count),
+                           "current": 0, "running": True}
+            try:
+                self._batch_cancel.clear()
+            except Exception:
+                pass
+            self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                  "◇ BATCH %s · 0/%d starting - config frozen." % (batch_id, int(count)))
+            self.call_from_thread(self._render_status)
+            for seq in range(1, int(count) + 1):
+                if self._batch_cancel.is_set():
+                    self._batch_mark_skipped_from(batch_id, seq, int(count))
+                    break
+                self._batch["current"] = seq
+                self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                      "◇ BATCH %s · %d/%d running." % (batch_id, seq, int(count)))
+                self.call_from_thread(self._render_status)
+                started = time.time()
+                member_dir = None
+                member_run_id = None
+                member_error = None
+                member_exit = None
+                try:
+                    config_path = flows_mod.write_config(_copy.deepcopy(frozen), "custom", cfg)
+                except Exception as error:
+                    member_error = str(error)
+                    config_path = None
+                if config_path is not None:
+                    self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                          "Batch member %d/%d launching %s..." % (seq, int(count), config_path.name))
+                    try:
+                        outcome = self._batch_launch_one(config_path, batch_id, seq, int(count))
+                        member_dir = outcome.get("directory")
+                        member_run_id = outcome.get("run_id")
+                        member_exit = outcome.get("exit_code")
+                        member_error = outcome.get("error") or member_error
+                    except Exception as error:
+                        member_error = str(error)
+                seconds = round(time.time() - started, 3)
+                failed = False
+                if member_error:
+                    failed = True
+                elif member_exit is not None:
+                    try:
+                        failed = int(member_exit) != 0
+                    except (TypeError, ValueError):
+                        failed = False
+                if not member_run_id and not member_dir and not member_error:
+                    failed = True
+                    member_error = "launch produced no run"
+                status = "failed" if failed else "success"
+                try:
+                    record = batches_mod.load_batch(batch_id) or {}
+                    items = record.get("items") or []
+                    items.append({"seq": seq, "runId": member_run_id,
+                                  "directory": str(member_dir) if member_dir else None,
+                                  "status": status, "seconds": seconds,
+                                  "error": member_error, "exitCode": member_exit})
+                    record["items"] = items
+                    record["updatedAt"] = time.time()
+                    batches_mod.save_batch(record)
+                except Exception:
+                    pass
+                if self._batch_cancel.is_set():
+                    self._batch_mark_skipped_from(batch_id, seq + 1, int(count))
+                    break
+            try:
+                record = batches_mod.load_batch(batch_id) or {}
+                if self._batch_cancel.is_set() or str(record.get("status") or "") == "interrupted":
+                    record["status"] = "interrupted"
+                else:
+                    record["status"] = batches_mod.finalize_status(record)
+                record["updatedAt"] = time.time()
+                batches_mod.save_batch(record)
+                final = str(record.get("status") or "")
+            except Exception:
+                final = "completed"
+            try:
+                if isinstance(self._batch, dict):
+                    self._batch["running"] = False
+            except Exception:
+                pass
+            # Exiting the TUI cancels the queue; never auto-resume.
+            self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                  "◇ BATCH %s · finished: %s." % (batch_id, final))
+            self.call_from_thread(self._render_status)
+            self.call_from_thread(self._sync_send_button)
+
+        def _batch_mark_skipped_from(self, batch_id: str, start_seq: int, total: int) -> None:
+            try:
+                record = batches_mod.load_batch(batch_id) or {}
+                items = record.get("items") or []
+                existing = {int(i.get("seq") or 0) for i in items}
+                for rest in range(int(start_seq), int(total) + 1):
+                    if rest in existing:
+                        continue
+                    items.append({"seq": rest, "runId": None, "directory": None,
+                                  "status": "skipped", "seconds": 0,
+                                  "error": "cancelled"})
+                record["items"] = items
+                record["status"] = "interrupted"
+                record["updatedAt"] = time.time()
+                batches_mod.save_batch(record)
+            except Exception:
+                pass
+            try:
+                if isinstance(self._batch, dict):
+                    self._batch["running"] = False
+            except Exception:
+                pass
+            try:
+                self.call_from_thread(self._say, transcript_mod.NOTICE,
+                                      "◇ BATCH %s · interrupted - remaining members skipped." % batch_id)
+                self.call_from_thread(self._render_status)
+            except Exception:
+                pass
+
+        def _batch_launch_one(self, config_path, batch_id: str, seq: int, total: int) -> dict:
+            """One member run, blocking; chat shows only this member run."""
+            outcome: dict = {}
+            holder: dict = {}
+
+            def on_line(line: str):
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    return
+                if payload.get("event") == "run_started" and payload.get("directory"):
+                    holder["directory"] = payload["directory"]
+                    holder["run_id"] = payload.get("runId")
+                    try:
+                        self.call_from_thread(self._enter_live_for_batch,
+                                              payload["directory"], payload.get("runId"),
+                                              batch_id, seq, total)
+                    except Exception:
+                        pass
+
+            try:
+                result = runner_mod.launch(Path(config_path), on_line=on_line)
+                outcome["exit_code"] = result.exit_code
+                outcome["output_tail"] = getattr(result, "output_tail", "")
+                if holder.get("directory"):
+                    outcome["directory"] = holder["directory"]
+                    outcome["run_id"] = holder.get("run_id")
+                elif getattr(result, "directory", None):
+                    outcome["directory"] = str(result.directory)
+                    outcome["run_id"] = result.run_id
+                    try:
+                        self.call_from_thread(self._enter_live_for_batch,
+                                              str(result.directory), result.run_id,
+                                              batch_id, seq, total)
+                    except Exception:
+                        pass
+                if outcome.get("exit_code") not in (None, 0):
+                    tail = str(outcome.get("output_tail") or "")[-800:]
+                    outcome["error"] = "exit %s %s" % (outcome.get("exit_code"), tail)
+                    outcome["error"] = outcome["error"].strip()
+                elif not outcome.get("directory"):
+                    outcome["error"] = "launch ended without reserving a run"
+            except Exception as error:
+                outcome["error"] = str(error)
+            return outcome
+
+        def _enter_live_for_batch(self, directory, run_id, batch_id: str, seq: int, total: int):
+            # Chat shows only the current member run; the batch marker is
+            # announced alongside. No single-run lock bookkeeping here: the
+            # batch worker owns _start_locked for the whole queue.
+            try:
+                self.start_live(directory, run_id)
+            except Exception:
+                pass
+            try:
+                self._start_poll()
+            except Exception:
+                pass
+            try:
+                self._say(transcript_mod.NOTICE,
+                          "◇ BATCH %s · %d/%d open in chat." % (batch_id, seq, total))
+            except Exception:
+                pass
+            try:
+                self._render_status()
+            except Exception:
+                pass
+
         def _start_run(self, task_kind: str, prompt: str) -> None:
             """Preflight and launch. The start lock keeps one run at a time."""
-            if self._start_locked:
+            if self._start_locked or self._batch_active():
                 self.notify("A run is already starting - wait for it.",
                             severity="warning", timeout=4, markup=False)
                 return

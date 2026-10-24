@@ -433,12 +433,19 @@ class ConfirmScreen(DismissibleModal):
     def compose(self):
         with Vertical(classes="dlg"):
             yield Static(self._message, id="confirm-message", markup=False)
-            yield Static("Esc = No (cancel)", id="confirm-hint")
+            yield Static("Enter = Yes (quit now) · Esc = No (cancel)", id="confirm-hint")
             with Horizontal():
                 yield Button("Yes", id="confirm-yes", variant="error",
                              tooltip="Do the action now. Esc is the same as No.")
                 yield Button("No", id="confirm-no", variant="primary",
                              tooltip="Do nothing and go back. Esc does the same.")
+
+    def on_mount(self) -> None:
+        """Ctrl+Q lands on Yes: Enter quits immediately, Esc still cancels."""
+        try:
+            self.query_one("#confirm-yes", Button).focus()
+        except Exception:
+            pass
 
     async def action_dismiss(self, result=None) -> None:
         """Esc cancels: the same as clicking No, never the Yes action."""

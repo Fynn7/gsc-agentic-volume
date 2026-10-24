@@ -14,6 +14,8 @@ import sys
 import threading
 from pathlib import Path
 
+import subproc as subproc_mod
+
 ROOT = Path(__file__).resolve().parents[2]
 CONTROL_DIR = ROOT / "runtime" / "tui-control"
 
@@ -45,7 +47,8 @@ def stop_active(timeout: float = 10.0) -> list[int]:
         try:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True, timeout=30)
+                               capture_output=True, timeout=30,
+                               **subproc_mod.kwargs())
             else:
                 proc.terminate()
         except (OSError, subprocess.SubprocessError):
@@ -77,6 +80,10 @@ def launch(config_path: Path, python: str | None = None,
     exe = python or sys.executable
     cmd = [exe, "-B", str(ROOT / "scripts" / "run_local_agent.py"),
            "--config", str(config_path)]
+    # The launcher and its harness children inherit the debug toggle, so a
+    # headless TUI stays headless down the whole tree.
+    env = dict(os.environ)
+    env[subproc_mod.ENV_VAR] = "1" if subproc_mod.debug_windows() else "0"
     result = LaunchResult()
     lines: list[str] = []
 
@@ -90,8 +97,9 @@ def launch(config_path: Path, python: str | None = None,
                     pass
         stream.close()
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, encoding="utf-8", errors="replace",
+                            **subproc_mod.kwargs())
     _register(proc)
     try:
         assert proc.stdout is not None

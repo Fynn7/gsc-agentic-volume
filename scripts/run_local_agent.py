@@ -32,6 +32,28 @@ LOCK_DIRECTORY = ROOT / 'runtime' / 'locks'
 CONTROL_DIRECTORY = ROOT / 'runtime' / 'tui-control'
 
 
+def _windowless_python(exe):
+    """pythonw.exe sibling when headless (old configs predate config['python']).
+
+    Prefers the shared TUI helper; falls back to the env toggle so the
+    standalone launcher stays silent too unless debugging was requested.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / 'scripts' / 'volume_tui'))
+        import subproc as _subproc
+        return _subproc.windowless_python(exe)
+    except Exception:
+        pass
+    try:
+        if os.name == 'nt' and os.environ.get('GAV_DEBUG_WINDOWS', '').strip().lower() not in ('1', 'true', 'yes', 'on'):
+            candidate = Path(exe).with_name('pythonw.exe')
+            if candidate.is_file():
+                return str(candidate)
+    except Exception:
+        pass
+    return exe
+
+
 def stop_requested(run_id):
     """Cooperative stop flag written by the TUI Stop button (read-only evidence otherwise)."""
     try:
@@ -254,7 +276,7 @@ def execute(context, show_images=False, open_images=False):
         env.pop(key, None)
     env.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy, ALL_PROXY=proxy, NO_PROXY='127.0.0.1,localhost', DO_NOT_TRACK='1')
     stop = threading.Event(); telemetry = threading.Thread(target=monitor, args=(stop,directory,endpoint), daemon=True); telemetry.start()
-    python = config.get('python', sys.executable)
+    python = config.get('python') or _windowless_python(sys.executable)
     mcp_args = ['-B', str(ROOT / 'scripts/renderer_mcp.py'), '--service', service, '--session', session['id']]
     workspace = directory / 'workspace'; workspace.mkdir()
     harness = config.get('harness', 'codex')

@@ -1,6 +1,8 @@
 """One complete SceneSpec -> native GSC -> screenshot and native state readback."""
 import json
+import os
 import subprocess
+import sys
 import threading
 import math
 from pathlib import Path
@@ -10,6 +12,81 @@ from volume import sha256_file
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT/'VirtualSampling/Raycaster/VS/x64/Release/Raycaster.exe'
 CWD = ROOT/'VirtualSampling/Raycaster/VS'
+
+
+def _tui_subproc():
+    """Shared headless helper (stdlib-only); None when unreachable."""
+    try:
+        sys.path.insert(0, str(ROOT / 'scripts' / 'volume_tui'))
+        import subproc as helper
+        return helper
+    except Exception:
+        return None
+
+
+_SUBPROC = _tui_subproc()
+
+
+def _headless() -> bool:
+    """Hide Raycaster windows unless the TUI debug toggle says otherwise."""
+    if _SUBPROC is not None:
+        try:
+            return not _SUBPROC.debug_windows()
+        except Exception:
+            pass
+    return os.environ.get('GAV_DEBUG_WINDOWS', '').strip().lower() not in ('1', 'true', 'yes', 'on')
+
+
+def _hide_process_windows(pid: int) -> None:
+    """Hide visible top-level windows owned by `pid` (no C++ rebuild needed).
+
+    The C++ side hides its GLFW window itself once rebuilt with
+    GAV_RAYCASTER_HIDDEN support; until then this Win32 fallback keeps
+    batch screenshots from flashing. No-op off Windows or on any error.
+    """
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        IsWindowVisible = user32.IsWindowVisible
+        ShowWindow = user32.ShowWindow
+        GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _visit(hwnd, _lparam):
+            try:
+                owner = wintypes.DWORD()
+                GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                if int(owner.value) == pid and IsWindowVisible(hwnd):
+                    ShowWindow(hwnd, 0)  # SW_HIDE
+            except Exception:
+                pass
+            return True
+
+        try:
+            EnumWindows = user32.EnumWindows
+            EnumWindows.argtypes = [ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM), wintypes.LPARAM]
+            EnumWindows.restype = wintypes.BOOL
+            EnumWindows(_visit, 0)
+        finally:
+            _keepalive = _visit  # noqa: F841 - keep the callback alive during the call
+    except Exception:
+        pass
+
+
+def _hide_soon(pid: int) -> None:
+    """The GLFW window appears after GL init; retry hiding briefly."""
+    import time as _time
+
+    def _work():
+        deadline = _time.time() + 5.0
+        while _time.time() < deadline:
+            _hide_process_windows(pid)
+            _time.sleep(0.25)
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def initial_scene(volume):
@@ -85,14 +162,29 @@ def _render_unlocked(scene, volume, directory, stop=None):
         scene['crop']), f'dumpstate {token(directory/"native-state.json")}', 'screenshot image.png', 'log COMPLETE', 'quit']
     (directory/'scene.json').write_text(json.dumps(scene, indent=2))
     (directory/'script.gsc').write_text('\n'.join(script)+'\n')
+    env = dict(os.environ)
+    if _headless():
+        # Honoured by the C++ renderer once rebuilt (hidden GLFW window).
+        env['GAV_RAYCASTER_HIDDEN'] = '1'
+    if _SUBPROC is not None:
+        popen_kw = _SUBPROC.with_kwargs({'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)})
+    elif os.name == 'nt':
+        popen_kw = {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)}
+    else:
+        popen_kw = {}
     p = subprocess.Popen([str(EXE), '--script', str(directory/'script.gsc')], cwd=CWD,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **popen_kw)
+    if _headless():
+        _hide_process_windows(p.pid)
+        _hide_soon(p.pid)
     timedout = threading.Event()
 
     def kill():
         if p.poll() is None:
+            kill_kw = _SUBPROC.kwargs() if _SUBPROC is not None else (
+                {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)} if os.name == 'nt' else {})
             subprocess.run(['taskkill', '/pid', str(p.pid), '/T', '/F'],
-                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                           capture_output=True, **kill_kw)
     timer = threading.Timer(60, lambda: (timedout.set(), kill()))
     timer.start()
 

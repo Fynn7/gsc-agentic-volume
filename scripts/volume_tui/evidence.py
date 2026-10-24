@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import subproc as subproc_mod
+
 
 def open_path(path: str | Path) -> str:
     """Open a path in the system viewer; returns a human message (no exception)."""
@@ -48,7 +50,8 @@ def copy_to_clipboard(text: str) -> str:
                        "$s=[Console]::In.ReadToEnd(); Set-Clipboard -Value $s")
             proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
                                    "-Command", command],
-                                  input=payload, capture_output=True, timeout=60)
+                                  input=payload, capture_output=True, timeout=60,
+                                  **subproc_mod.kwargs())
             if proc.returncode == 0:
                 return "Copied %d characters to the clipboard." % len(text)
             detail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
@@ -56,7 +59,7 @@ def copy_to_clipboard(text: str) -> str:
                                                   else "Set-Clipboard failed")
         if sys.platform == "darwin":
             proc = subprocess.run(["pbcopy"], input=payload, capture_output=True,
-                                  timeout=30)
+                                  timeout=30, **subproc_mod.kwargs())
             if proc.returncode == 0:
                 return "Copied %d characters to the clipboard." % len(text)
             return "Clipboard copy failed: pbcopy failed"
@@ -64,7 +67,7 @@ def copy_to_clipboard(text: str) -> str:
                         ["xsel", "--clipboard", "--input"]):
             try:
                 proc = subprocess.run(command, input=payload, capture_output=True,
-                                      timeout=30)
+                                      timeout=30, **subproc_mod.kwargs())
             except OSError:
                 continue
             if proc.returncode == 0:

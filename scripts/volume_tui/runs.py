@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import subproc as subproc_mod
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 try:
@@ -162,7 +164,8 @@ def _python_for_verify() -> str:
     for exe in (sys.executable, bundled):
         try:
             probe = subprocess.run([exe, "-B", "-c", "import numpy,PIL"],
-                                   capture_output=True, timeout=60)
+                                   capture_output=True, timeout=60,
+                                   **subproc_mod.kwargs())
             if probe.returncode == 0:
                 return exe
         except (OSError, subprocess.SubprocessError):
@@ -174,7 +177,8 @@ def run_verify(run_dir: str, python: str | None = None) -> dict:
     """Call the existing verifier as a subprocess. Returns {'code', 'report', 'output'}."""
     exe = python or _python_for_verify()
     proc = subprocess.run([exe, "-B", str(ROOT / "scripts" / "verify_local_agent.py"), run_dir],
-                          capture_output=True, text=True, timeout=300)
+                          capture_output=True, text=True, timeout=300,
+                          **subproc_mod.kwargs())
     report = None
     try:
         report = json.loads((Path(run_dir) / "verification.json").read_text(encoding="utf-8"))

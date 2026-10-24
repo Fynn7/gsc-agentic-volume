@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 
 #ifndef SET_ENS_CANVAS
@@ -204,6 +205,15 @@ GLEnv::GLEnv(uint32_t w, uint32_t h, uint32_t s, const std::string& title,
   }
 
   // Now create the window; framebuffer will be exactly w×h if exactPixels == true
+  // GAV_RAYCASTER_HIDDEN=1 (set by the Python renderer unless the TUI debug
+  // toggle asks for visible popups) keeps the GLFW window hidden for batch
+  // screenshots. Hidden windows still own a GL context, so offscreen
+  // rendering and `screenshot` keep working.
+  if (const char* hidden = std::getenv("GAV_RAYCASTER_HIDDEN")) {
+    if (std::string(hidden) == "1") {
+      glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    }
+  }
   window = glfwCreateWindow(int(w), int(h), title.c_str(), nullptr, nullptr);
   if (window == nullptr) {
     std::stringstream s;

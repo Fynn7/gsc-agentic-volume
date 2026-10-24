@@ -639,6 +639,13 @@ class SettingsScreen(DismissibleModal):
                                      value="true" if self.settings.get("think") else "false",
                                      id="set-think")
                     with Horizontal(classes="row"):
+                        yield Label("Debug windows", classes="field-label")
+                        yield Select([("off (headless)", "false"), ("on (show popups)", "true")],
+                                     value="true" if self.settings.get("debugWindows") else "false",
+                                     id="set-debug-windows",
+                                     tooltip="Off hides console/GLFW popups (default). "
+                                             "On keeps the old visible behaviour for debugging.")
+                    with Horizontal(classes="row"):
                         yield Button("Save settings", id="btn-settings-save", variant="primary",
                                      tooltip="Write these settings to runtime/tui-settings.json.")
                         yield Button("Reset to defaults", id="btn-settings-reset",
@@ -704,6 +711,10 @@ class SettingsScreen(DismissibleModal):
         except Exception:
             pass
         try:
+            settings["debugWindows"] = str(self.query_one("#set-debug-windows", Select).value) == "true"
+        except Exception:
+            pass
+        try:
             settings["volumePath"] = str(self.query_one("#set-volume", Select).value or "")
         except Exception:
             pass
@@ -751,6 +762,11 @@ class SettingsScreen(DismissibleModal):
         try:
             self.query_one("#set-think", Select).value = (
                 "true" if defaults.get("think") else "false")
+        except Exception:
+            pass
+        try:
+            self.query_one("#set-debug-windows", Select).value = (
+                "true" if defaults.get("debugWindows") else "false")
         except Exception:
             pass
         try:

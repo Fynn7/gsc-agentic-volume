@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config as config_mod
 import runs as runs_mod
+import subproc as subproc_mod
 from run_lifecycle import process_alive
 
 SESSION_ID = secrets.token_hex(8)
@@ -81,7 +82,8 @@ def _spawn(cmd: list[str], env: dict, cwd: Path, stem: str) -> int:
     err = (_logdir() / ("%s-stderr.log" % stem)).open("ab")
     try:
         proc = subprocess.Popen(cmd, env=env, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                stdout=out, stderr=err, creationflags=_CREATE_FLAGS)
+                                stdout=out, stderr=err,
+                                **subproc_mod.with_kwargs({"creationflags": _CREATE_FLAGS}))
         return proc.pid
     finally:
         out.close()
@@ -105,10 +107,11 @@ def _image_of_pid(pid: int) -> str | None:
         return None
     try:
         out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=15)
+                             capture_output=True, text=True, timeout=15,
+                             **subproc_mod.kwargs())
     except (OSError, subprocess.SubprocessError):
         return None
-    for line in out.stdout.splitlines():
+    for line in (out.stdout or "").splitlines():
         parts = [piece.strip().strip('"') for piece in line.split('","')]
         if len(parts) >= 2 and parts[1] == str(pid) and parts[0]:
             return parts[0].lower()
@@ -119,7 +122,8 @@ def _terminate(pid: int) -> bool:
     try:
         if os.name == "nt":
             done = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                                  capture_output=True, timeout=30)
+                                  capture_output=True, timeout=30,
+                                  **subproc_mod.kwargs())
             return done.returncode == 0
         os.kill(pid, 15)
         return True
@@ -132,6 +136,25 @@ def _terminate(pid: int) -> bool:
 _OWNED_IMAGES = ("python.exe", "pythonw.exe", "codex.exe", "node.exe")
 _LAUNCHER_IMAGES = ("python.exe", "pythonw.exe", "py.exe")
 _HARNESS_IMAGES = ("codex.exe",)
+
+
+def _image_matches(recorded: str | None, actual: str | None) -> bool:
+    """Ownership re-verification tolerant to the windowless interpreter.
+
+    Headless spawns run pythonw.exe while records keep the canonical
+    python.exe (and old records predate pythonw entirely); both names are
+    the same interpreter. Anything outside that pair must match exactly,
+    so a foreign pid reusing the number is still never touched.
+    """
+    if recorded == actual:
+        return True
+    if not recorded or not actual:
+        return False
+    low_recorded, low_actual = recorded.lower(), actual.lower()
+    if low_recorded == low_actual:
+        return True
+    pair = ("python.exe", "pythonw.exe")
+    return low_recorded in pair and low_actual in pair
 
 
 def _block_interrupts() -> None:
@@ -213,11 +236,12 @@ def _pids_with_images(prefixes: tuple[str, ...]) -> list[int]:
         return []
     try:
         out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=20)
+                             capture_output=True, text=True, timeout=20,
+                             **subproc_mod.kwargs())
     except (OSError, subprocess.SubprocessError):
         return []
     pids: list[int] = []
-    for line in out.stdout.splitlines():
+    for line in (out.stdout or "").splitlines():
         parts = [piece.strip().strip('"') for piece in line.split('","')]
         if len(parts) < 2 or not parts[1].isdigit():
             continue
@@ -233,11 +257,12 @@ def _listener_pids(port: int) -> list[int]:
         return []
     try:
         out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
-                             capture_output=True, text=True, timeout=20)
+                             capture_output=True, text=True, timeout=20,
+                             **subproc_mod.kwargs())
     except (OSError, subprocess.SubprocessError):
         return []
     pids: set[int] = set()
-    for line in out.stdout.splitlines():
+    for line in (out.stdout or "").splitlines():
         fields = line.split()
         if len(fields) < 5 or fields[0].upper() != "TCP" or fields[3].upper() != "LISTENING":
             continue
@@ -479,8 +504,13 @@ def _ensure_renderer(settings: dict, owned: dict, report: dict) -> None:
     except Exception:
         pass
     python = runs_mod._python_for_verify()
+    # Windowless interpreter when headless: the daemon then cannot own a
+    # console at all, regardless of terminal/host behaviour. Debug keeps
+    # python.exe visible. The ownership record keeps image python.exe for
+    # old records; liveness is re-verified (not trusted) at release time.
+    daemon = subproc_mod.windowless_python(python, settings)
     try:
-        pid = _spawn([python, "-B", str(ROOT / "src" / "app.py"), "--port", str(port)],
+        pid = _spawn([daemon, "-B", str(ROOT / "src" / "app.py"), "--port", str(port)],
                      dict(os.environ), ROOT, "renderer")
     except Exception as error:
         report["problems"].append({"name": "Renderer %s" % service, "ok": False,
@@ -494,6 +524,9 @@ def _ensure_renderer(settings: dict, owned: dict, report: dict) -> None:
             raise ValueError("foreign service on port %d" % port)
 
     if _wait_true(healthy, 10.0):
+        # Canonical interpreter name: headless spawns may actually run as
+        # pythonw.exe; _image_matches treats the family as equivalent, and
+        # old records (written pre-headless) keep verifying too.
         owned["renderer"] = {"pid": pid, "image": "python.exe", "service": service}
         report["started"].append("renderer %s (pid %d, TUI-owned)" % (service, pid))
     else:
@@ -604,7 +637,7 @@ def ensure_services(settings: dict) -> dict:
     owned: dict = {}
     for kind, entry in (record.get("services") or {}).items():
         pid = entry.get("pid")
-        if isinstance(pid, int) and process_alive(pid) and _image_of_pid(pid) == entry.get("image"):
+        if isinstance(pid, int) and process_alive(pid) and _image_matches(entry.get("image"), _image_of_pid(pid)):
             owned[kind] = entry
     if owned:
         report["adopted"] = sorted(owned)
@@ -781,7 +814,7 @@ def release_owned_services(force: bool = False) -> dict:
             if isinstance(pid, int):
                 report["stopped"].append("%s pid %d (already gone)" % (kind, pid))
             continue
-        if _image_of_pid(pid) != entry.get("image"):
+        if not _image_matches(entry.get("image"), _image_of_pid(pid)):
             report["skipped"].append("%s pid %d (image no longer ours, left alone)" % (kind, pid))
             continue
         if _terminate(pid):
@@ -972,7 +1005,7 @@ def owned_services() -> list[dict]:
     out = []
     for kind, entry in services.items():
         pid = entry.get("pid")
-        alive = isinstance(pid, int) and process_alive(pid) and _image_of_pid(pid) == entry.get("image")
+        alive = isinstance(pid, int) and process_alive(pid) and _image_matches(entry.get("image"), _image_of_pid(pid))
         out.append({"kind": kind, "pid": pid, "image": entry.get("image"),
                     "alive": bool(alive), "owned": record.get("owner") == SESSION_ID,
                     "endpoint": entry.get("endpoint") or entry.get("service") or "",

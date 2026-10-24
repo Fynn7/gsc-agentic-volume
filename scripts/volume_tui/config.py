@@ -6,7 +6,10 @@ Custom tasks never inherit A/B prompts: they are built fresh from the example.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+import subproc as subproc_mod
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "experiments" / "local-vlm.example.json"
@@ -36,6 +39,7 @@ DEFAULTS = {"mode": "Local", "model": "qwen3.6:35b",
             "renderBudget": 4,
             "temperature": 0,
             "think": False,
+            "debugWindows": False,
             "timeoutSeconds": 300,
             "taskTimeoutSeconds": 900,
             "maxOutputTokens": 1200}
@@ -145,6 +149,10 @@ def build_effective_config(task_kind: str, custom_text: str, settings: dict) -> 
     config["model"] = settings["model"]
     config["endpoint"] = active_endpoint(settings)
     config["rendererService"] = settings["rendererService"]
+    # The harness spawns this interpreter for its renderer MCP server without
+    # any of our creation flags; headless picks the windowless sibling so no
+    # console window flashes per run (debug mode keeps python.exe visible).
+    config["python"] = subproc_mod.windowless_python(sys.executable, settings)
     for key in ("contextSize", "renderBudget", "temperature", "think",
                 "timeoutSeconds", "taskTimeoutSeconds", "maxOutputTokens"):
         if key in settings:

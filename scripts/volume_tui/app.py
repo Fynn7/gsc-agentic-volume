@@ -1836,16 +1836,20 @@ if _TEXTUAL:
                 return  # the run changed while the read was running
             if fresh:
                 self.live_events.extend(fresh)
-            if status in ("finished", "failed"):
-                self.live_frozen = True
-                self._close_thinking()
-                self._announce_the_end()
             # The stream is the model's own order of work (thinking, then the
             # call): it folds in first, then the service/harness evidence that
             # the work caused (the tool row, the frame). The other order shows
             # the call before the thinking that chose it.
             self._ingest_events(streamed)
             self._ingest_events(fresh)
+            # A history run is read-only: anything that is not actually
+            # running freezes the view, so an interrupted turn never keeps
+            # spinning as "Working". The check runs after the ingest, so a
+            # stale thinking_start replayed from disk is closed at once.
+            if self._run_state() not in ("running", "stopping"):
+                self.live_frozen = True
+                self._close_thinking()
+                self._announce_the_end()
             self._render_live()
             # The poll learned the state of the run: the line and the button
             # follow it right away, not at the next tick.
@@ -2044,7 +2048,12 @@ if _TEXTUAL:
 
             Read from the run's own run.json, so the line never claims that a
             stopped run is still running: running / stopping / stopped /
-            finished / failed / idle.
+            finished / failed / unknown / idle.
+
+            A run.json that still says "running" after its process is gone
+            (interrupted / stale lock) is history, not live: it reports the
+            recorded classification (unknown) so the conversation stays
+            read-only instead of spinning as "Working".
             """
             if self.live_dir is None:
                 return "idle"
@@ -2059,6 +2068,24 @@ if _TEXTUAL:
                 status = str(record.get("status") or "running")
                 if status != "running":
                     return status
+                if self._stop_requested_for == self.live_run_id:
+                    return "stopping"
+                # Recorded "running": verify the process is really alive.
+                # A dead pid means history (unknown), never a live agent.
+                try:
+                    if runs_mod is not None:
+                        manifest = None
+                        try:
+                            manifest = json.loads(
+                                (self.live_dir / "manifest.json").read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            manifest = None
+                        if not isinstance(manifest, dict):
+                            manifest = None
+                        if runs_mod.classify(record, manifest) != "Running":
+                            return "unknown"
+                except Exception:
+                    pass
             if self._stop_requested_for == self.live_run_id:
                 return "stopping"
             return "running"
@@ -2526,10 +2553,16 @@ if _TEXTUAL:
             """Run ids that are still running (the runs on disk and the open one)."""
             ids = []
             for entry in self.runs:
-                if runs_mod and runs_mod.is_live(entry) and entry.get("runId"):
+                if not isinstance(entry, dict) or not entry.get("runId"):
+                    continue
+                # The recorded status alone is not liveness: a stale
+                # run.json that still says "running" after its process is
+                # gone is history (Unknown), never a live agent.
+                if str(entry.get("status") or "") == "Running":
                     ids.append(str(entry["runId"]))
             if self.live_run_id and self.live_run_id not in ids:
-                ids.append(str(self.live_run_id))
+                if self._run_is_live():
+                    ids.append(str(self.live_run_id))
             return ids
 
         def _hard_stop(self) -> None:
@@ -2589,6 +2622,12 @@ if _TEXTUAL:
             """Ask the agent to stop now; the evidence already written stays."""
             if not self.live_run_id:
                 self.notify("No run is open.", severity="warning", timeout=4, markup=False)
+                return
+            if not self._run_is_live():
+                # History is read-only: nothing is working, so there is
+                # nothing to stop (no stop marker is written for it).
+                self.notify("No live run to stop - the open run is read-only history.",
+                            severity="warning", timeout=4, markup=False)
                 return
             run_id = self.live_run_id
             if self._stop_requested_for == run_id:

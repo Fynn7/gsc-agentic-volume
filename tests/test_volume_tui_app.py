@@ -1660,11 +1660,15 @@ class ChatLog(unittest.TestCase):
                     app.start_live(run_dir, "run-demo")
                     log_dir = Path(tmp) / "chat-logs"
                     with patch.object(tui_app.chat_log_mod, "LOG_DIR", log_dir):
-                        app._export_chat_log()
-                        for _ in range(200):
-                            await pilot.pause()
-                            if app._busy_count == 0:
-                                break
+                        with patch.object(tui_app.evidence_mod,
+                                          "open_path") as mock_open:
+                            mock_open.side_effect = lambda p: "Opened: %s" % p
+                            app._export_chat_log()
+                            for _ in range(200):
+                                await pilot.pause()
+                                if app._busy_count == 0:
+                                    break
+                            mock_open.assert_called_once_with(str(log_dir))
                     logs = sorted(log_dir.glob("*.log"))
                     self.assertEqual(len(logs), 1)
                     written = logs[0].read_text(encoding="utf-8")
@@ -1709,17 +1713,21 @@ class ChatLog(unittest.TestCase):
                         {"task": "Set the camera rotationXYZ."}))
                     app.start_live(run_dir, "run-demo")
                     with patch.object(tui_app.chat_log_mod, "LOG_DIR", log_dir):
-                        # Slash menu (opencode-style): /export-chat exports.
-                        app.query_one("#composer", tui_app.Composer).text = "/export-chat"
-                        await pilot.pause()
-                        app.query_one("#composer", tui_app.Composer).focus()
-                        await pilot.pause()
-                        await pilot.press("enter")
-                        await pilot.pause()
-                        for _ in range(200):
+                        with patch.object(tui_app.evidence_mod,
+                                          "open_path") as mock_open:
+                            mock_open.side_effect = lambda p: "Opened: %s" % p
+                            # Slash menu (opencode-style): /export-chat exports.
+                            app.query_one("#composer", tui_app.Composer).text = "/export-chat"
                             await pilot.pause()
-                            if app._busy_count == 0 and list(log_dir.glob("*.log")):
-                                break
+                            app.query_one("#composer", tui_app.Composer).focus()
+                            await pilot.pause()
+                            await pilot.press("enter")
+                            await pilot.pause()
+                            for _ in range(200):
+                                await pilot.pause()
+                                if app._busy_count == 0 and list(log_dir.glob("*.log")):
+                                    break
+                            mock_open.assert_called_once_with(str(log_dir))
                     logs = list(log_dir.glob("*.log"))
                     self.assertEqual(len(logs), 1)
                     self.assertIn("# Volume Agent chat log", logs[0].read_text(encoding="utf-8"))

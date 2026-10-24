@@ -153,7 +153,7 @@ IMAGE_PREVIEW_MAX_COLS = 64
 # Composer history (shell-like Up/Down) survives TUI restarts: every submitted
 # task is appended here, so killing the TUI and reopening it still recalls
 # the last input with Up. Lives under runtime/tui/ with the other TUI-owned
-# state (services.json, chat-logs/); the run folders stay read-only.
+# state (services.json); the run folders stay read-only.
 COMPOSER_HISTORY_LIMIT = 100
 COMPOSER_HISTORY_FILE = ROOT / "runtime" / "tui" / "composer-history.json"
 
@@ -530,8 +530,8 @@ class CommandScreen(DismissibleModal):
          "Copy the conversation of this run as plain text (the task, the "
          "model's thinking, the tool calls, the frames and the answer)."),
         ("Live: export the chat log", "live-export-chat",
-         "Write the conversation of this run to runtime/tui/chat-logs/ as a "
-         ".log file (the run folder stays read-only)."),
+         "Download the conversation of this run to your Downloads folder as "
+         "a .log file and open the folder (the run folder stays read-only)."),
         ("Live: view the current PNG", "live-open-png",
          "Open the previewed PNG in your image viewer (full size)."),
         ("Live: open the PNG folder", "live-open",
@@ -3461,9 +3461,10 @@ if _TEXTUAL:
             self._run_guarded("Copying the chat log", _work, button)
 
         def _export_chat_log(self, button=None) -> None:
-            """Write the chat record to a log file (the run folder stays read-only).
+            """Download the chat record to the user's Downloads folder.
 
-            The file lands in runtime/tui/chat-logs/, one file per export.
+            One file per export; the run folder stays read-only. The
+            Downloads folder opens automatically once written.
             """
             if not self.live_dir:
                 self.notify("No run is open - open one first.",
@@ -3492,6 +3493,12 @@ if _TEXTUAL:
             # conversation where it stays selectable via SafeSelection.
             try:
                 self._say(transcript_mod.NOTICE, "Chat log written: %s" % path)
+            except Exception:
+                pass
+            # The export is a download: reveal the Downloads folder so the
+            # file is one click away (same opener as /open-folder).
+            try:
+                evidence_mod.open_path(str(Path(path).parent))
             except Exception:
                 pass
 

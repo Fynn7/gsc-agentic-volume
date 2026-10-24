@@ -9,7 +9,7 @@ written to a file.
 The log carries the story of the run. The transport (the model calls, the
 HTTP status) stays in the evidence: "Live: copy the JSON log" has it.
 The run folder is never written to - an exported log lands in
-runtime/tui/chat-logs/.
+the user's Downloads folder.
 
 Pure functions plus one small writer - no model, no network, no run.
 """
@@ -28,8 +28,9 @@ for _extra in (_ROOT / "scripts", Path(__file__).resolve().parent):
 import event_text as text_mod
 import transcript as transcript_mod
 
-# Where an exported chat log lands (the run folder stays read-only).
-LOG_DIR = _ROOT / "runtime" / "tui" / "chat-logs"
+# Where an exported chat log lands (the run folder stays read-only):
+# the user's Downloads folder (a direct download, not the project folder).
+LOG_DIR = Path.home() / "Downloads"
 
 # The mark in front of every word the model itself wrote (the screen's mark).
 MODEL_MARK = transcript_mod.block_mark(transcript_mod.ASSISTANT)
@@ -183,9 +184,10 @@ def _safe_name(text: str) -> str:
 def export_chat_log(blocks, *, run_id=None, model=None, run_dir=None) -> Path:
     """Write the chat record to a log file; returns the path of the file.
 
-    The file lands in runtime/tui/chat-logs/ (the run folder is never
-    written to). Every export keeps its own file: a second export in the
-    same second gets its own number.
+    The file lands in the user's Downloads folder (the run folder is never
+    written to, and nothing is written into the project folder). Every
+    export keeps its own file: a second export in the same second gets its
+    own number.
     """
     folder = Path(LOG_DIR)
     folder.mkdir(parents=True, exist_ok=True)

@@ -178,9 +178,8 @@ class ChatLogExport(unittest.TestCase):
             # The run folder keeps its evidence: nothing is written into it.
             self.assertEqual([p.name for p in run_dir.iterdir()], ["run.json"])
 
-    def test_the_default_log_folder_is_the_tui_folder(self):
-        self.assertEqual(tui_chat_log.LOG_DIR,
-                         ROOT / "runtime" / "tui" / "chat-logs")
+    def test_the_default_log_folder_is_the_download_folder(self):
+        self.assertEqual(tui_chat_log.LOG_DIR, Path.home() / "Downloads")
 
     def test_two_exports_keep_two_files(self):
         with tempfile.TemporaryDirectory() as tmp:

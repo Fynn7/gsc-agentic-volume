@@ -4,7 +4,7 @@ One screen, like a coding agent app (Codex CLI, OpenCode): the task at the
 top, then the model's thinking, its tool calls, the frames it rendered and its
 answer. Control/display only over the Codex CLI — no agent loop lives here.
 Evidence is read-only except new runs, `verification.json`,
-`tui-settings.json` and the exported chat logs (`runtime/tui/chat-logs/`).
+`tui-settings.json` and the downloaded chat logs (your Downloads folder).
 
 ## Entry
 
@@ -134,7 +134,7 @@ back to the bottom resumes it (there is no Follow button).
 | /verify | read-only check → `verification.json` |
 | /copy-json | the run's meta data, every event and every JSON log file |
 | /copy-chat | the conversation as plain text: the task, the model's thinking, the tool calls, the frames and the answer |
-| /export-chat | the same conversation written to `runtime/tui/chat-logs/<runId>-<time>.log` (the run folder stays read-only) |
+| /export-chat | the same conversation downloaded to your Downloads folder as `<runId>-<time>.log` and the folder opened (the run folder stays read-only) |
 | /open-image | opens the previewed PNG in the system viewer |
 | /open-folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
 | /history | picks one of the runs on this machine and opens it here |
@@ -293,8 +293,8 @@ the window.
   time — the time of the step when the evidence knows it (the task, the tool
   calls, the frames), the moment the TUI read it otherwise (the model's own
   words: the harness log has no timestamps).
-  `chat_log.export_chat_log` writes it to
-  `runtime/tui/chat-logs/<runId>-<time>.log`, one file per export; the run
+  `chat_log.export_chat_log` downloads it to
+  your Downloads folder as `<runId>-<time>.log`, one file per export; the run
   folder is never written to.
 - Verify: `runs.run_verify` subprocess + three-way summary
   (execution / image transport / visual-quality UNVERIFIED).

@@ -106,6 +106,7 @@ try:
         Static,
         TextArea,
     )
+    from textual.suggester import Suggester
     _TEXTUAL = True
 except Exception:
     _TEXTUAL = False
@@ -649,6 +650,50 @@ def parse_slash_command(text: str):
     return None
 
 
+class _ModelSuggester(Suggester if _TEXTUAL else object):
+    """Inline completion for the model field from this machine's Ollama.
+
+    Prefix match first (``qwen`` -> ``qwen3.6:35b``), then substring
+    (``35b`` -> ``qwen3.6:35b``); case-insensitive. The list comes from
+    ``/api/tags`` (see ``SettingsScreen._refresh_models``), never typed
+    by hand. Empty input suggests nothing.
+    """
+
+    def __init__(self, suggestions=()) -> None:
+        try:
+            super().__init__(case_sensitive=False)
+        except Exception:
+            pass
+        self._suggestions: list[str] = []
+        self.update(suggestions)
+
+    def update(self, suggestions) -> None:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for name in suggestions or []:
+            text = str(name or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                ordered.append(text)
+        self._suggestions = sorted(ordered)
+
+    @property
+    def suggestions(self) -> list[str]:
+        return list(self._suggestions)
+
+    async def get_suggestion(self, value: str) -> str | None:
+        needle = str(value or "").casefold()
+        if not needle:
+            return None
+        for name in self._suggestions:
+            if name.casefold().startswith(needle):
+                return name
+        for name in self._suggestions:
+            if needle in name.casefold():
+                return name
+        return None
+
+
 class RunsScreen(DismissibleModal):
     """The runs on this machine; one opens in the conversation."""
 
@@ -1038,6 +1083,7 @@ class SettingsScreen(DismissibleModal):
     def __init__(self, settings: dict):
         super().__init__()
         self.settings = dict(settings or {})
+        self._model_suggester = _ModelSuggester()
 
     def compose(self):
         with Vertical(classes="dlg"):
@@ -1048,7 +1094,17 @@ class SettingsScreen(DismissibleModal):
                     for label, wid, key, _kind in SETTINGS_ROWS:
                         with Horizontal(classes="row"):
                             yield Label(label, classes="field-label")
-                            yield Input(str(self.settings.get(key, "")), id=wid)
+                            if key == "model":
+                                yield Input(str(self.settings.get(key, "")), id=wid,
+                                            suggester=self._model_suggester,
+                                            tooltip="Tab/Right completes from the models on this machine "
+                                                    "(Refresh models re-reads them).")
+                            else:
+                                yield Input(str(self.settings.get(key, "")), id=wid)
+                        if key == "model":
+                            with Horizontal(classes="row", id="model-hint-row"):
+                                yield Label("", classes="field-label")
+                                yield Static("", id="model-hint", markup=False)
                     with Horizontal(classes="row"):
                         yield Label("Volume", classes="field-label")
                         options, volume_value = self._volume_options()
@@ -1073,6 +1129,9 @@ class SettingsScreen(DismissibleModal):
                         yield Button("Test H200 endpoint", id="btn-h200-probe",
                                      tooltip="Send one small probe request to the H200 endpoint. "
                                              "Never falls back silently.")
+                        yield Button("Refresh models", id="btn-models-refresh",
+                                     tooltip="Re-read /api/tags from the endpoints above, "
+                                             "so Tab completion knows this machine's models.")
                     yield Static("", id="settings-status", markup=False)
 
     # -- the volume ------------------------------------------------------
@@ -1148,6 +1207,19 @@ class SettingsScreen(DismissibleModal):
             self._reset()
         elif bid == "btn-h200-probe":
             self._probe()
+        elif bid == "btn-models-refresh":
+            self._refresh_models()
+
+    def on_mount(self) -> None:
+        self._refresh_models()
+
+    def on_input_changed(self, event) -> None:
+        try:
+            wid = getattr(getattr(event, "input", None), "id", "")
+        except Exception:
+            return
+        if wid in ("set-endpoint", "set-h200"):
+            self._models_hint("endpoint 已修改 — 按 Refresh models 重新读取本机模型")
 
     def _status(self, text: str) -> None:
         try:
@@ -1197,6 +1269,7 @@ class SettingsScreen(DismissibleModal):
             pass
         self._status("Form filled with the built-in defaults. Nothing was written — "
                      "press Save settings to keep them.")
+        self._models_hint("已填入默认值(未保存) — 按 Refresh models 重新读取本机模型")
 
     def _probe(self) -> None:
         """The probe runs in a worker: the screen must not freeze on it."""
@@ -1234,6 +1307,71 @@ class SettingsScreen(DismissibleModal):
     def _probe_done(self, message: str) -> None:
         """The probe answered: the text shows the result."""
         self._status(message)
+
+    # -- model name completion -----------------------------------------
+    def _model_endpoints(self) -> list[str]:
+        """Both loopback endpoints from the form (mode-agnostic merge)."""
+        endpoints: list[str] = []
+        for wid, key in (("set-endpoint", "endpoint"), ("set-h200", "h200Endpoint")):
+            try:
+                raw = str(self.query_one("#" + wid, Input).value or "").strip()
+            except Exception:
+                raw = str(self.settings.get(key, "") or "").strip()
+            if raw and raw not in endpoints:
+                endpoints.append(raw)
+        return endpoints
+
+    def _models_hint(self, text: str) -> None:
+        try:
+            self.query_one("#model-hint", Static).update(text)
+        except Exception:
+            pass
+
+    def _refresh_models(self) -> None:
+        """Re-read /api/tags in a worker: the screen must not freeze on it."""
+        endpoints = self._model_endpoints()
+        try:
+            app = self.app
+        except Exception:
+            return
+        self._models_hint("正在读取本机模型…")
+
+        def _work() -> None:
+            names: list[str] = []
+            for endpoint in endpoints:
+                try:
+                    if services_mod is not None and hasattr(services_mod, "list_models"):
+                        found = services_mod.list_models(endpoint, timeout=3.0)
+                    else:
+                        found = []
+                except Exception:
+                    found = []
+                for name in found or []:
+                    if name not in names:
+                        names.append(name)
+            try:
+                app.call_from_thread(self._models_done, sorted(names))
+            except Exception:
+                pass
+
+        try:
+            app._run_guarded("Reading local models", _work)
+        except Exception:
+            pass
+
+    def _models_done(self, names) -> None:
+        """The tags answered: Tab completion knows this machine's models."""
+        try:
+            self._model_suggester.update(names or [])
+        except Exception:
+            pass
+        names = list(names or [])
+        if names:
+            shown = ", ".join(names[:8])
+            extra = "" if len(names) <= 8 else " …(共%d)" % len(names)
+            self._models_hint("本机模型(%d): %s%s — 输入时按 Tab 补全" % (len(names), shown, extra))
+        else:
+            self._models_hint("本机暂无可用模型(ollama 未启动或无模型) — 可手动输入")
 
 
 class TranscriptScroll(VerticalScroll if _TEXTUAL else object):
@@ -1717,6 +1855,8 @@ if _TEXTUAL:
         #runs-modal-table { height: 20; }
         #volumes-modal-table { height: 20; }
         #settings-status { height: auto; min-height: 3; padding: 1 2; }
+        #model-hint-row { height: auto; }
+        #model-hint { height: auto; color: $text-muted; }
         .image-caption { height: auto; }
         .image-preview { height: auto; }
         .image-block { height: auto; }

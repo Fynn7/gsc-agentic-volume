@@ -538,6 +538,25 @@ def _ensure_renderer(settings: dict, owned: dict, report: dict) -> None:
                                    "fix": "Read runtime/tui/renderer-stderr.log; port %d may be held by another app." % port})
 
 
+def list_models(endpoint: str, timeout: float = 5.0) -> list[str]:
+    """Model names on an Ollama endpoint (loopback only, read-only).
+
+    Sorted, de-duplicated; [] when the endpoint is not loopback,
+    unreachable, or answers junk. Never downloads anything.
+    """
+    if _loopback(str(endpoint or "")) is None:
+        return []
+    try:
+        tags = _http_get(str(endpoint).rstrip("/") + "/api/tags", timeout)
+    except Exception:
+        return []
+    if not isinstance(tags, dict):
+        return []
+    names = [m.get("name") for m in (tags.get("models") or [])
+             if isinstance(m, dict) and m.get("name")]
+    return sorted(set(names))
+
+
 def model_problems(settings: dict) -> list[dict]:
     """Missing-model / context-mismatch problems. Never downloads anything."""
     endpoint = settings["h200Endpoint"] if settings.get("mode") == "H200" else settings.get("endpoint", "")

@@ -309,6 +309,7 @@ class HelpScreen(DismissibleModal):
                     "\n"
                     "KEYS\n"
                     "  Enter          send the composer text: it starts a new run\n"
+                    "  Up/Down        recall the previous/next input (like a shell)\n"
                     "  Ctrl+Up/Down   scroll the conversation (the composer keeps the cursor)\n"
                     "  Esc            stop the running agent (evidence already written stays)\n"
                     "  /              slash commands with a menu (like opencode: type\n"
@@ -563,6 +564,7 @@ class RunsScreen(DismissibleModal):
                           _escape_markup(str(run.get("model", "?"))),
                           str(run.get("frames", "?")),
                           _escape_markup(str(run.get("task", "?"))[:60]))
+        table.focus()
 
     async def on_data_table_row_selected(self, event):
         row = event.cursor_row
@@ -601,6 +603,7 @@ class VolumesScreen(DismissibleModal):
             table.add_row(_escape_markup(str(item.get("label") or path or "?")),
                           _escape_markup(dims_text),
                           _escape_markup(note))
+        table.focus()
 
     async def on_data_table_row_selected(self, event):
         row = event.cursor_row
@@ -1091,6 +1094,16 @@ class Composer(TextArea if _TEXTUAL else object):
                 event.prevent_default()
                 self.insert("\n")
                 return
+            if event.key in ("up", "down"):
+                try:
+                    handled = (app._history_prev() if event.key == "up"
+                               else app._history_next())
+                except Exception:
+                    handled = False
+                if handled:
+                    event.stop()
+                    event.prevent_default()
+                    return
             await super()._on_key(event)
 
 
@@ -1169,6 +1182,7 @@ if _TEXTUAL:
         #confirm-hint { height: auto; color: $text-muted; padding: 0 2; }
         #runs-title { height: auto; padding: 1 2; }
         #runs-modal-table { height: 20; }
+        #volumes-modal-table { height: 20; }
         #settings-status { height: auto; min-height: 3; padding: 1 2; }
         .image-caption { height: auto; }
         .image-preview { height: auto; }
@@ -1230,6 +1244,10 @@ if _TEXTUAL:
             self._slash_open = False
             self._slash_selected = 0
             self._slash_items: list[tuple[str, str, str]] = []
+            # Composer history (shell-like): every submitted task, Up/Down recalls it.
+            self._composer_history: list[str] = []
+            self._history_index: int | None = None
+            self._history_draft: str = ""
 
         # -- busy feedback --------------------------------------------------
         def _busy_inc(self) -> None:
@@ -2066,6 +2084,100 @@ if _TEXTUAL:
             except Exception:
                 pass
 
+        def _history_push(self, text: str) -> None:
+            """Remember a submitted composer text (shell-like history)."""
+            text = str(text or "")
+            if not text.strip():
+                return
+            history = getattr(self, "_composer_history", None)
+            if history is None:
+                history = self._composer_history = []
+            if history and history[-1] == text:
+                self._history_index = None
+                self._history_draft = ""
+                return
+            history.append(text)
+            if len(history) > 100:
+                del history[:-100]
+            self._history_index = None
+            self._history_draft = ""
+
+        def _history_show(self, text: str) -> None:
+            """Replace the composer text and park the cursor at the end."""
+            try:
+                composer = self.query_one("#composer", Composer)
+            except Exception:
+                return
+            try:
+                composer.text = text
+            except Exception:
+                return
+            try:
+                lines = str(text or "").splitlines() or [""]
+                composer.move_cursor((len(lines) - 1, len(lines[-1])))
+            except Exception:
+                pass
+
+        def _history_prev(self) -> bool:
+            """Up recalls the previous input. True when the key is consumed."""
+            history = list(getattr(self, "_composer_history", None) or [])
+            if not history:
+                return False
+            try:
+                composer = self.query_one("#composer", Composer)
+            except Exception:
+                return False
+            try:
+                if not bool(composer.cursor_at_first_line):
+                    return False
+            except Exception:
+                pass
+            index = getattr(self, "_history_index", None)
+            if index is None:
+                try:
+                    self._history_draft = str(composer.text or "")
+                except Exception:
+                    self._history_draft = ""
+                self._history_index = len(history) - 1
+            elif index > 0:
+                self._history_index = index - 1
+            else:
+                return True
+            try:
+                self._history_show(history[self._history_index])
+            except Exception:
+                pass
+            return True
+
+        def _history_next(self) -> bool:
+            """Down moves toward newer inputs. True when the key is consumed."""
+            history = list(getattr(self, "_composer_history", None) or [])
+            index = getattr(self, "_history_index", None)
+            if index is None:
+                return False
+            try:
+                composer = self.query_one("#composer", Composer)
+            except Exception:
+                return False
+            try:
+                if not bool(composer.cursor_at_last_line):
+                    return False
+            except Exception:
+                pass
+            if index < len(history) - 1:
+                self._history_index = index + 1
+                try:
+                    self._history_show(history[self._history_index])
+                except Exception:
+                    pass
+            else:
+                self._history_index = None
+                try:
+                    self._history_show(str(getattr(self, "_history_draft", "") or ""))
+                except Exception:
+                    pass
+            return True
+
         def _slash_move(self, delta: int) -> None:
             if not self._slash_open or not self._slash_items:
                 return
@@ -2623,6 +2735,10 @@ if _TEXTUAL:
                 self.notify("The agent is still working - press Esc or Stop first.",
                             severity="warning", timeout=4, markup=False)
                 return
+            try:
+                self._history_push(task)
+            except Exception:
+                pass
             composer.clear()
             if self._start_locked:
                 self.notify("A run is already starting - wait for it.",

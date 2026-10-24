@@ -48,7 +48,9 @@ HEARTBEAT_TTL = 90.0
 # plus the safety net in main()) must not stop anything twice.
 _SHUTDOWN_REPORT: dict | None = None
 
-_CREATE_FLAGS = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0
+# Service creation flags come from subproc.service_creationflags(): headless
+# keeps a hidden console so Ollama's console grandchildren inherit it instead
+# of being handed a new Windows Terminal window; debug stays detached.
 
 
 def _logdir() -> Path:
@@ -83,7 +85,8 @@ def _spawn(cmd: list[str], env: dict, cwd: Path, stem: str) -> int:
     try:
         proc = subprocess.Popen(cmd, env=env, cwd=str(cwd), stdin=subprocess.DEVNULL,
                                 stdout=out, stderr=err,
-                                **subproc_mod.with_kwargs({"creationflags": _CREATE_FLAGS}))
+                                **subproc_mod.with_kwargs(
+                                    {"creationflags": subproc_mod.service_creationflags()}))
         return proc.pid
     finally:
         out.close()

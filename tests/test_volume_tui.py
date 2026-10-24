@@ -538,6 +538,45 @@ class SelfAcceptanceFixes(unittest.TestCase):
                 record = json.loads((root / "services.json").read_text(encoding="utf-8"))
                 self.assertEqual(record["services"], {})
 
+    @unittest.skipUnless(os.name == "nt", "creation flags are Windows-only")
+    def test_owned_services_keep_a_hidden_console_in_headless_mode(self):
+        """A detached service hands every console grandchild a new terminal window."""
+        import services as tui_services
+        import subproc as tui_subproc
+
+        class FakeProc:
+            pid = 4321
+
+        seen = {}
+
+        def fake_popen(cmd, env, cwd, stdin, stdout, stderr, **kwargs):
+            seen.update(kwargs)
+            return FakeProc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict(os.environ, {"GAV_DEBUG_WINDOWS": "0"}), \
+                 patch.object(tui_subproc, "SETTINGS_FILE", root / "tui-settings.json"), \
+                 patch.object(tui_services, "RECORD", root / "services.json"), \
+                 patch.object(tui_services.subprocess, "Popen", side_effect=fake_popen):
+                pid = tui_services._spawn(["ollama.exe", "serve"], {}, root, "ollama")
+        self.assertEqual(pid, 4321)
+        flags = seen["creationflags"]
+        self.assertTrue(flags & tui_subproc.CREATE_NO_WINDOW)
+        self.assertFalse(flags & tui_subproc.DETACHED_PROCESS)
+
+    @unittest.skipUnless(os.name == "nt", "creation flags are Windows-only")
+    def test_debug_toggle_keeps_the_old_detached_service_console(self):
+        import subproc as tui_subproc
+        with patch.dict(os.environ, {"GAV_DEBUG_WINDOWS": "1"}):
+            debug_flags = tui_subproc.service_creationflags()
+        with patch.dict(os.environ, {"GAV_DEBUG_WINDOWS": "0"}):
+            headless_flags = tui_subproc.service_creationflags()
+        self.assertTrue(debug_flags & tui_subproc.DETACHED_PROCESS)
+        self.assertFalse(debug_flags & tui_subproc.CREATE_NO_WINDOW)
+        self.assertTrue(headless_flags & tui_subproc.CREATE_NO_WINDOW)
+        self.assertFalse(headless_flags & tui_subproc.DETACHED_PROCESS)
+
     def test_release_refuses_while_agent_running(self):
         import services as tui_services
         with tempfile.TemporaryDirectory() as tmp:

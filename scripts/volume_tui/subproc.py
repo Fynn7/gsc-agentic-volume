@@ -21,6 +21,10 @@ ENV_VAR = "GAV_DEBUG_WINDOWS"
 SETTINGS_KEY = "debugWindows"
 SETTINGS_FILE = Path(__file__).resolve().parents[2] / "runtime" / "tui-settings.json"
 
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
+DETACHED_PROCESS = 0x00000008
+
 _CACHE = {"at": 0.0, "mtime": None, "value": False}
 _CACHE_TTL = 2.0
 
@@ -86,6 +90,24 @@ def kwargs(settings: dict | None = None) -> dict:
         return {"startupinfo": info}
     except Exception:
         return {}
+
+
+def service_creationflags(settings: dict | None = None) -> int:
+    """creationflags for long-lived owned services (Ollama, renderer daemon).
+
+    Headless keeps a *hidden console* (CREATE_NO_WINDOW) instead of detaching:
+    a detached service owns no console, so every console tool it spawns —
+    Ollama's `gpu-discover` and `llama-server --list-devices` probes on entry —
+    is handed a brand-new Windows Terminal window that steals focus. With a
+    hidden console the grandchildren inherit it and stay invisible.
+
+    Debug keeps the historical detached process (visible popups welcome).
+    """
+    if os.name != "nt":
+        return 0
+    if debug_windows(settings):
+        return CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+    return CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
 
 def with_kwargs(base: dict | None = None, settings: dict | None = None) -> dict:

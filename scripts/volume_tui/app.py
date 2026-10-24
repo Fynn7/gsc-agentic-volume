@@ -2547,9 +2547,9 @@ if _TEXTUAL:
             volume = self._volume_name()
             if volume:
                 text.append("  ·  %s" % volume, style="dim")
-            if self.live_run_id:
-                text.append("  ·  %s" % self.live_run_id, style="dim")
-                text.append("  ·  %s" % self._run_state(), style="dim")
+            state = self._run_state() if self.live_run_id else ""
+            if state and state not in ("running", "idle"):
+                text.append("  ·  %s" % state, style="dim")
             batch_label = self._batch_label()
             if batch_label:
                 text.append("  ·  %s" % batch_label, style="bold %s" % ACCENT)
@@ -2566,22 +2566,14 @@ if _TEXTUAL:
                 pass
 
         def _volume_name(self) -> str:
-            """The volume the agent works on, in words.
-
-            A file name like present246x246x221.dat means nothing to a
-            newcomer; "246x246x221 voxels" does.
-            """
+            """The selected volume's file name, as chosen in settings."""
             try:
                 selected = cfg.selected_volume(self.settings) if cfg else None
             except Exception:
                 selected = None
             if not selected:
                 return ""
-            name = Path(selected).name
-            match = _re.search(r"(\d+)x(\d+)x(\d+)", name)
-            if match:
-                return "volume %sx%sx%s voxels" % match.groups()
-            return name
+            return Path(selected).name
 
         def _run_state(self) -> str:
             """What the open run is doing.
@@ -2677,7 +2669,7 @@ if _TEXTUAL:
 
         # -- batch (one-shot N repeats, same frozen config) -----------------
         def _batch_label(self) -> str:
-            """Status-line marker: ◇ BATCH <id> · <current>/<N> (while running)."""
+            """Status-line marker: ◇ BATCH <current>/<N> (while running)."""
             batch = getattr(self, "_batch", None)
             if not isinstance(batch, dict) or not batch.get("batchId"):
                 return ""
@@ -2694,7 +2686,7 @@ if _TEXTUAL:
             except (TypeError, ValueError):
                 current = 0
             current = min(max(current, 1), total) if total else 0
-            return "◇ BATCH %s · %d/%d" % (batch.get("batchId"), current, total)
+            return "◇ BATCH %d/%d" % (current, total)
 
         def _batch_active(self) -> bool:
             batch = getattr(self, "_batch", None)

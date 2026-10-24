@@ -461,7 +461,7 @@ class CodingAgentScreen(unittest.TestCase):
                 await pilot.pause()
                 status = str(app.query_one("#status-bar").render())
                 self.assertIn("probe-model", status)
-                self.assertIn("run-demo", status)
+                self.assertNotIn("run-demo", status)
                 # The model works in the conversation, not in the status line.
                 app._ingest_events([{"kind": "thinking_start"}])
                 app._render_status()
@@ -526,7 +526,7 @@ class CodingAgentScreen(unittest.TestCase):
                 self.assertTrue(rows)
         asyncio.run(_run())
 
-    def test_the_volume_is_named_in_voxels(self):
+    def test_the_volume_is_named_by_the_selected_file(self):
         import asyncio
         import tempfile
 
@@ -541,7 +541,7 @@ class CodingAgentScreen(unittest.TestCase):
                     app._render_status()
                     await pilot.pause()
                     status = str(app.query_one("#status-bar").render())
-                    self.assertIn("246x246x221 voxels", status)
+                    self.assertIn("present246x246x221.dat", status)
         asyncio.run(_run())
 
     def test_the_transport_rows_stay_hidden_until_ctrl_h(self):

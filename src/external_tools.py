@@ -139,8 +139,15 @@ class ExternalTools:
             s.event('render', result=result)
             return self.snapshot(s)
         except Exception as error:
-            s.event('tool_error', name=body.get('name'), message=str(error))
+            try:
+                s.event('tool_error', name=body.get('name'), message=str(error))
+            except Exception:
+                pass
             raise
         finally:
-            s.event('external_tool_return', name=body.get('name'), seconds=time.monotonic() - started)
-            s.lock.release()
+            try:
+                s.event('external_tool_return', name=body.get('name'), seconds=time.monotonic() - started)
+            except Exception:
+                pass
+            finally:
+                s.lock.release()

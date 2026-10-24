@@ -3,6 +3,7 @@ import argparse
 import json
 import copy
 import threading
+import time
 import uuid
 import traceback
 import mimetypes
@@ -67,7 +68,17 @@ class Session:
             'id', 'goal', 'source', 'model', 'budget', 'used', 'state', 'scene', 'volume', 'result', 'events']}
         p = self.directory/'session.tmp'
         p.write_text(json.dumps(data, indent=2))
-        p.replace(self.directory/'session.json')
+        # Windows readers (TUI/launcher polling session.json) or AV can hold
+        # the destination open, making an atomic replace fail with WinError 5.
+        # Retry briefly instead of leaving a stale session.tmp behind.
+        for attempt in range(10):
+            try:
+                p.replace(self.directory/'session.json')
+                return
+            except OSError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
 
     def event(self, kind, **data):
         import datetime
@@ -138,9 +149,14 @@ class Session:
             self.event('error', message=str(error),
                        traceback=traceback.format_exc())
         finally:
-            (self.directory/'messages.json').write_text(json.dumps(self.messages, indent=2))
-            self.save()
-            self.lock.release()
+            try:
+                (self.directory/'messages.json').write_text(json.dumps(self.messages, indent=2))
+            except OSError:
+                pass
+            try:
+                self.save()
+            finally:
+                self.lock.release()
 
 
 sessions = {}

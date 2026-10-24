@@ -470,15 +470,14 @@ class CommandScreen(DismissibleModal):
 # The labels/tooltips stay on CommandScreen.COMMANDS (single source); this only
 # names the slash form of each stable action id.
 SLASH_NAMES = {
-    "live-stop": "/stop",
     "live-verify": "/verify",
     "live-copy": "/copy-json",
     "live-copy-chat": "/copy-chat",
     "live-export-chat": "/export-chat",
-    "live-open-png": "/open-png",
+    "live-open-png": "/open-image",
     "live-open": "/open-folder",
-    "runs-open": "/runs",
-    "volume-switch": "/volume",
+    "runs-open": "/history",
+    "volume-switch": "/change-volume",
     "settings": "/settings",
     "theme": "/theme",
     "help": "/help",
@@ -2591,7 +2590,7 @@ if _TEXTUAL:
             # Slash first (opencode-style): a command never starts a run.
             # When the menu is open with a highlight, Enter/Send runs the
             # highlighted entry even if the typed text is only a prefix
-            # (e.g. "/v" with "/volume" highlighted runs /volume).
+            # (e.g. "/v" with "/change-volume" highlighted runs /change-volume).
             if str(task).lstrip().startswith("/"):
                 try:
                     if self._run_slash_selection():

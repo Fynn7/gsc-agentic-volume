@@ -130,14 +130,14 @@ back to the bottom resumes it (there is no Follow button).
 | Slash | What it does |
 | --- | --- |
 | /task-a, /task-b | start the audited preset prompts |
-| /stop | cooperative stop; the launcher records `interrupted` |
 | /verify | read-only check → `verification.json` |
 | /copy-json | the run's meta data, every event and every JSON log file |
 | /copy-chat | the conversation as plain text: the task, the model's thinking, the tool calls, the frames and the answer |
 | /export-chat | the same conversation written to `runtime/tui/chat-logs/<runId>-<time>.log` (the run folder stays read-only) |
-| /open-png | opens the previewed PNG in the system viewer |
+| /open-image | opens the previewed PNG in the system viewer |
 | /open-folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
-| /runs | picks one of the runs on this machine and opens it here |
+| /history | picks one of the runs on this machine and opens it here |
+| /change-volume | picks the volume the next run works on; writes `runtime/tui-settings.json` |
 | /settings | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, timeouts, max output tokens and the Think toggle |
 | /theme, /help, /glossary | light or dark, the help screen, the glossary |
 | /hard-stop | agent tree, local Ollama, owned services — then leave |

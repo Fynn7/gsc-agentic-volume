@@ -320,7 +320,7 @@ class SlashFuzzyMatch(unittest.TestCase):
         return [slash for slash, _action, _tip in tui_app.match_slash_commands(prefix)]
 
     def test_prefix_still_matches(self):
-        self.assertEqual(self._slashes("/v"), ["/verify", "/volume"])
+        self.assertEqual(self._slashes("/v"), ["/verify", "/change-volume"])
         self.assertEqual(self._slashes("/ver"), ["/verify"])
 
     def test_in_order_chars_match(self):
@@ -1669,11 +1669,11 @@ class NoCtrlPShortcut(unittest.TestCase):
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 composer = app.query_one("#composer", tui_app.Composer)
-                # A single char filters instantly: /v shows /verify and /volume.
+                # A single char filters instantly: /v shows /verify and /change-volume.
                 composer.text = "/v"
                 await pilot.pause()
                 slashes = [slash for slash, _action, _tip in app._slash_items]
-                self.assertEqual(slashes, ["/verify", "/volume"])
+                self.assertEqual(slashes, ["/verify", "/change-volume"])
                 shown = [b for b in app.query("#slash-list .slash-item") if b.display]
                 self.assertEqual(len(shown), 2)
                 # VSCode-style fuzzy: chars in order match (/rify hits /verify).
@@ -1704,16 +1704,16 @@ class NoCtrlPShortcut(unittest.TestCase):
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 composer = app.query_one("#composer", tui_app.Composer)
-                # "/v" matches /verify and /volume; moving down highlights
-                # /volume, and Enter must run it even though the text is
+                # "/v" matches /verify and /change-volume; moving down highlights
+                # /change-volume, and Enter must run it even though the text is
                 # only the "/v" prefix (no Tab, no exact match typed).
                 composer.text = "/v"
                 await pilot.pause()
                 self.assertEqual([slash for slash, _action, _tip in app._slash_items],
-                                 ["/verify", "/volume"])
+                                 ["/verify", "/change-volume"])
                 app._slash_move(1)
                 await pilot.pause()
-                self.assertEqual(app._slash_items[app._slash_selected][0], "/volume")
+                self.assertEqual(app._slash_items[app._slash_selected][0], "/change-volume")
                 with patch.object(app, "discover_volumes_list",
                                    return_value=[{"path": "v:/x.dat", "label": "x.dat",
                                                   "dimensions": [1, 2, 3]}]):
@@ -1738,7 +1738,7 @@ class NoCtrlPShortcut(unittest.TestCase):
         for action in ("run-task-a", "run-task-b"):
             self.assertNotIn(action, actions)
         slashes = [slash for slash, _action, _tip in tui_app.slash_commands()]
-        self.assertIn("/volume", slashes)
+        self.assertIn("/change-volume", slashes)
         self.assertNotIn("/task-a", slashes)
         self.assertNotIn("/task-b", slashes)
 

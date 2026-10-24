@@ -1924,6 +1924,7 @@ if _TEXTUAL:
             # Slash menu (opencode-style): typed in the composer, not a modal.
             self._slash_open = False
             self._slash_selected = 0
+            self._slash_touched = False
             self._slash_items: list[tuple[str, str, str]] = []
             # Composer history (shell-like): every submitted task, Up/Down recalls it.
             # Persisted to runtime/tui/composer-history.json, so Up still works
@@ -2871,6 +2872,7 @@ if _TEXTUAL:
                 except Exception:
                     pass
             self._slash_selected = 0
+            self._slash_touched = False
             try:
                 composer.focus()
             except Exception:
@@ -2880,6 +2882,7 @@ if _TEXTUAL:
         def _close_slash_menu(self) -> None:
             self._slash_open = False
             self._slash_selected = 0
+            self._slash_touched = False
             try:
                 self.query_one("#slash-menu").remove_class("open")
             except Exception:
@@ -2987,6 +2990,7 @@ if _TEXTUAL:
             if not self._slash_open or not self._slash_items:
                 return
             self._slash_selected = (self._slash_selected + delta) % len(self._slash_items)
+            self._slash_touched = True
             self._refresh_slash_menu()
 
         def _slash_complete(self) -> None:
@@ -3020,13 +3024,15 @@ if _TEXTUAL:
                 return False
             # Bare "/": the user is still browsing, not running - keep the
             # menu open instead of firing the first entry by accident.
+            # Once the highlight was moved (Up/Down), Enter runs the
+            # highlighted entry even though the text is still just "/".
             try:
                 current = str(self.query_one("#composer", Composer).text or "")
             except Exception:
                 current = ""
             stripped = current.lstrip()
             token = stripped.split(None, 1)[0] if stripped else ""
-            if token == "/":
+            if token == "/" and not getattr(self, "_slash_touched", False):
                 return False
             try:
                 selected = int(getattr(self, "_slash_selected", 0))

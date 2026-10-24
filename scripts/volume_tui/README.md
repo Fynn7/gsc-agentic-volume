@@ -135,6 +135,7 @@ back to the bottom resumes it (there is no Follow button).
 | /copy-json | the run's meta data, every event and every JSON log file |
 | /copy-chat | the conversation as plain text: the task, the model's thinking, the tool calls, the frames and the answer |
 | /export-chat | the same conversation downloaded to your Downloads folder as `<runId>-<time>.log` and the folder opened (the run folder stays read-only) |
+| /export-images | every frame PNG of this run zipped to your Downloads folder as `<runId>-images-<time>.zip` and the folder opened (the run folder stays read-only) |
 | /open-image | opens the previewed PNG in the system viewer |
 | /open-folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
 | /history | picks one of the runs on this machine and opens it here |
@@ -295,6 +296,11 @@ the window.
   words: the harness log has no timestamps).
   `chat_log.export_chat_log` downloads it to
   your Downloads folder as `<runId>-<time>.log`, one file per export; the run
+  folder is never written to.
+- Image export: `export_images.collect_run_images` gathers every frame PNG
+  (session `frame-*/image.png`, run-folder fallback, session.json event
+  paths); `export_images.export_run_images_zip` zips them to your Downloads
+  folder as `<runId>-images-<time>.zip`, one file per export; the run
   folder is never written to.
 - Verify: `runs.run_verify` subprocess + three-way summary
   (execution / image transport / visual-quality UNVERIFIED).

@@ -34,6 +34,7 @@ try:
     import volumes as volumes_mod
     from context import AppContext
     import evidence as evidence_mod
+    import export_images as export_images_mod
     import flows as flows_mod
     import imaging as imaging_mod
     import telemetry as telemetry_mod
@@ -52,6 +53,7 @@ except Exception:  # pragma: no cover - import path for tests
     volumes_mod = None  # type: ignore
     AppContext = None  # type: ignore
     evidence_mod = None  # type: ignore
+    export_images_mod = None  # type: ignore
     flows_mod = None  # type: ignore
     imaging_mod = None  # type: ignore
     telemetry_mod = None  # type: ignore
@@ -532,6 +534,9 @@ class CommandScreen(DismissibleModal):
         ("Live: export the chat log", "live-export-chat",
          "Download the conversation of this run to your Downloads folder as "
          "a .log file and open the folder (the run folder stays read-only)."),
+        ("Live: export all run images (zip)", "live-export-images",
+         "Zip every frame PNG of this run to your Downloads folder as "
+         "a .zip file and open the folder (the run folder stays read-only)."),
         ("Live: view the current PNG", "live-open-png",
          "Open the previewed PNG in your image viewer (full size)."),
         ("Live: open the PNG folder", "live-open",
@@ -582,6 +587,7 @@ SLASH_NAMES = {
     "live-copy": "/copy-json",
     "live-copy-chat": "/copy-chat",
     "live-export-chat": "/export-chat",
+    "live-export-images": "/export-images",
     "live-open-png": "/open-image",
     "live-open": "/open-folder",
     "history": "/history",
@@ -2750,6 +2756,8 @@ if _TEXTUAL:
                 self._copy_chat_log()
             elif result == "cmd-live-export-chat":
                 self._export_chat_log()
+            elif result == "cmd-live-export-images":
+                self._export_run_images()
             elif result == "cmd-live-open-png":
                 self._open_live_png()
             elif result == "cmd-live-open":
@@ -3499,6 +3507,85 @@ if _TEXTUAL:
             # conversation where it stays selectable via SafeSelection.
             try:
                 self._say(transcript_mod.NOTICE, "Chat log written: %s" % path)
+            except Exception:
+                pass
+            # The export is a download: reveal the Downloads folder so the
+            # file is one click away (same opener as /open-folder).
+            try:
+                evidence_mod.open_path(str(Path(path).parent))
+            except Exception:
+                pass
+
+        def _export_run_images(self, button=None) -> None:
+            """Zip every frame PNG of the open run into Downloads + open it.
+
+            One zip per export; the run folder stays read-only. The
+            Downloads folder opens automatically once written.
+            """
+            if not self.live_dir:
+                self.notify("No run is open - open one first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            run_dir = Path(str(self.live_dir))
+            session_dir = None
+            try:
+                if trace_mod is not None:
+                    session_dir = trace_mod.resolve_session_dir(run_dir)
+            except Exception:
+                session_dir = None
+            live_png = self._live_png_path()
+            extra = [str(live_png)] if live_png is not None else []
+            verification_image = None
+            try:
+                if runs_mod is not None and hasattr(runs_mod, "final_image_of"):
+                    verification = None
+                    try:
+                        import json as _json
+                        verification = _json.loads(
+                            (run_dir / "verification.json").read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        verification = None
+                    verification_image = runs_mod.final_image_of(
+                        {"directory": str(run_dir),
+                         "verification": verification,
+                         "sessionId": (session_dir.name if session_dir else None)})
+            except Exception:
+                verification_image = None
+            if verification_image:
+                extra.append(str(verification_image))
+            if export_images_mod is None:
+                self.notify("Image export is unavailable in this session.",
+                            severity="error", timeout=4, markup=False)
+                return
+            try:
+                images = export_images_mod.collect_run_images(
+                    run_dir, session_dir, extra=extra)
+            except Exception as error:
+                self.notify("Image export failed: %s" % error,
+                            severity="error", timeout=5, markup=False)
+                return
+            if not images:
+                self.notify("No frame PNGs yet - wait for the first render.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            run_id = self.live_run_id
+
+            def _work() -> None:
+                path = export_images_mod.export_run_images_zip(
+                    images, run_id=run_id)
+                self.call_from_thread(self._run_images_exported, path, len(images))
+
+            self._run_guarded("Exporting %d image(s)" % len(images), _work, button)
+
+        def _run_images_exported(self, path, count: int = 0) -> None:
+            self.notify("Images written (%d): %s" % (count, path),
+                        timeout=20, markup=False)
+            # The toast is transient (and dismisses on click, so its text
+            # can never be Ctrl+C-copied): mirror the path into the
+            # conversation where it stays selectable via SafeSelection.
+            try:
+                self._say(transcript_mod.NOTICE,
+                          "Images written (%d): %s" % (count, path))
             except Exception:
                 pass
             # The export is a download: reveal the Downloads folder so the

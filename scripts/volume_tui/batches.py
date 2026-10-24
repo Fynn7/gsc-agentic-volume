@@ -196,7 +196,7 @@ def append_item(record: dict, item: dict) -> None:
 
 
 def batch_summary_text(record: dict) -> list[str]:
-    """Config summary + per-item lines for the detail view (no scoring)."""
+    """Config summary + member counts for the detail view (no scoring)."""
     config = record.get("config") or {}
     lines = [
         "batch=%s status=%s planned=%s" % (
@@ -206,12 +206,15 @@ def batch_summary_text(record: dict) -> list[str]:
             config.get("model", "?"), config.get("renderBudget", "?"),
             str(config.get("task", ""))[:120]),
     ]
+    ok = 0
+    fail = 0
     for item in record.get("items") or []:
-        lines.append("#%s %s runId=%s dir=%s seconds=%s%s" % (
-            item.get("seq", "?"), item.get("status", "?"),
-            item.get("runId", "-"), item.get("directory", "-"),
-            item.get("seconds", "-"),
-            (" error=%s" % str(item.get("error") or "")[:160]) if item.get("error") else ""))
+        status = str(item.get("status", "?"))
+        if status == "success":
+            ok += 1
+        elif status == "failed" or "error" in status:
+            fail += 1
+    lines.append("members=%d ok=%d failed=%d (see table below)" % (len(record.get("items") or []), ok, fail))
     return lines
 
 

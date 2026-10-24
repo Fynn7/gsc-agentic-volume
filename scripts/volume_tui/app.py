@@ -1854,6 +1854,8 @@ if _TEXTUAL:
         #runs-title { height: auto; padding: 1 2; }
         #runs-modal-table { height: 20; }
         #volumes-modal-table { height: 20; }
+        #batch-detail-summary { height: auto; }
+        #batch-detail-table { height: 12; }
         #settings-status { height: auto; min-height: 3; padding: 1 2; }
         #model-hint-row { height: auto; }
         #model-hint { height: auto; color: $text-muted; }

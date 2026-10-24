@@ -112,7 +112,7 @@ def thinking_row_parts(block: dict) -> list[tuple[str, str]]:
     parts = [(head, "spin" if running else "ok"), (" %s" % words, "words")]
     subtitle = str(block.get("subtitle") or "")
     if subtitle:
-        parts.append(("  %s" % subtitle, "sub"))
+        parts.append((" %s" % subtitle, "sub"))
     return parts
 
 

@@ -351,7 +351,7 @@ class SlashFuzzyMatch(unittest.TestCase):
         return [slash for slash, _action, _tip in tui_app.match_slash_commands(prefix)]
 
     def test_prefix_still_matches(self):
-        self.assertEqual(self._slashes("/v"), ["/verify", "/change-volume"])
+        self.assertEqual(self._slashes("/v"), ["/verify", "/archive-all", "/change-volume"])
         self.assertEqual(self._slashes("/ver"), ["/verify"])
 
     def test_in_order_chars_match(self):
@@ -1784,13 +1784,13 @@ class NoCtrlPShortcut(unittest.TestCase):
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 composer = app.query_one("#composer", tui_app.Composer)
-                # A single char filters instantly: /v shows /verify and /change-volume.
+                # A single char filters instantly: /v shows /verify, /archive-all and /change-volume.
                 composer.text = "/v"
                 await pilot.pause()
                 slashes = [slash for slash, _action, _tip in app._slash_items]
-                self.assertEqual(slashes, ["/verify", "/change-volume"])
+                self.assertEqual(slashes, ["/verify", "/archive-all", "/change-volume"])
                 shown = [b for b in app.query("#slash-list .slash-item") if b.display]
-                self.assertEqual(len(shown), 2)
+                self.assertEqual(len(shown), 3)
                 # VSCode-style fuzzy: chars in order match (/rify hits /verify).
                 composer.text = "/rify"
                 await pilot.pause()
@@ -1819,14 +1819,14 @@ class NoCtrlPShortcut(unittest.TestCase):
             async with app.run_test(size=(100, 32)) as pilot:
                 await pilot.pause()
                 composer = app.query_one("#composer", tui_app.Composer)
-                # "/v" matches /verify and /change-volume; moving down highlights
+                # "/v" matches /verify, /archive-all and /change-volume; moving down twice highlights
                 # /change-volume, and Enter must run it even though the text is
                 # only the "/v" prefix (no Tab, no exact match typed).
                 composer.text = "/v"
                 await pilot.pause()
                 self.assertEqual([slash for slash, _action, _tip in app._slash_items],
-                                 ["/verify", "/change-volume"])
-                app._slash_move(1)
+                                 ["/verify", "/archive-all", "/change-volume"])
+                app._slash_move(2)
                 await pilot.pause()
                 self.assertEqual(app._slash_items[app._slash_selected][0], "/change-volume")
                 with patch.object(app, "discover_volumes_list",

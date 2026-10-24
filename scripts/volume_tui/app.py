@@ -537,6 +537,9 @@ class CommandScreen(DismissibleModal):
          "Open the file explorer at the folder that holds the PNGs."),
         ("Runs: open another run", "runs-open",
          "Pick one of the runs on this machine and open it here."),
+        ("Runs: archive all runs", "runs-archive-all",
+         "Move every history run to runtime/archive (live runs are kept). "
+         "No unarchive: move the folders back manually to restore them."),
         ("Volume: switch the volume", "volume-switch",
          "Pick the volume the next run works on; writes runtime/tui-settings.json."),
         ("Settings: model, endpoints, budget", "settings",
@@ -575,6 +578,7 @@ SLASH_NAMES = {
     "live-open-png": "/open-image",
     "live-open": "/open-folder",
     "runs-open": "/history",
+    "runs-archive-all": "/archive-all",
     "volume-switch": "/change-volume",
     "settings": "/settings",
     "theme": "/theme",
@@ -651,6 +655,11 @@ class RunsScreen(DismissibleModal):
                          id="runs-title")
             # cursor_type="row": Enter picks the run, not a single cell.
             yield DataTable(id="runs-modal-table", cursor_type="row")
+            yield Button("Archive all (move history to runtime/archive)",
+                         id="runs-archive-all", variant="warning",
+                         tooltip="Move every history run to runtime/archive. "
+                                 "Live runs are kept. No unarchive: move the "
+                                 "folders back manually to restore them.")
 
     def on_mount(self) -> None:
         table = self.query_one("#runs-modal-table", DataTable)
@@ -662,6 +671,11 @@ class RunsScreen(DismissibleModal):
                           str(run.get("frames", "?")),
                           _escape_markup(str(run.get("task", "?"))[:60]))
         table.focus()
+
+    async def on_button_pressed(self, event):
+        if event.button.id == "runs-archive-all":
+            self.dismiss(result={"__archive_all__": True})
+            return
 
     async def on_data_table_row_selected(self, event):
         row = event.cursor_row
@@ -2224,6 +2238,8 @@ if _TEXTUAL:
                 self._open_live_folder()
             elif result == "cmd-runs-open":
                 self._open_runs()
+            elif result == "cmd-runs-archive-all":
+                self._archive_all_runs_ask()
             elif result == "cmd-volume-switch":
                 self._open_volumes()
             elif result == "cmd-settings":
@@ -2937,8 +2953,112 @@ if _TEXTUAL:
             if not run:
                 self._focus_composer()
                 return
+            if isinstance(run, dict) and run.get("__archive_all__"):
+                self._archive_all_runs_ask()
+                return
             self.start_live(run["directory"], run.get("runId"))
             self._start_poll()
+            self._focus_composer()
+
+        def _archive_all_runs_ask(self) -> None:
+            """One-click tidy: confirm, then move every history run aside."""
+            if self._run_is_live() or self._run_state() in ("running", "stopping"):
+                self.notify("The agent is still working - press Esc or Stop first.",
+                            severity="warning", timeout=4, markup=False)
+                return
+            try:
+                runs = self.discover_runs(fresh=True)
+            except Exception:
+                runs = []
+            if not runs:
+                self.notify("No runs on disk yet.", severity="warning", timeout=4, markup=False)
+                return
+            live = [str(r.get("runId")) for r in runs
+                    if str(r.get("status") or "") == "Running"]
+            message = ("Archive all %d run%s to runtime/archive?\n\n"
+                       "Live runs are kept%s. There is no unarchive: "
+                       "move the folders back manually to restore them."
+                       % (len(runs), "" if len(runs) == 1 else "s",
+                          (" (%s stays)" % ", ".join(live)) if live else ""))
+            self.push_screen(ConfirmScreen(message, on_yes=self._archive_all_runs),
+                             callback=self._modal_closed)
+
+        def _archive_all_runs(self) -> None:
+            """Move the history aside in a worker; the list is empty after."""
+            mod = self._runs_mod()
+            archive = getattr(mod, "archive_all_runs", None)
+            if archive is None:
+                archive = runs_mod.archive_all_runs if runs_mod else None
+            if archive is None:
+                self.notify("Archive is unavailable in this session.",
+                            severity="error", timeout=4, markup=False)
+                return
+
+            def _work() -> None:
+                try:
+                    result = archive()
+                except Exception as error:
+                    self.call_from_thread(self._say, transcript_mod.ERROR,
+                                          "Archive all failed: %s" % error)
+                    return
+                self.call_from_thread(self._archive_all_done, result)
+
+            self._run_guarded("Archiving runs", _work)
+
+        def _archive_all_done(self, result) -> None:
+            """Report the tidy and leave the conversation on a clean list."""
+            try:
+                self.runs = self.discover_runs(fresh=True)
+            except Exception:
+                self.runs = []
+            if self.live_dir is not None:
+                try:
+                    if not Path(self.live_dir).exists():
+                        with self._poll_lock:
+                            self.live_dir = None
+                            self.live_run_id = None
+                            self.live_tail = None
+                            self.stream_tail = None
+                        self.live_events = []
+                        self.live_frozen = False
+                        self._live_following = True
+                        self._stop_requested_for = None
+                        self._end_announced = False
+                        self.live_image_path = None
+                        self.live_image_revision = None
+                        self._clear_transcript()
+                        self._say_welcome()
+                except Exception:
+                    pass
+            try:
+                moved = list((result or {}).get("moved") or [])
+                skipped = list((result or {}).get("skipped_live") or [])
+                errors = list((result or {}).get("errors") or [])
+                sessions = list((result or {}).get("sessions_moved") or [])
+                where = str((result or {}).get("archive_dir") or "runtime/archive")
+            except Exception:
+                moved, skipped, errors, sessions, where = [], [], [], [], "runtime/archive"
+            if errors:
+                self._say(transcript_mod.ERROR,
+                          "Archive all: moved %d, live kept %d, failed %d (%s). "
+                          "See %s." % (len(moved), len(skipped), len(errors),
+                                       "; ".join(str(e.get("error", e)) for e in errors[:3]), where))
+            elif not moved:
+                self.notify("Nothing archived%s." % (" - live runs are kept" if skipped else ""),
+                            severity="warning", timeout=4, markup=False)
+            else:
+                detail = " (+%d session folder%s)" % (len(sessions), "" if len(sessions) == 1 else "s") if sessions else ""
+                kept = " Live kept: %s." % ", ".join(skipped) if skipped else ""
+                self._say(transcript_mod.NOTICE,
+                          "Archived %d run%s%s to %s.%s There is no unarchive: "
+                          "move the folders back manually to restore them."
+                          % (len(moved), "" if len(moved) == 1 else "s",
+                             detail, where, kept))
+            try:
+                self._render_status()
+                self._sync_send_button()
+            except Exception:
+                pass
             self._focus_composer()
 
         def _new_conversation(self, arg: str = "") -> None:

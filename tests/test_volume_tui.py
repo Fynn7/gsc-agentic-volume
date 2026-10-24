@@ -889,5 +889,71 @@ class TemporaryContextInstance(unittest.TestCase):
             self.assertIsNone(rel["kept"])
 
 
+class ArchiveAllRuns(unittest.TestCase):
+    def _run_dir(self, base: Path, name: str, run_id: str, status: str = "finished",
+                 session_id: str | None = None) -> Path:
+        run_dir = base / name
+        run_dir.mkdir(parents=True)
+        payload = {"runId": run_id, "status": status}
+        if session_id:
+            payload["sessionId"] = session_id
+        (run_dir / "run.json").write_text(json.dumps(payload))
+        (run_dir / "manifest.json").write_text(json.dumps({"exitCode": 0}))
+        return run_dir
+
+    def test_archive_moves_runs_and_hides_them_from_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            base = runtime / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            self._run_dir(base, "run-1", "run-1")
+            self._run_dir(base, "run-2", "run-2")
+            (base / "LATEST.txt").write_text(str(base / "run-2"))
+            with patch.object(tui_runs, "ROOT", root):
+                self.assertEqual(len(tui_runs.discover_runs(_fresh=True)), 2)
+                result = tui_runs.archive_all_runs()
+            self.assertEqual(sorted(result["moved"]), ["run-1", "run-2"])
+            self.assertEqual(result["errors"], [])
+            self.assertEqual(result["skipped_live"], [])
+            with patch.object(tui_runs, "ROOT", root):
+                self.assertEqual(tui_runs.discover_runs(_fresh=True), [])
+            archived = sorted((root / "runtime" / "archive").iterdir())
+            self.assertEqual(len(archived), 2)
+            self.assertFalse((base / "LATEST.txt").exists())
+
+    def test_archive_moves_session_folder_and_skips_live_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            base = runtime / "local-vlm" / "cli-task-a"
+            base.mkdir(parents=True)
+            session = runtime / "sess-1"
+            session.mkdir(parents=True)
+            (session / "session.json").write_text(json.dumps({"id": "sess-1"}))
+            self._run_dir(base, "run-old", "run-old", session_id="sess-1")
+            # Paper-"running" with a dead pid is stale history (Unknown), not
+            # live: it must be archived like everything else.
+            stale = self._run_dir(base, "run-stale", "run-stale", status="running")
+            live = self._run_dir(base, "run-live", "run-live", status="running")
+            (live / "run.json").write_text(json.dumps({"runId": "run-live",
+                                                       "status": "running", "pid": 999999}))
+            with patch.object(tui_runs, "process_alive",
+                               side_effect=lambda pid: pid == 999999):
+                with patch.object(tui_runs, "ROOT", root):
+                    result = tui_runs.archive_all_runs()
+            self.assertEqual(sorted(result["moved"]), ["run-old", "run-stale"])
+            self.assertEqual(result["skipped_live"], ["run-live"])
+            self.assertIn("sess-1", result["sessions_moved"])
+            self.assertTrue((root / "runtime" / "archive" / "run-old").is_dir())
+            self.assertTrue((root / "runtime" / "archive" / "run-stale").is_dir())
+            self.assertTrue((root / "runtime" / "archive" / "sess-1").is_dir())
+            self.assertTrue(stale.is_dir() is False)
+            self.assertTrue(live.is_dir())
+            with patch.object(tui_runs, "ROOT", root):
+                remaining = tui_runs.discover_runs(_fresh=True)
+            self.assertEqual([r["runId"] for r in remaining], ["run-live"])
+
+
 if __name__ == '__main__':
     unittest.main()

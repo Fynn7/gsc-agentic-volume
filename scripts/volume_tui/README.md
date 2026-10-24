@@ -138,6 +138,7 @@ back to the bottom resumes it (there is no Follow button).
 | /open-image | opens the previewed PNG in the system viewer |
 | /open-folder | opens the folder that holds the PNGs (`runtime/<sessionId>`) |
 | /history | picks one of the runs on this machine and opens it here |
+| /archive-all | moves every history run to `runtime/archive` (live runs are kept; no unarchive — move folders back manually) |
 | /change-volume | picks the volume the next run works on; writes `runtime/tui-settings.json` |
 | /settings | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, timeouts, max output tokens, the Think toggle and the Debug-windows toggle (off hides console/GLFW popups; on keeps them for debugging; `GAV_DEBUG_WINDOWS=1` overrides) |
 | /theme, /help, /glossary | light or dark, the help screen, the glossary |

@@ -60,6 +60,32 @@ def task_label(directory: Path, run: dict) -> str:
 _DISCOVER_CACHE = {"at": 0.0, "key": None, "value": None}
 DISCOVER_TTL = 5.0
 
+# One-click tidy for the history list: finished runs move here. No unarchive
+# command exists by design — moving a folder back with the file manager
+# restores it. Discovery never looks inside it, so archived runs stay hidden.
+ARCHIVE_DIRNAME = "archive"
+
+
+def archive_root() -> Path:
+    """Where archived runs live (runtime/archive, created on first archive)."""
+    return ROOT / "runtime" / ARCHIVE_DIRNAME
+
+
+def _is_under_archive(path: str | Path) -> bool:
+    """True when a run/session path already lives inside runtime/archive."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(path)
+    try:
+        root = archive_root().resolve()
+    except OSError:
+        root = archive_root()
+    try:
+        return resolved == root or root in resolved.parents
+    except Exception:
+        return False
+
 
 def discover_runs(limit: int = 200, _fresh: bool = False) -> list[dict]:
     """Find real run dirs (contain run.json). Newest first. Tolerates missing/old fields.
@@ -81,6 +107,8 @@ def discover_runs(limit: int = 200, _fresh: bool = False) -> list[dict]:
             continue
         for run_file in base.rglob("run.json"):
             try:
+                if _is_under_archive(run_file):
+                    continue
                 directory = run_file.parent
                 # Skip lock dirs / config dirs: require manifest or session or runId field.
                 data = _read_json(run_file) or {}
@@ -417,3 +445,164 @@ def run_json_log(run_dir: str | Path, events=None) -> dict:
         except (OSError, ValueError) as error:
             document["skipped"].append({"name": name, "reason": str(error)})
     return document
+
+
+def _unique_archive_target(name: str) -> Path:
+    """Archive target for a folder name; never overwrites an archived folder."""
+    root = archive_root()
+    candidate = root / name
+    if not candidate.exists():
+        return candidate
+    index = 1
+    while True:
+        indexed = root / ("%s-%d" % (name, index))
+        if not indexed.exists():
+            return indexed
+        index += 1
+
+
+def _session_dir_for(entry: dict) -> Path | None:
+    """Session folder (runtime/<sessionId>) holding this run's frames, if any."""
+    session_id = entry.get("sessionId")
+    if not session_id:
+        session_id = (entry.get("run") or {}).get("sessionId")
+    if not session_id:
+        return None
+    candidate = ROOT / "runtime" / str(session_id)
+    try:
+        if candidate.is_dir() and not _is_under_archive(candidate):
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _clean_dangling_latest(moved_srcs: set[str]) -> None:
+    """Drop LATEST.txt pointers left behind by archived runs (read-only otherwise)."""
+    base = ROOT / "runtime"
+    if not base.is_dir():
+        return
+    try:
+        pointers = list(base.rglob("LATEST.txt"))
+    except OSError:
+        return
+    for pointer in pointers:
+        try:
+            if _is_under_archive(pointer):
+                continue
+            text = pointer.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text in moved_srcs:
+            try:
+                pointer.unlink()
+            except OSError:
+                continue
+
+
+def _launcher_alive_for(entry: dict) -> bool:
+    """True when a lock file still ties a live process to this run.
+
+    A run whose paper status is "running" but whose processes are all gone
+    (stale Unknown: launcher died before recording an end) is history, not
+    live — archiving it is safe. The only thing that must never be moved
+    under a working process is a run a launcher is still starting: the lock
+    file names the run before run.json ever learns its end.
+    """
+    run_id = str(entry.get("runId") or "")
+    directory = str(entry.get("directory") or "")
+    try:
+        locks = sorted((ROOT / "runtime" / "locks").glob("*.lock"))
+    except OSError:
+        return False
+    for lock_path in locks:
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        refs = {str(payload.get("runId") or ""), str(payload.get("directory") or "")}
+        if run_id not in refs and directory not in refs:
+            continue
+        for field in ("pid", "harnessPid"):
+            try:
+                if process_alive(payload.get(field)):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def archive_all_runs() -> dict:
+    """Move every history run into runtime/archive (one-click tidy).
+
+    Only genuinely live runs are kept (a verified live process, or a lock
+    file tying one to the run) — stop them first. A run stuck at paper
+    status "running" with no live process (Unknown in the history list) is
+    history, not live, and moves along with the rest.
+    Their session folders (runtime/<sessionId> with the frame PNGs) move
+    along so runtime/ is clean; discovery skips runtime/archive, so the
+    history list is empty afterwards. There is intentionally no unarchive:
+    move the folders back with the file manager to restore them.
+    """
+    import shutil
+
+    root = archive_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        return {"moved": [], "sessions_moved": [], "skipped_live": [],
+                "errors": [{"runId": "?", "error": str(error)}],
+                "archive_dir": str(root)}
+    entries = discover_runs(_fresh=True)
+    moved: list[str] = []
+    sessions_moved: list[str] = []
+    skipped_live: list[str] = []
+    errors: list[dict] = []
+    moved_srcs: set[str] = set()
+    for entry in entries:
+        run_id = str(entry.get("runId") or Path(str(entry.get("directory", ""))).name or "?")
+        try:
+            # Verified-live only: paper "running" with no live process behind
+            # it (Unknown in the history list) is stale history, not a live
+            # agent, and is archived like everything else.
+            if (str(entry.get("status") or "") == "Running"
+                    or _launcher_alive_for(entry)):
+                skipped_live.append(run_id)
+                continue
+        except Exception:
+            pass
+        src = Path(str(entry.get("directory", "")))
+        try:
+            if not src.is_dir() or _is_under_archive(src):
+                continue
+        except OSError:
+            continue
+        session_src = _session_dir_for(entry)
+        try:
+            target = _unique_archive_target(src.name or run_id)
+            shutil.move(str(src), str(target))
+            moved.append(run_id)
+            moved_srcs.add(str(src.resolve()) if src.exists() is False else str(src))
+            moved_srcs.add(str(src))
+        except (OSError, ValueError) as error:
+            errors.append({"runId": run_id, "error": str(error)})
+            continue
+        if session_src is not None:
+            try:
+                if session_src.is_dir():
+                    shutil.move(str(session_src), str(_unique_archive_target(session_src.name)))
+                    sessions_moved.append(session_src.name)
+            except (OSError, ValueError) as error:
+                errors.append({"runId": run_id, "error": "session %s: %s" % (session_src.name, error)})
+    _clean_dangling_latest(moved_srcs)
+    global _DISCOVER_CACHE
+    _DISCOVER_CACHE.update(at=0.0, key=None, value=None)
+    try:
+        entries = discover_runs(_fresh=True)
+    except Exception:
+        entries = []
+    return {"moved": moved, "sessions_moved": sessions_moved,
+            "skipped_live": skipped_live, "errors": errors,
+            "archive_dir": str(root), "remaining": len(entries)}

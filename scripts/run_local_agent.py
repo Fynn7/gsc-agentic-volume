@@ -132,15 +132,14 @@ class InferenceRecorder:
                         body['temperature'] = owner.config.get('temperature', 0)
                         if self.path == '/v1/responses':
                             body['think'] = owner.config.get('think', False)
-                            body['max_output_tokens'] = owner.config.get('maxOutputTokens', 1536)
                         elif self.path == '/v1/chat/completions':
                             body['reasoning_effort'] = 'none' if not owner.config.get('think', False) else 'medium'
-                            body['max_tokens'] = owner.config.get('maxOutputTokens', 1536)
                         outgoing = json.dumps(body, allow_nan=False).encode()
                     prefix.with_suffix('.forwarded.bin').write_bytes(outgoing)
                     headers = {key: value for key, value in self.headers.items() if key.lower() not in ('host', 'content-length', 'connection', 'authorization')}
                     req = urllib.request.Request(owner.endpoint + self.path, data=outgoing if self.command == 'POST' else None, method=self.command, headers=headers)
-                    response = urllib.request.urlopen(req, timeout=owner.config['timeoutSeconds'])
+                    # No inference timeout: a missing key means unlimited (urllib blocks).
+                    response = urllib.request.urlopen(req, timeout=owner.config.get('timeoutSeconds'))
                 except urllib.error.HTTPError as error:
                     response = error
                 except Exception as error:
@@ -302,12 +301,12 @@ def execute(context, show_images=False, open_images=False):
         command = [executable, 'exec', task, '--ignore-user-config', '--ephemeral', '--skip-git-repo-check', '-C', str(workspace), '-s', 'read-only', '-m', config['model'], '--json']
         overrides = {'model_context_window': config['contextSize'], 'model_reasoning_effort': 'none' if not config.get('think',False) else 'medium', 'features.shell_tool': False,
                      'project_doc_max_bytes':config.get('projectDocumentBytes',0),
-                     'mcp_servers.renderer.command': python, 'mcp_servers.renderer.args': mcp_args, 'mcp_servers.renderer.tool_timeout_sec': 120,
+                     'mcp_servers.renderer.command': python, 'mcp_servers.renderer.args': mcp_args,
                      'mcp_servers.renderer.default_tools_approval_mode':'approve',
                      'model_provider':'local_qwen', 'model_providers.local_qwen.name':'Recorded local Ollama', 'model_providers.local_qwen.base_url':proxy+'/v1',
                      'model_providers.local_qwen.wire_api':'responses', 'model_providers.local_qwen.requires_openai_auth':False, 'features.plugins':False,
                      'features.multi_agent':False, 'features.goals':False, 'features.skip_host_skill_discovery':True, 'web_search':'disabled',
-                     'model_providers.local_qwen.stream_idle_timeout_ms': int(config['timeoutSeconds'] * 1000), 'model_providers.local_qwen.request_max_retries': 0, 'model_providers.local_qwen.stream_max_retries': 0}
+                     'model_providers.local_qwen.request_max_retries': 0, 'model_providers.local_qwen.stream_max_retries': 0}
         for key, value in overrides.items(): command += ['-c', key + '=' + json.dumps(value)]
     else: raise ValueError('Only the validated Codex route is implemented; alternate harnesses require a real compatibility diagnosis')
     manifest = {'harness':harness,'command':command,'runStarted':run_started,'started':time.time(),'sessionId':session['id'],'rendererService':identity,'taskSuccess':'unverified','protocolTranslation':False,'runId':context.run_id,'resultDirectory':str(directory),'resultBase':context.record['resultBase'],'configSource':str(context.source),'configSha256':context.record['configSha256'],'mode':'new-experiment','inferenceOverrides':{k:config.get(k) for k in ['temperature','think','maxOutputTokens']}}
@@ -331,10 +330,10 @@ def execute(context, show_images=False, open_images=False):
             context.lock.update(harnessPid=process.pid, phase='harness-running')
             # Cooperative stop: the TUI Stop button writes runtime/tui-control/<runId>.stop.
             # Poll in short slices so a stop request terminates the harness tree and still
-            # flows through the normal interrupted/failure.json path. No stop file means
-            # the legacy timeout/KeyboardInterrupt behavior is unchanged.
+            # flows through the normal interrupted/failure.json path. There is no
+            # task timeout: without a stop file the launcher waits until the
+            # harness exits on its own.
             try:
-                deadline = time.time() + float(config['taskTimeoutSeconds'])
                 while True:
                     try:
                         manifest['exitCode']=process.wait(timeout=0.5)
@@ -346,11 +345,6 @@ def execute(context, show_images=False, open_images=False):
                             stop_harness(process)
                             manifest['exitCode']=process.returncode
                             raise KeyboardInterrupt('stop requested via runtime/tui-control/%s.stop' % context.run_id)
-                        if time.time() >= deadline:
-                            manifest['timedOut']=True
-                            stop_harness(process)
-                            manifest['exitCode']=process.returncode
-                            break
             except KeyboardInterrupt:
                 # Cooperative TUI stop already recorded above; a real SIGINT
                 # (the launcher killed from outside) lands here too.

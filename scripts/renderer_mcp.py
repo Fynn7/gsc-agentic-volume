@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--service')
     parser.add_argument('--session')
     parser.add_argument('--desktop-config')
-    parser.add_argument('--timeout', type=float, default=120)
+    parser.add_argument('--timeout', type=float, default=None)
     args = parser.parse_args()
     if args.desktop_config:
         parser.error('--desktop-config was removed with the Desktop harness; this tree is TUI-only')

@@ -49,8 +49,7 @@ except Exception:
 class ConfigExtension(unittest.TestCase):
     def test_new_defaults_present_and_valid(self):
         settings = dict(tui_config.DEFAULTS)
-        for key in ("contextSize", "renderBudget", "temperature", "think",
-                    "timeoutSeconds", "taskTimeoutSeconds", "maxOutputTokens"):
+        for key in ("contextSize", "renderBudget", "temperature", "think"):
             self.assertIn(key, settings)
         self.assertEqual(tui_config.validate_settings(settings), [])
 

@@ -139,9 +139,6 @@ SETTINGS_ROWS = (
     ("Context size", "set-context", "contextSize", "int"),
     ("Render budget", "set-budget", "renderBudget", "int"),
     ("Temperature", "set-temp", "temperature", "float"),
-    ("Timeout (s)", "set-timeout", "timeoutSeconds", "int"),
-    ("Task timeout (s)", "set-tasktimeout", "taskTimeoutSeconds", "int"),
-    ("Max output tokens", "set-maxtokens", "maxOutputTokens", "int"),
 )
 
 # Preview budget: a frame in the conversation is fitted into this many text
@@ -2140,6 +2137,17 @@ if _TEXTUAL:
             if record:
                 if record.get("interrupted"):
                     return "stopped"
+                try:
+                    manifest = json.loads(
+                        (self.live_dir / "manifest.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    manifest = None
+                if not isinstance(manifest, dict):
+                    manifest = None
+                # A run killed by the old task timeout says "finished" in
+                # run.json: report it as timed out, never as a clean finish.
+                if manifest is not None and manifest.get("timedOut"):
+                    return "timed out"
                 status = str(record.get("status") or "running")
                 if status != "running":
                     return status
@@ -2148,17 +2156,8 @@ if _TEXTUAL:
                 # Recorded "running": verify the process is really alive.
                 # A dead pid means history (unknown), never a live agent.
                 try:
-                    if runs_mod is not None:
-                        manifest = None
-                        try:
-                            manifest = json.loads(
-                                (self.live_dir / "manifest.json").read_text(encoding="utf-8"))
-                        except (OSError, ValueError):
-                            manifest = None
-                        if not isinstance(manifest, dict):
-                            manifest = None
-                        if runs_mod.classify(record, manifest) != "Running":
-                            return "unknown"
+                    if runs_mod is not None and runs_mod.classify(record, manifest) != "Running":
+                        return "unknown"
                 except Exception:
                     pass
             if self._stop_requested_for == self.live_run_id:

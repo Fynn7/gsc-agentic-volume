@@ -267,8 +267,10 @@ def validate_config(config):
     text('task')
     text('resultDirectory')
     number('contextSize', minimum=1)
-    number('timeoutSeconds', minimum=1)
-    number('taskTimeoutSeconds', minimum=1)
+    # No timeouts and no output-token cap: these keys are optional legacy
+    # input and are never enforced by the launcher.
+    number('timeoutSeconds', required=False, minimum=1)
+    number('taskTimeoutSeconds', required=False, minimum=1)
     number('temperature', required=False)
     number('maxOutputTokens', required=False)
     budget = number('renderBudget', minimum=1)

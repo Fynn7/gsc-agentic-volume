@@ -39,10 +39,7 @@ DEFAULTS = {"mode": "Local", "model": "qwen3.6:35b",
             "renderBudget": 4,
             "temperature": 0,
             "think": False,
-            "debugWindows": False,
-            "timeoutSeconds": 300,
-            "taskTimeoutSeconds": 900,
-            "maxOutputTokens": 1200}
+            "debugWindows": False}
 
 
 def _coerce_settings(stored: dict) -> dict:
@@ -104,7 +101,7 @@ def validate_settings(settings: dict) -> list[str]:
             problems.append("renderBudget must be between 1 and 30")
     except (TypeError, ValueError):
         problems.append("renderBudget must be an integer 1..30")
-    for key in ("contextSize", "timeoutSeconds", "taskTimeoutSeconds", "maxOutputTokens"):
+    for key in ("contextSize",):
         try:
             if int(settings.get(key, 0)) < 1:
                 problems.append("%s must be >= 1" % key)
@@ -153,8 +150,7 @@ def build_effective_config(task_kind: str, custom_text: str, settings: dict) -> 
     # any of our creation flags; headless picks the windowless sibling so no
     # console window flashes per run (debug mode keeps python.exe visible).
     config["python"] = subproc_mod.windowless_python(sys.executable, settings)
-    for key in ("contextSize", "renderBudget", "temperature", "think",
-                "timeoutSeconds", "taskTimeoutSeconds", "maxOutputTokens"):
+    for key in ("contextSize", "renderBudget", "temperature", "think"):
         if key in settings:
             config[key] = settings[key]
     volume = selected_volume(settings)

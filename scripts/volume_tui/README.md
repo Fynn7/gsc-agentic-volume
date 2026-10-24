@@ -140,7 +140,7 @@ back to the bottom resumes it (there is no Follow button).
 | /history | picks one of the runs on this machine and opens it here |
 | /archive-all | moves every history run to `runtime/archive` (live runs are kept; no unarchive — move folders back manually) |
 | /change-volume | picks the volume the next run works on; writes `runtime/tui-settings.json` |
-| /settings | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, timeouts, max output tokens, the Think toggle and the Debug-windows toggle (off hides console/GLFW popups; on keeps them for debugging; `GAV_DEBUG_WINDOWS=1` overrides) |
+| /settings | the form that writes `runtime/tui-settings.json` — model, mode, the volume the agent works on, endpoints, context size, render budget, temperature, the Think toggle and the Debug-windows toggle (off hides console/GLFW popups; on keeps them for debugging; `GAV_DEBUG_WINDOWS=1` overrides) |
 | /theme, /help, /glossary | light or dark, the help screen, the glossary |
 | /hard-stop | agent tree, local Ollama, owned services — then leave |
 | /quit | stops what the TUI owns, then leaves (asks first while a run is live) |
@@ -234,7 +234,8 @@ the window.
   the agent starts** (a stop during the start-up phase never starts the
   harness) and every 0.5s while it waits on the harness, then
   `stop_harness` + `interrupted`/`failure.json` + exit 130 path. No stop file =
-  legacy timeout behavior. The TUI says `stopping` at once and `stopped` when
+  the launcher waits until the harness exits on its own (runs have no
+  timeout). The TUI says `stopping` at once and `stopped` when
   the run has ended.
 - Shutdown: `services.shutdown_all()` — cooperative stop of every live run
   (evidence complete) → hard kill of the agent tree (children snapshotted

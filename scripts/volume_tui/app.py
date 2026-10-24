@@ -5,7 +5,8 @@ run (the task, the model's thinking, its tool calls, the frames it rendered and
 its answer) and a composer that starts the next task.
 
 Control/display only: runs start via scripts/run_local_agent.py, evidence is
-read-only except new runs, verification.json and tui-settings.json.
+read-only except new runs, verification.json, tui-settings.json,
+composer-history.json and chat-log exports.
 """
 from __future__ import annotations
 
@@ -148,6 +149,53 @@ SETTINGS_ROWS = (
 # a cut-off corner) and never swallows the conversation.
 IMAGE_PREVIEW_MAX_ROWS = 14
 IMAGE_PREVIEW_MAX_COLS = 64
+
+# Composer history (shell-like Up/Down) survives TUI restarts: every submitted
+# task is appended here, so killing the TUI and reopening it still recalls
+# the last input with Up. Lives under runtime/tui/ with the other TUI-owned
+# state (services.json, chat-logs/); the run folders stay read-only.
+COMPOSER_HISTORY_LIMIT = 100
+COMPOSER_HISTORY_FILE = ROOT / "runtime" / "tui" / "composer-history.json"
+
+
+def composer_history_path(path=None) -> Path:
+    """Where the cross-restart composer history lives (patchable in tests)."""
+    if path is not None:
+        return Path(path)
+    return Path(COMPOSER_HISTORY_FILE)
+
+
+def load_composer_history(path=None) -> list[str]:
+    """Read the persisted composer history; missing/corrupt means empty."""
+    target = composer_history_path(path)
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if isinstance(raw, dict):
+        raw = raw.get("history", [])
+    if not isinstance(raw, list):
+        return []
+    out = [str(item) for item in raw if isinstance(item, str) and str(item).strip()]
+    if len(out) > COMPOSER_HISTORY_LIMIT:
+        del out[:-COMPOSER_HISTORY_LIMIT]
+    return out
+
+
+def save_composer_history(history: list[str], path=None) -> bool:
+    """Persist the composer history atomically; never raises."""
+    target = composer_history_path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cleaned = [str(item) for item in (history or []) if isinstance(item, str)]
+        if len(cleaned) > COMPOSER_HISTORY_LIMIT:
+            del cleaned[:-COMPOSER_HISTORY_LIMIT]
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps(cleaned, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+        return True
+    except (OSError, ValueError):
+        return False
 
 # Two clocks. The screen ticks fast, so the spinner and the seconds stay
 # alive; the backend is read at its own pace, so the evidence is not
@@ -1410,7 +1458,9 @@ if _TEXTUAL:
             self._slash_selected = 0
             self._slash_items: list[tuple[str, str, str]] = []
             # Composer history (shell-like): every submitted task, Up/Down recalls it.
-            self._composer_history: list[str] = []
+            # Persisted to runtime/tui/composer-history.json, so Up still works
+            # after the TUI is killed and restarted.
+            self._composer_history: list[str] = load_composer_history()
             self._history_index: int | None = None
             self._history_draft: str = ""
 
@@ -2305,16 +2355,20 @@ if _TEXTUAL:
                 return
             history = getattr(self, "_composer_history", None)
             if history is None:
-                history = self._composer_history = []
+                history = self._composer_history = load_composer_history()
             if history and history[-1] == text:
                 self._history_index = None
                 self._history_draft = ""
                 return
             history.append(text)
-            if len(history) > 100:
-                del history[:-100]
+            if len(history) > COMPOSER_HISTORY_LIMIT:
+                del history[:-COMPOSER_HISTORY_LIMIT]
             self._history_index = None
             self._history_draft = ""
+            try:
+                save_composer_history(history)
+            except Exception:
+                pass
 
         def _history_show(self, text: str) -> None:
             """Replace the composer text and park the cursor at the end."""

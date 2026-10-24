@@ -401,7 +401,8 @@ class HelpScreen(DismissibleModal):
                     "  Ctrl+H         the technical rows (model calls, HTTP status)\n"
                     "  Ctrl+T         light / dark\n"
                     "  Ctrl+Q         quit (asks first while a run is live)\n"
-                    "  Ctrl+C         copy the selected text (shows 拷贝成功)\n"
+                    "  Ctrl+C         copy the selected text (shows 拷贝成功);\n"
+                    "                 with nothing selected it copies the latest toast\n"
                     "\n"
                     "  While the agent works the Send button turns into a red Stop;\n"
                     "  it stops the run the same way Esc does.\n"
@@ -1730,6 +1731,12 @@ if _TEXTUAL:
             Binding("escape", "interrupt_run", "Stop"),
             Binding("ctrl+up", "scroll_history", "Scroll up", show=False),
             Binding("ctrl+down", "scroll_history_down", "Scroll down", show=False),
+            # Bare Ctrl+C (no text selected anywhere) copies the latest
+            # toast: toasts dismiss on click, so their text can never be
+            # mouse-selected. Screen/Input/TextArea copy actions all raise
+            # SkipAction when there is no selection, which falls through to
+            # this App-level binding.
+            Binding("ctrl+c,super+c", "copy_last_toast", show=False),
         ]
 
         def __init__(self, context=None):
@@ -1788,6 +1795,10 @@ if _TEXTUAL:
             self._batch: dict | None = None
             self._batch_cancel = threading.Event()
             self._batch_thread: threading.Thread | None = None
+            # Latest toast text, so a bare Ctrl+C (no selectable text -
+            # toasts dismiss on click) can still copy what was shown.
+            self._last_toast_text = ""
+            self._last_toast_at = 0.0
 
         # -- busy feedback --------------------------------------------------
         def _busy_inc(self) -> None:
@@ -3163,6 +3174,51 @@ if _TEXTUAL:
                 self.call_from_thread(self._say, transcript_mod.ERROR,
                                       "Verify evidence failed: %s" % error)
 
+        def notify(self, message, *args, **kwargs) -> None:
+            """Remember the latest toast so a bare Ctrl+C can copy it.
+
+            Toasts dismiss on click, so their text can never be selected
+            for Screen.copy_text; the App-level Ctrl+C fallback
+            (action_copy_last_toast) copies what was stashed here.
+            """
+            try:
+                text = str(message or "")
+                if text.strip():
+                    self._last_toast_text = text
+                    self._last_toast_at = time.monotonic()
+            except Exception:
+                pass
+            super().notify(message, *args, **kwargs)
+
+        def action_copy_last_toast(self) -> None:
+            """Copy the latest toast (bare Ctrl+C, nothing selected).
+
+            Reached only when Screen/Input/TextArea copy actions all
+            raised SkipAction, i.e. there is no text selection. Copies
+            the stashed toast text via the terminal clipboard escape
+            (OSC 52) instead of doing nothing. Stale toasts (older than
+            two minutes) are ignored so a stray Ctrl+C cannot surprise
+            with ancient text.
+            """
+            try:
+                text = str(getattr(self, "_last_toast_text", "") or "")
+                age = time.monotonic() - float(getattr(self, "_last_toast_at", 0.0) or 0.0)
+            except Exception:
+                return
+            if not text or age > 120:
+                return
+            try:
+                super().copy_to_clipboard(text)
+            except Exception:
+                pass
+            try:
+                # Bypass the stash: the confirmation itself must not
+                # become the next fallback source.
+                super().notify("拷贝成功：已复制 %d 个字符" % len(text),
+                               timeout=3, markup=False)
+            except Exception:
+                pass
+
         def copy_to_clipboard(self, text: str) -> None:
             """Terminal copy (Ctrl+C selection) + success toast.
 
@@ -3170,18 +3226,26 @@ if _TEXTUAL:
             (OSC 52 escape). The system-clipboard copies (/copy-json,
             /copy-chat) already toast via _copy_finished; this covers the
             interactive selection copy which was previously silent.
+
+            Empty text means there was no Textual selection (e.g. Ctrl+C
+            while a toast is focused - toasts dismiss on click so their
+            text is never selected): stay silent so the informative toast
+            stays on screen and no false success is shown. Skipping
+            super() also avoids sending an empty OSC 52 sequence, which
+            clears the terminal clipboard.
             """
+            if not str(text or ""):
+                return
             try:
                 super().copy_to_clipboard(text)
             except Exception:
                 pass
             try:
                 count = len(str(text or ""))
-                if count:
-                    self.notify("拷贝成功：已复制 %d 个字符" % count,
-                                timeout=3, markup=False)
-                else:
-                    self.notify("拷贝成功", timeout=3, markup=False)
+                # Bypass the stash: the confirmation itself must not become
+                # the next bare-Ctrl+C fallback source.
+                super().notify("拷贝成功：已复制 %d 个字符" % count,
+                               timeout=3, markup=False)
             except Exception:
                 pass
 
@@ -3288,7 +3352,14 @@ if _TEXTUAL:
             self._run_guarded("Exporting the chat log", _work, button)
 
         def _chat_log_exported(self, path) -> None:
-            self.notify("Chat log written: %s" % path, timeout=6, markup=False)
+            self.notify("Chat log written: %s" % path, timeout=20, markup=False)
+            # The toast is transient (and dismisses on click, so its text
+            # can never be Ctrl+C-copied): mirror the path into the
+            # conversation where it stays selectable via SafeSelection.
+            try:
+                self._say(transcript_mod.NOTICE, "Chat log written: %s" % path)
+            except Exception:
+                pass
 
         # -- where the frames live -----------------------------------------
         def _live_png_path(self) -> Path | None:

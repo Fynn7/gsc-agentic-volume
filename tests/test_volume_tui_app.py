@@ -1240,6 +1240,58 @@ class ComposerFlow(unittest.TestCase):
                 self.assertTrue(app.is_running)
         asyncio.run(_run())
 
+    def test_bare_ctrl_c_copies_the_latest_toast(self):
+        """A toast can never be mouse-selected (click dismisses it), so a
+        bare Ctrl+C with no selection must copy the latest toast text."""
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                path = "Chat log written: D:\\logs\\run-1.log"
+                app.notify(path, timeout=6, markup=False)
+                await pilot.pause()
+                # No text is selected anywhere; the toast itself cannot be
+                # selected because clicking it dismisses it.
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, path)
+        asyncio.run(_run())
+
+    def test_bare_ctrl_c_with_no_toast_stays_silent(self):
+        """No selection and no toast: Ctrl+C must not fake a success or
+        touch the clipboard."""
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                before = set(app._notifications)
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, "")
+                self.assertEqual(set(app._notifications), before)
+        asyncio.run(_run())
+
+    def test_bare_ctrl_c_ignores_a_stale_toast(self):
+        """A toast from long ago must not be resurrected by a stray Ctrl+C."""
+        import asyncio
+
+        async def _run():
+            app = tui_app.VolumeAgentApp()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.notify("Chat log written: D:\\logs\\old.log",
+                           timeout=6, markup=False)
+                await pilot.pause()
+                app._last_toast_at -= 200
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, "")
+        asyncio.run(_run())
+
     def test_esc_asks_the_agent_to_stop(self):
         import asyncio
 

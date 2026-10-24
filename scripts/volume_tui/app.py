@@ -79,38 +79,6 @@ def _escape_markup(text) -> str:
     return text
 
 
-_WORD_BOUNDARY_RE = _re.compile(r"(?<=\W)(?=\w)|(?<=\w)(?=\W)")
-
-
-def word_start_before(text: str, offset: int) -> int:
-    """Start of the word before `offset` (Ctrl+Backspace target).
-
-    Trailing spaces are included in the deletion, so "hello world   "
-    with the cursor at the end deletes "world   " in one go. Pure
-    helper so the shortcut is unit-testable without a running TUI.
-    """
-    text = str(text or "")
-    offset = max(0, min(int(offset), len(text)))
-    if offset == 0:
-        return 0
-    stripped = text[:offset].rstrip()
-    # Only spaces before the cursor: delete them all.
-    if not stripped:
-        return 0
-    matches = list(_WORD_BOUNDARY_RE.finditer(stripped))
-    if not matches:
-        return 0
-    return matches[-1].start()
-
-
-def delete_word_before(text: str, offset: int) -> tuple[str, int]:
-    """Delete one word before `offset`; returns (new_text, new_offset)."""
-    start = word_start_before(text, offset)
-    text = str(text or "")
-    offset = max(0, min(int(offset), len(text)))
-    return text[:start] + text[offset:], start
-
-
 try:
     from textual import events as _events
 except Exception:  # pragma: no cover
@@ -327,21 +295,6 @@ class DismissibleModal(ModalScreen if _TEXTUAL else object):
         BINDINGS = [Binding("escape", "dismiss", "Close", show=False)]
 
 
-class WordInput(Input if _TEXTUAL else object):
-    """Settings field: Ctrl+Backspace deletes one word to the left.
-
-    Textual's Input maps Ctrl+Backspace to the right word; the composer
-    (TextArea) deletes to the left, so the settings form is aligned
-    with it here.
-    """
-
-    if _TEXTUAL:
-        BINDINGS = [
-            Binding("ctrl+backspace", "delete_left_word",
-                    "Delete word", show=False),
-        ]
-
-
 class HelpScreen(DismissibleModal):
     def compose(self):
         with Vertical(classes="dlg"):
@@ -366,7 +319,6 @@ class HelpScreen(DismissibleModal):
                     "  Ctrl+T         light / dark\n"
                     "  Ctrl+Q         quit (asks first while a run is live)\n"
                     "  Ctrl+C         copy the selected text (shows 拷贝成功)\n"
-                    "  Ctrl+Backspace delete one word in the input\n"
                     "\n"
                     "  While the agent works the Send button turns into a red Stop;\n"
                     "  it stops the run the same way Esc does.\n"
@@ -677,7 +629,7 @@ class SettingsScreen(DismissibleModal):
                     for label, wid, key, _kind in SETTINGS_ROWS:
                         with Horizontal(classes="row"):
                             yield Label(label, classes="field-label")
-                            yield WordInput(str(self.settings.get(key, "")), id=wid)
+                            yield Input(str(self.settings.get(key, "")), id=wid)
                     with Horizontal(classes="row"):
                         yield Label("Volume", classes="field-label")
                         options, volume_value = self._volume_options()
@@ -1060,11 +1012,6 @@ class Composer(TextArea if _TEXTUAL else object):
     """The chat input: Enter sends the task, Shift+Enter adds a line."""
 
     if _TEXTUAL:
-        BINDINGS = [
-            Binding("ctrl+backspace", "delete_word_left",
-                    "Delete word", show=False),
-        ]
-
         class Submitted(Message):
             """The user pressed Enter in the composer."""
 
@@ -1128,39 +1075,6 @@ class Composer(TextArea if _TEXTUAL else object):
                 event.stop()
                 event.prevent_default()
                 self.insert("\n")
-                return
-            if event.key == "ctrl+backspace":
-                # Explicit word delete: the binding above covers terminals
-                # that report Ctrl+Backspace distinctly; handling it here as
-                # well keeps the shortcut working even if the binding dispatch
-                # is bypassed (and it is a no-op double-fire guard: when the
-                # binding fires, this handler never sees the key).
-                event.stop()
-                event.prevent_default()
-                try:
-                    self.action_delete_word_left()
-                except Exception:
-                    try:
-                        text = str(self.text or "")
-                        cursor = self.selection.end
-                        doc = self.document
-                        offset = doc.get_offset(cursor) if hasattr(doc, "get_offset") else len(text)
-                        new_text, new_offset = delete_word_before(text, offset)
-                        if hasattr(doc, "get_location"):
-                            try:
-                                new_cursor = doc.get_location(new_offset)
-                            except Exception:
-                                new_cursor = None
-                        else:
-                            new_cursor = None
-                        self.text = new_text
-                        if new_cursor is not None:
-                            try:
-                                self.selection = Selection(new_cursor, new_cursor)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
                 return
             await super()._on_key(event)
 

@@ -53,6 +53,9 @@ Evidence is read-only except new runs, `verification.json`,
 - The **flow diagram** of the whole pipeline (TUI, launcher, renderer service,
   agent, evidence) is in `docs/agent-prompt-to-completion.html`, with its
   source (`docs/agent-prompt-to-completion.workflow.json`) next to it.
+  The agent-failure analysis and improvement plan (tool changes, evaluation
+  protocol, worker plan) live in `docs/improvement/00-README.md`, with the
+  local-evidence recheck in `docs/improvement/08-repository-recheck.md`.
 - **Whose words are these?** `▌` is your task, `»` is everything the model
   itself wrote (its answer, its reason for a call, its claim at the end),
   and `● ▣ ⚠ ✓` are facts the screen measured or recorded. The screen never

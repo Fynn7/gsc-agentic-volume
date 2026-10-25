@@ -1,0 +1,43 @@
+flowchart TB
+  classDef same fill:#f4f4f8,stroke:#777,color:#111
+  classDef gone fill:#ffe3e3,stroke:#d63031,stroke-width:2px,color:#111
+  classDef chg fill:#fff3bf,stroke:#f08c00,stroke-width:2px,color:#111
+
+  P(["用户 prompt<br/>Show me the chaple in the ball-like present inside the box<br/>make the box invisible and the ball invisible, only make the chapel visible"]):::same
+
+  subgraph S1["① 观察场景"]
+    A1["agent 调用 inspect_scene<br/>返回 frame-0：tfStart 0.1 / tfWidth 0.12<br/>整只礼盒可见，只有数值参数，没有密度信息"]:::chg
+  end
+
+  subgraph S2["② 理解结构"]
+    G1(["模型凭空推断：教堂密度比盒子和球更高<br/>没有直方图，没有探针，纯猜"]):::gone
+  end
+
+  subgraph S3["③ 搜索目标"]
+    A2["agent 调用 render_scene<br/>tfStart 0.5 / tfWidth 0.15<br/>画面：同心环 + 5 个亮斑<br/>实际是玻璃球壳和金属件"]:::gone
+    G2(["模型误认：同心环和亮斑就是教堂"]):::gone
+    A3["agent 反复调用 render_scene<br/>tfStart 0.55 到 0.69，一次只改一个参数<br/>反馈只有画面亮不亮"]:::gone
+    K["上下文自动压缩<br/>run a 压缩 6 次，run b 压缩 2 次<br/>图片丢失，摘要写成教堂密度大于 0.7"]:::gone
+    A4["agent 调用 inspect_slice(axis=x, index=122)  仅 run a<br/>看到球内有建筑，但切片像素无法换算成 crop<br/>观察预算 30 次用尽"]:::gone
+    A5["agent 调用 render_scene<br/>crop 收紧 + tfStart 0.6 同时改动<br/>画面近乎全黑，模型归咎于 crop"]:::gone
+    A6["agent 调用 render_scene<br/>tfStart 0.69 / tfWidth 0.08 → frame 18<br/>只剩 5 个金属件，判为 柱子和拱门"]:::gone
+  end
+
+  subgraph S4["④ 验证"]
+    V0["没有验证步骤<br/>唯一判据是亮点数和模型自评"]:::gone
+  end
+
+  subgraph S5["⑤ 收尾"]
+    F1["agent 调用 finish_task(frameRevision=18)<br/>summary：教堂已隔离<br/>task check: unverified"]:::chg
+    O(["最终 image.png<br/>5 个金属件，没有教堂"]):::chg
+  end
+
+  P --> A1 --> G1 --> A2 --> G2 --> A3
+  A3 -->|"重复 10 次以上"| A3
+  A3 --> K --> A4 --> A5 --> A6 --> V0 --> F1 --> O
+
+  subgraph L["图例"]
+    L1["灰：新旧流程相同"]:::same
+    L2["红：新流程中被替换或删除"]:::gone
+    L3["黄：步骤还在，但内容变了"]:::chg
+  end

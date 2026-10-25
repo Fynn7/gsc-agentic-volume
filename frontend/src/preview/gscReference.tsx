@@ -97,7 +97,7 @@ After \`setvolume\` rotation starts at identity; \`resetrotation\` returns to th
 
 ## Running in this editor
 
-Run (Ctrl/Cmd+Enter) resets the renderer, restores the current dataset, executes the script, then reads the panel state back from Wasm. Sync params to script rewrites only the marked generated zone; hand-written lines outside the markers stay untouched. File-output and termination commands (\`setdir\`, \`screenshot\`, \`quit\`) belong to native batch runs.
+Run (Ctrl/Cmd+Enter) resets the renderer, restores the current dataset, executes the script, then reads the panel state back from Wasm. GUI edits update the marked generated zone once the operation settles; hand-written lines outside the markers stay untouched. File-output and termination commands (\`setdir\`, \`screenshot\`, \`quit\`) belong to native batch runs.
 
 \`\`\`gsc
 ${GSC_EXAMPLE}
@@ -188,7 +188,7 @@ export function GscReferenceDialog({
       <FieldBlock label="Running in this editor">
         <p>
           Run (Ctrl/Cmd+Enter) resets the renderer, restores the current dataset, executes the script, then reads
-          the panel state back from Wasm. Sync params to script rewrites only the marked generated zone;
+          the panel state back from Wasm. GUI edits update the marked generated zone once the operation settles;
           hand-written lines outside the markers stay untouched. File-output and termination commands (
           <code>setdir</code>, <code>screenshot</code>, <code>quit</code>) belong to native batch runs.
         </p>

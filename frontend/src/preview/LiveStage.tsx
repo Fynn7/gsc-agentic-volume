@@ -123,6 +123,36 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     }
   }, [params])
 
+  // .gsc sync waits for one whole GUI operation to finish: continuous gestures
+  // (slider drags, TF canvas strokes) only touch live params + Wasm preview per
+  // tick, and the generated zone is rewritten once the gesture settles.
+  // No manual sync UI; discrete picks also flow through the same debounced slot.
+  const GSC_SYNC_DEBOUNCE_MS = 500
+  const gscSyncTimer = useRef<number | null>(null)
+  const flushGscSync = useCallback(() => {
+    if (gscSyncTimer.current != null) {
+      window.clearTimeout(gscSyncTimer.current)
+      gscSyncTimer.current = null
+    }
+    const next = syncParamsToScript(gscRef.current, paramsRef.current)
+    if (next !== gscRef.current) setGscText(next)
+  }, [])
+
+  useEffect(() => {
+    if (gscSyncTimer.current != null) window.clearTimeout(gscSyncTimer.current)
+    gscSyncTimer.current = window.setTimeout(() => {
+      gscSyncTimer.current = null
+      const next = syncParamsToScript(gscRef.current, paramsRef.current)
+      if (next !== gscRef.current) setGscText(next)
+    }, GSC_SYNC_DEBOUNCE_MS)
+    return () => {
+      if (gscSyncTimer.current != null) {
+        window.clearTimeout(gscSyncTimer.current)
+        gscSyncTimer.current = null
+      }
+    }
+  }, [params])
+
   const applyPatch = useCallback((patch: WasmStatePatch) => {
     setParams((prev) => {
       const next: PreviewParams = { ...prev }
@@ -366,6 +396,8 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     setRunBusy(true)
     setRunResult('Rendering preview…')
     try {
+      // Flush any pending debounced sync so Run executes the settled GUI state.
+      flushGscSync()
       // Reset semantics: reset the renderer, restore the current dataset,
       // then execute the script. State after the run is read back via callbacks.
       host.reset()
@@ -374,7 +406,9 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       // Restore dataset only; the script owns every other knob.
       host.restoreDataset(current.dataset)
       await new Promise((r) => setTimeout(r, 60))
-      const code = await host.runScript(gscRef.current)
+      const script = syncParamsToScript(gscRef.current, paramsRef.current)
+      if (script !== gscRef.current) setGscText(script)
+      const code = await host.runScript(script)
       if (code === 0) {
         setRunResult('Ran — panel reflects Wasm state')
       } else {
@@ -385,13 +419,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     } finally {
       setRunBusy(false)
     }
-  }, [runBusy, wasmReady])
-
-  const handleSyncParams = useCallback(() => {
-    const next = syncParamsToScript(gscRef.current, paramsRef.current)
-    setGscText(next)
-    snackbar('Preview params written to the generated zone.', { severity: 'info', duration: 'long', dismissible: true })
-  }, [])
+  }, [runBusy, wasmReady, flushGscSync])
 
   const handleSnapshot = useCallback(async () => {
     const host = hostRef.current
@@ -431,10 +459,14 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     if (snapshotBusy) return
     setSnapshotBusy(true)
     try {
+      // Settle the debounced sync first so the downloaded .gsc matches the panel.
+      flushGscSync()
+      const script = syncParamsToScript(gscRef.current, paramsRef.current)
+      if (script !== gscRef.current) setGscText(script)
       const base = stageStamp(paramsRef.current).base
       const gscName = `${base}.gsc`
       const pngName = `${base}.png`
-      downloadBlob(new Blob([gscRef.current], { type: 'text/plain;charset=utf-8' }), gscName)
+      downloadBlob(new Blob([script], { type: 'text/plain;charset=utf-8' }), gscName)
       const shot = await host.captureScreenshot()
       downloadBlob(shot, pngName)
       snackbar(`Saved ${gscName} and ${pngName} to your downloads.`, {
@@ -451,7 +483,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     } finally {
       setSnapshotBusy(false)
     }
-  }, [snapshotBusy, wasmReady])
+  }, [snapshotBusy, wasmReady, flushGscSync])
 
   const exportAllRef = useRef(handleExportAll)
   exportAllRef.current = handleExportAll
@@ -713,9 +745,6 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
               {runBusy ? 'Running…' : 'Run'}
             </Button>
           </Tooltip>
-          <Button variant="ghost" size="sm" onClick={handleSyncParams}>
-            Sync params to script
-          </Button>
         </div>
         <FieldHint>{runResult}</FieldHint>
         <Textarea
@@ -727,8 +756,9 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           onKeyDown={handleGscKeyDown}
         />
         <FieldHint>
-          Draft + params autosave locally. Run resets the renderer, restores the current dataset, executes the script,
-          then reads panel state back from Wasm. Sync only rewrites the marked generated zone.
+          Draft + params autosave locally. The generated zone rewrites once a GUI operation settles (no per-tick
+          churn while dragging); Run resets the renderer, restores the current dataset, executes the script, then
+          reads panel state back from Wasm.
         </FieldHint>
       </Card>
       <GscReferenceDialog open={referenceOpen} onOpenChange={setReferenceOpen} />

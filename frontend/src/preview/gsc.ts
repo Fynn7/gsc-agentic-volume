@@ -40,8 +40,8 @@ export const DEFAULT_PREVIEW_PARAMS: PreviewParams = {
 }
 
 export const DEFAULT_GSC = `# GSC live preview scratch
-# Run with the Run button or Ctrl/Cmd+Enter. Params below the marker are
-# managed by "Sync params to script"; hand-written lines outside stay untouched.
+# Run with the Run button or Ctrl/Cmd+Enter. GUI edits update the generated
+# zone once the operation settles; hand-written lines outside stay untouched.
 setinteraction true
 resize 512 512
 setvolume 7

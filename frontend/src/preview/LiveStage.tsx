@@ -46,6 +46,32 @@ type LiveStageProps = {
 
 const RUN_SHORTCUT_HINT = 'Ctrl/Cmd+Enter'
 
+/** Window event fired by the top bar to download .gsc + preview PNG. */
+export const STAGE_EXPORT_EVENT = 'gav:export-stage'
+
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000)
+  }
+}
+
+function stageStamp(params: PreviewParams): { stamp: string; base: string } {
+  const stamp = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stampText =
+    `${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-` +
+    `${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}`
+  return { stamp: stampText, base: `gsc-preview-d${params.dataset}-m${params.method}-${stampText}` }
+}
+
 function clampInt(v: number, lo: number, hi: number, fallback: number): number {
   if (!Number.isFinite(v)) return fallback
   return Math.min(hi, Math.max(lo, Math.round(v)))
@@ -376,24 +402,8 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     setSnapshotBusy(true)
     try {
       const blob = await host.captureScreenshot()
-      const current = paramsRef.current
-      const stamp = new Date()
-      const pad = (n: number) => String(n).padStart(2, '0')
-      const name =
-        `gsc-preview-d${current.dataset}-m${current.method}-` +
-        `${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-` +
-        `${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.png`
-      const url = URL.createObjectURL(blob)
-      try {
-        const a = document.createElement('a')
-        a.href = url
-        a.download = name
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-      } finally {
-        window.setTimeout(() => URL.revokeObjectURL(url), 4000)
-      }
+      const name = `${stageStamp(paramsRef.current).base}.png`
+      downloadBlob(blob, name)
       snackbar(`Snapshot saved to your downloads as ${name}.`, {
         severity: 'info',
         duration: 'long',
@@ -409,6 +419,49 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       setSnapshotBusy(false)
     }
   }, [wasmReady])
+
+  // Top-bar action: download the current .gsc script plus the live preview PNG.
+  // Both use anchor downloads so they land in the browser download folder.
+  const handleExportAll = useCallback(async () => {
+    const host = hostRef.current
+    if (!host || !wasmReady) {
+      snackbar('Preview engine is not ready yet.', { severity: 'info', duration: 'long', dismissible: true })
+      return
+    }
+    if (snapshotBusy) return
+    setSnapshotBusy(true)
+    try {
+      const base = stageStamp(paramsRef.current).base
+      const gscName = `${base}.gsc`
+      const pngName = `${base}.png`
+      downloadBlob(new Blob([gscRef.current], { type: 'text/plain;charset=utf-8' }), gscName)
+      const shot = await host.captureScreenshot()
+      downloadBlob(shot, pngName)
+      snackbar(`Saved ${gscName} and ${pngName} to your downloads.`, {
+        severity: 'info',
+        duration: 'long',
+        dismissible: true,
+      })
+    } catch (err) {
+      snackbar(`Download failed: ${err instanceof Error ? err.message : String(err)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    } finally {
+      setSnapshotBusy(false)
+    }
+  }, [snapshotBusy, wasmReady])
+
+  const exportAllRef = useRef(handleExportAll)
+  exportAllRef.current = handleExportAll
+  useEffect(() => {
+    const onExport = () => {
+      void exportAllRef.current()
+    }
+    window.addEventListener(STAGE_EXPORT_EVENT, onExport)
+    return () => window.removeEventListener(STAGE_EXPORT_EVENT, onExport)
+  }, [])
 
   const handleGscKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

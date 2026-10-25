@@ -14,6 +14,7 @@ import {
   CloseIcon,
   CodeBlock,
   Dialog,
+  DownloadIcon,
   EmptyState,
   EndAside,
   ExpandableCodeBlock,
@@ -63,7 +64,7 @@ import {
   TaskMessage,
   type ZoomPayload,
 } from './ChatRows'
-import { LiveStage } from './preview/LiveStage'
+import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
 
 const DEFAULT_MODEL = 'qwen3.5:9b'
 const POLL_INTERVAL_MS = 1500
@@ -588,11 +589,24 @@ function App() {
                   />
                 ) : null}
                 {!isNarrow ? (
-                  <Tooltip content={stageToggleLabel}>
-                    <Button variant="ghost" size="sm" aria-pressed={stageOpen} onClick={() => setStageOpen((v) => !v)}>
-                      {stageOpen ? 'Collapse stage' : 'Expand stage'}
-                    </Button>
-                  </Tooltip>
+                  <>
+                    <Tooltip content="Download .gsc + preview PNG to your downloads">
+                      <IconButton
+                        variant="ghost"
+                        size="sm"
+                        aria-label="Download .gsc and preview screenshot"
+                        disabled={!stageOpen}
+                        onClick={() => window.dispatchEvent(new CustomEvent(STAGE_EXPORT_EVENT))}
+                      >
+                        <DownloadIcon aria-hidden />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip content={stageToggleLabel}>
+                      <Button variant="ghost" size="sm" aria-pressed={stageOpen} onClick={() => setStageOpen((v) => !v)}>
+                        {stageOpen ? 'Collapse stage' : 'Expand stage'}
+                      </Button>
+                    </Tooltip>
+                  </>
                 ) : null}
                 <Tooltip content={asideToggleLabel}>
                   <IconButton

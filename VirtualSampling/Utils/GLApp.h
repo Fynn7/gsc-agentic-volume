@@ -55,7 +55,7 @@ protected:
   virtual void keyboardChar(unsigned int key) {}
   virtual void mouseMove(double xPosition, double yPosition) {}
   virtual void mouseButton(int button, int state, int mods, double xPosition, double yPosition) {}
-  virtual void mouseWheel(double x_offset, double y_offset, double xPosition, double yPosition) {}
+  virtual void mouseWheel(double x_offset, double y_offset, double xPosition, double yPosition) { (void)x_offset; (void)y_offset; (void)xPosition; (void)yPosition; }
 
 
   void setAnimation(bool animationActive);
@@ -191,6 +191,13 @@ private:
   void initScript(const std::vector<std::string>& args);
   bool writeScriptLog(const std::string& text) const;
   void processScript();
+
+  /**
+   * Called once when a loaded script reaches a terminal state (finished or
+   * error). Base implementation is empty; the Wasm shell overrides it in
+   * Raycaster to push post-run state back to the web panel.
+   */
+  virtual void onScriptFinished(CommandResultCode result, int line) { (void)result; (void)line; }
 };
 
 /*

@@ -129,7 +129,11 @@ public:
                     std::function<void(int)> modeCallback,
                     std::function<void(int)> volumeCallback,
                     std::function<void(int)> levelCallback,
-                    std::function<void(bool)> useOrthoCallback);
+                    std::function<void(bool)> useOrthoCallback,
+                    std::function<void(double)> samplingCallback = nullptr,
+                    std::function<void(int)> virtualSamplesCallback = nullptr,
+                    std::function<void(bool)> constantSampleCountCallback = nullptr,
+                    std::function<void(int, int)> scriptFinishedCallback = nullptr);
   uint32_t getRendermode() const {return currentRenderModeIndex;}
   void setRendermode(uint32_t index);
   void setVolume(uint32_t index);
@@ -158,6 +162,8 @@ private:
   virtual void keyboard(int key, int scancode, int action, int mods) override;
   virtual void mouseMove(double xPosition, double yPosition) override;
   virtual void mouseButton(int button, int state, int mods, double xPosition, double yPosition) override;
+  virtual void mouseWheel(double x_offset, double y_offset, double xPosition, double yPosition) override;
+  virtual void onScriptFinished(CommandResultCode result, int line) override;
 
   Tesselation cube{Tesselation::genBrick({0, 0, 0}, {1, 1, 1}).unpack()};
   GLBuffer vbCube{GL_ARRAY_BUFFER};
@@ -234,6 +240,7 @@ private:
   void updateTransferFunction();
   void setupShader();
   void updateTitle();
+  void pushPreviewState();
   std::string genTransformString() const;
   void printURL() const;
   void drawTransferFunctionEditor();
@@ -246,6 +253,10 @@ private:
   std::function<void(int)> volumeCallback;
   std::function<void(int)> levelCallback;
   std::function<void(bool)> useOrthoCallback;
+  std::function<void(double)> samplingCallback;
+  std::function<void(int)> virtualSamplesCallback;
+  std::function<void(bool)> constantSampleCountCallback;
+  std::function<void(int, int)> scriptFinishedCallback;
 };
 
 /*

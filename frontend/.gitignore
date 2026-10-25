@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Wasm preview engine: built on demand via `npm run wasm:build` from
+# VirtualSampling/Raycaster sources. The shell bridge is committed;
+# generated sampling.js/.wasm/.data are local-only.
+public/wasm/sampling.*
+public/wasm/*.data
+public/wasm/*.wasm
+public/wasm/*.mem
+public/wasm/upstream-index.html

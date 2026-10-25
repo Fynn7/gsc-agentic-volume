@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Raycaster Wasm Shell</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+  #canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }
+  #status { display: none; }
+</style>
+</head>
+<body>
+<div id="status">Loading…</div>
+<canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
+<script>
+// Parent bridge: forward C++ callbacks as granular wasmState patches.
+function postState(patch) {
+  try { parent.postMessage({ type: 'wasmState', patch }, '*'); } catch (e) {}
+}
+window.setFpsText = function () {
+  // FPS readout removed from the workbench; keep the receiver so the
+  // engine callback stays a no-op instead of throwing.
+};
+window.setWasmMessage = function (text) {
+  try { parent.postMessage({ type: 'wasmMessage', text: String(text ?? '') }, '*'); } catch (e) {}
+};
+window.setWasmTf = function (gaussian, start, width) {
+  postState({ tfType: Number(gaussian) ? 1 : 0, tfStart: Number(start), tfWidth: Number(width) });
+};
+window.setWasmCustomTf = function (s) { postState({ tfType: 2, customTf: String(s ?? '') }); };
+window.setWasmAlphaThreshold = function (a) {
+  const v = Number(a);
+  if (Number.isFinite(v)) postState({ ertEnabled: !(v > 1.0) });
+};
+window.setWasmTransform = function (s) { postState({ transform: String(s ?? '') }); };
+window.setMode = function (i) { postState({ method: Number(i) }); };
+window.setVolume = function (i) { postState({ dataset: Number(i) }); };
+window.setLevel = function (l) { postState({ level: Number(l) }); };
+window.setUseOrtho = function (b) { postState({ ortho: !!b }); };
+window.setWasmSampling = function (rate) {
+  const r = Number(rate);
+  if (Number.isFinite(r) && r > 0) {
+    const exp = Math.max(-5, Math.min(6, Math.round(Math.log2(r))));
+    postState({ samplingRateExp: exp });
+  }
+};
+window.setWasmVirtualSamples = function (c) { postState({ virtualSamples: Math.max(1, Math.round(Number(c))) }); };
+window.setWasmConstant = function (b) { postState({ constantSampleCount: !!b }); };
+
+const statusEl = document.getElementById('status');
+const canvasEl = document.getElementById('canvas');
+
+function resizeCanvas() {
+  const w = Math.max(Math.floor(canvasEl.clientWidth), 1);
+  const h = Math.max(Math.floor(canvasEl.clientHeight), 1);
+  if (canvasEl.width !== w || canvasEl.height !== h) {
+    canvasEl.width = w;
+    canvasEl.height = h;
+  }
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+// Right-drag drives the transfer function; never let the browser steal
+// the gesture with its native context menu.
+canvasEl.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+}, { passive: false });
+if (typeof ResizeObserver === 'function') {
+  new ResizeObserver(resizeCanvas).observe(canvasEl);
+}
+
+function safeCcall(func, returnType, argTypes, args) {
+  try {
+    if (typeof Module === 'undefined' || typeof Module.ccall !== 'function') return;
+    Module.ccall(func, returnType, argTypes, args);
+  } catch (e) {}
+}
+
+// Called directly by the Wasm engine (same window) when the loaded script
+// reaches its terminal state. Resolves the pending Run with the true result.
+window.onWasmScriptFinished = function (code, line) {
+  window.setTimeout(() => onScriptFinished(code, line), 0);
+};
+
+// One script executes at a time; a newer Run supersedes a still-running one.
+let pendingScriptRunId = null;
+
+const SCRIPT_ERROR_LABELS = {
+  4: 'fileOpenFailed', 5: 'unknownCommand', 6: 'invalidArguments',
+  7: 'unmatchedRepeat', 8: 'unmatchedEndrepeat', 9: 'unmatchedIf',
+  10: 'unmatchedElse', 11: 'unmatchedEndif', 12: 'callbackError',
+};
+
+function resolveScriptRun(id, code, error) {
+  parent.postMessage({ type: 'runResult', id, code, error: error || '' }, '*');
+  if (pendingScriptRunId === id) pendingScriptRunId = null;
+}
+
+function onScriptFinished(code, line) {
+  const id = pendingScriptRunId;
+  if (id == null) return; // e.g. internal loadvolume script; state callbacks already applied
+  if (code === 1) { // CommandResultCode::finished
+    resolveScriptRun(id, 0, '');
+  } else {
+    const label = SCRIPT_ERROR_LABELS[code] || ('code ' + code);
+    const where = (Number.isInteger(line) && line >= 0) ? (' at line ' + (line + 1)) : '';
+    resolveScriptRun(id, typeof code === 'number' ? code : -1, 'Script failed: ' + label + where);
+  }
+}
+
+// Pending external loads: id -> { datName, datText, rawName, rawBytes }
+const pendingExternal = new Map();
+
+function tryFinishExternal(id) {
+  const entry = pendingExternal.get(id);
+  if (!entry || entry.datText == null || entry.rawBytes == null) return;
+  pendingExternal.delete(id);
+  let code = -1;
+  let error = '';
+  try {
+    const canWriteFile = typeof Module.FS?.writeFile === 'function';
+    const canCreateDataFile = typeof Module.FS_createDataFile === 'function';
+    if (!canWriteFile && !canCreateDataFile) {
+      throw new Error('MEMFS unavailable');
+    }
+    const splitPath = (p) => {
+      const i = p.lastIndexOf('/');
+      return { parent: i <= 0 ? '/' : p.slice(0, i), base: p.slice(i + 1) };
+    };
+    const dat = splitPath(entry.datName);
+    const raw = splitPath(entry.rawName);
+    if (canWriteFile) {
+      try { Module.FS.unlink(entry.datName); } catch (e) {}
+      try { Module.FS.unlink(entry.rawName); } catch (e) {}
+      Module.FS.writeFile(entry.datName, entry.datText);
+      Module.FS.writeFile(entry.rawName, entry.rawBytes);
+    } else {
+      try { Module.FS_unlink(entry.datName); } catch (e) {}
+      try { Module.FS_unlink(entry.rawName); } catch (e) {}
+      Module.FS_createDataFile(dat.parent, dat.base, entry.datText, true, true);
+      Module.FS_createDataFile(raw.parent, raw.base, entry.rawBytes, true, true);
+    }
+    if (typeof Module.ccall !== 'function') throw new Error('ccall unavailable');
+    // The loadvolume script replaces any running script; don't leave a Run hanging.
+    if (pendingScriptRunId != null) {
+      resolveScriptRun(pendingScriptRunId, -1, 'Superseded by external volume load');
+    }
+    code = Module.ccall('runGraphicsScript', 'number', ['string'], ['loadvolume ' + entry.datName]);
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  }
+  parent.postMessage({ type: 'runResult', id, code, error }, '*');
+}
+
+function applyControls(c) {
+  if (!c) return;
+  // Dataset first so subsequent sampling/TF apply to the right volume.
+  if (Number.isInteger(c.dataset)) safeCcall('setDataset', 'void', ['number'], [c.dataset]);
+  if (Number.isInteger(c.method)) safeCcall('setMethod', 'void', ['number'], [c.method]);
+  safeCcall('setConstantSampleCount', 'void', ['boolean'], [!!c.constant]);
+  if (Number.isFinite(c.virtualSamples)) safeCcall('setVirtualSamples', 'void', ['number'], [Math.max(1, Math.round(c.virtualSamples))]);
+  if (Number.isInteger(c.samplingRateExp)) safeCcall('setSamplingRateExp', 'void', ['number'], [c.samplingRateExp]);
+  if (typeof c.alpha === 'number' && Number.isFinite(c.alpha)) safeCcall('setAlphaThreshold', 'void', ['number'], [c.alpha]);
+  if (Number.isInteger(c.level)) safeCcall('setLevel', 'void', ['number'], [c.level]);
+  safeCcall('setUseOrtho', 'void', ['boolean'], [!!c.ortho]);
+  if (c.tfType === 2 && typeof c.customTf === 'string' && c.customTf.length > 0) {
+    safeCcall('setCustomTF', 'void', ['string'], [c.customTf]);
+  } else if (Number.isFinite(c.tfStart) && Number.isFinite(c.tfWidth)) {
+    safeCcall('setTFParams', 'void', ['number', 'number', 'number'], [c.tfType === 1 ? 1 : 0, Number(c.tfStart), Number(c.tfWidth)]);
+  }
+  if (typeof c.transform === 'string' && c.transform.length > 0) {
+    safeCcall('setTransformParams', 'void', ['string'], [c.transform]);
+  }
+}
+
+var Module = {
+  canvas: canvasEl,
+  locateFile: (path) => path,
+  printErr: (text) => {
+    if (String(text).trim()) parent.postMessage({ type: 'wasmErr', text: String(text) }, '*');
+  },
+  setStatus: (text) => {
+    if (text) {
+      statusEl.textContent = text;
+      parent.postMessage({ type: 'wasmProgress', text }, '*');
+    }
+  },
+  postRun: [() => {
+    statusEl.textContent = 'Ready';
+    parent.postMessage({ type: 'wasmReady' }, '*');
+  }],
+};
+
+window.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data || typeof data !== 'object') return;
+  if (data.type === 'reset') {
+    safeCcall('resetRaycaster', null, [], []);
+  }
+  if (data.type === 'runScript' && typeof data.source === 'string') {
+    // Supersede a still-running script; its finish notice (if any) is ignored.
+    if (pendingScriptRunId != null && pendingScriptRunId !== data.id) {
+      resolveScriptRun(pendingScriptRunId, -1, 'Superseded by a newer run');
+    }
+    window.setTimeout(() => {
+      try {
+        if (typeof Module.ccall !== 'function') {
+          resolveScriptRun(data.id, -1, 'ccall unavailable');
+          return;
+        }
+        const code = Module.ccall('runGraphicsScript', 'number', ['string'], [data.source]);
+        if (code !== 0) {
+          // Load-time failure (bad string); execution never starts.
+          const label = SCRIPT_ERROR_LABELS[code] || ('code ' + code);
+          resolveScriptRun(data.id, code, 'Script failed to load: ' + label);
+          return;
+        }
+        // Loaded; resolve when onScriptFinished fires after the last batch.
+        pendingScriptRunId = data.id;
+      } catch (err) {
+        resolveScriptRun(data.id, -1, err instanceof Error ? err.message : String(err));
+      }
+    }, 0);
+  }
+  if (data.type === 'applyControls') {
+    window.setTimeout(() => applyControls(data.controls), 0);
+  }
+  if (data.type === 'setCustomTf' && typeof data.encoding === 'string') {
+    safeCcall('setCustomTF', 'void', ['string'], [data.encoding]);
+  }
+  if (data.type === 'loadExternal') {
+    const entry = pendingExternal.get(data.id) || {};
+    entry.datName = data.datName;
+    entry.datText = data.datText;
+    entry.rawName = entry.rawName || data.rawName;
+    pendingExternal.set(data.id, entry);
+    tryFinishExternal(data.id);
+  }
+  if (data.type === 'loadExternalBytes') {
+    const entry = pendingExternal.get(data.id) || {};
+    entry.rawName = data.rawName || entry.rawName;
+    // Structured-cloned ArrayBuffer arrives as ArrayBuffer.
+    entry.rawBytes = new Uint8Array(data.bytes);
+    entry.datName = entry.datName || '/ext_preview.dat';
+    pendingExternal.set(data.id, entry);
+    tryFinishExternal(data.id);
+  }
+});
+</script>
+<script async src="sampling.js"></script>
+</body>
+</html>

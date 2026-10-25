@@ -63,7 +63,7 @@ EM_EXPORTED_FUNCTIONS := '["_main","_malloc","_free","_setDataset",\
 "_setSamplingRateExp","_setTFParams","_setCustomTF","_setAlphaThreshold",\
 "_setTransformParams","_setBackground","_setUseOrtho",\
 "_setLevel","_runGraphicsScript","_resetRaycaster"]'
-EM_RUNTIME_METHODS    := '["ccall"]'
+EM_RUNTIME_METHODS    := '["ccall","FS"]'
 
 EM_LINK_FLAGS := \
 	$(EM_PRELOAD_ARGS) \

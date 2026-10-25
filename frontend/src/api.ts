@@ -97,7 +97,7 @@ function postJson<T>(route: string, body: Record<string, unknown>): Promise<T> {
   })
 }
 
-export function startSession(body: { source: string; model: string; goal: string }) {
+export function startSession(body: { source: string; model: string; goal: string; importId?: string }) {
   return postJson<{ id: string }>('/api/start', body)
 }
 
@@ -117,6 +117,28 @@ export function pickVolumeFile() {
 
 export function continueSession(id: string) {
   return postJson<{ state: string }>('/api/continue', { id })
+}
+
+export type VolumeImport = {
+  importId: string
+  source: string
+  volume: Record<string, unknown> & { dimensions?: number[] }
+  datUrl: string
+  rawUrl: string
+}
+
+export function importVolumeFile(path: string) {
+  return postJson<VolumeImport>('/api/volume/import', { path })
+}
+
+export function fetchVolumeImport(importId: string) {
+  return request<VolumeImport>(`/api/volume/import/${encodeURIComponent(importId)}`)
+}
+
+export function listVolumeImports() {
+  return request<{ imports: Array<{ importId: string; source: string; datUrl?: string; rawUrl?: string; dimensions?: unknown }> }>(
+    '/api/volume/imports',
+  )
 }
 
 /** Map a recorded renderer path onto the read-only artifact route. */

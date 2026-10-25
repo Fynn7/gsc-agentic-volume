@@ -15,6 +15,28 @@ CommandResultCode Raycaster::runGraphicsScript(const std::string& source) {
   return runScriptFromString(source);
 }
 
+void Raycaster::pushPreviewState() {
+  if (tfCallback) tfCallback(tfType == TFType::GAUSSIAN, tfStart, tfWidth);
+  if (tfType == TFType::CUSTOM && customTfCallback) customTfCallback(transferFunction.encodeForUrl());
+  if (transformCallback) transformCallback(genTransformString());
+  if (modeCallback) modeCallback(int(currentRenderModeIndex));
+  if (volumeCallback) volumeCallback(int(currentVolumeIndex));
+  if (levelCallback) levelCallback(int(volumes[currentVolumeIndex].getLevel()));
+  if (useOrthoCallback) useOrthoCallback(useOrtho);
+  if (samplingCallback) samplingCallback(double(oversampling));
+  if (virtualSamplesCallback) virtualSamplesCallback(int(subdiv));
+  if (constantSampleCountCallback) constantSampleCountCallback(constantSampleCount);
+  if (alphaCallback) alphaCallback(alphaThreshold);
+}
+
+void Raycaster::onScriptFinished(CommandResultCode result, int line) {
+  // A loaded script executes incrementally over frames; only now is the
+  // post-run state final. Push it so the web panel matches the renderer,
+  // then report the terminal result (finished vs error + line).
+  pushPreviewState();
+  if (scriptFinishedCallback) scriptFinishedCallback(static_cast<int>(result), line);
+}
+
 void Raycaster::resetState() {
   reset();
 }
@@ -154,6 +176,18 @@ void Raycaster::reset() {
   updateTitle();
   updateVolume();
   setUseNNFilter(useNNFilter);
+  // Keep the web panel consistent after a scripted reset: push the baseline
+  // state through the same callbacks used by gestures and GSC commands.
+  if (tfCallback) tfCallback(false, tfStart, tfWidth);
+  if (transformCallback) transformCallback(genTransformString());
+  if (modeCallback) modeCallback(int(currentRenderModeIndex));
+  if (volumeCallback) volumeCallback(int(currentVolumeIndex));
+  if (levelCallback) levelCallback(int(volumes[currentVolumeIndex].getLevel()));
+  if (useOrthoCallback) useOrthoCallback(useOrtho);
+  if (samplingCallback) samplingCallback(double(oversampling));
+  if (virtualSamplesCallback) virtualSamplesCallback(int(subdiv));
+  if (constantSampleCountCallback) constantSampleCountCallback(constantSampleCount);
+  if (alphaCallback) alphaCallback(alphaThreshold);
 }
 
 
@@ -332,15 +366,18 @@ CommandResultCode Raycaster::loadVolumePath(const std::string& datPath) {
 
 void Raycaster::setConstantSampleCount(bool value) {
   constantSampleCount = value;
+  if (constantSampleCountCallback) constantSampleCountCallback(constantSampleCount);
 }
 
 void Raycaster::setVirtualSamples(uint32_t index) {
   subdiv = index;
+  if (virtualSamplesCallback) virtualSamplesCallback(int(subdiv));
   updateTitle();
 }
 
 void Raycaster::setSampling(float value) {
   oversampling = value;
+  if (samplingCallback) samplingCallback(double(oversampling));
   updateTitle();
 
   // usage of voxelCount.x here assumes that
@@ -354,12 +391,14 @@ void Raycaster::setTFParams(bool gaussian, float start, float width) {
   tfStart = start;
   tfWidth = std::max(0.00001f,width);
   updateTransferFunction();
+  if (tfCallback) tfCallback(gaussian, tfStart, tfWidth);
 }
 
 void Raycaster::loadTFFile(const std::string& filename) {
   try {
     transferFunction.load(filename);
     tfType = TFType::CUSTOM;
+    if (customTfCallback) customTfCallback(transferFunction.encodeForUrl());
   } catch (...) {
     // if URL is invalid, don't change anything
   }
@@ -369,6 +408,7 @@ void Raycaster::setCustomTF(const std::string& encodedTF) {
   try {
     transferFunction.decodeFromURL(encodedTF);
     tfType = TFType::CUSTOM;
+    if (customTfCallback) customTfCallback(transferFunction.encodeForUrl());
   } catch (...) {
     // if URL is invalid, don't change anything
   }
@@ -384,6 +424,7 @@ void Raycaster::setTransformParams(const std::string& transformStr) {
   translation = Vec3::fromEncoding(translationStr);
 
   updateMatrices();
+  if (transformCallback) transformCallback(genTransformString());
 }
 
 bool Raycaster::setLevel(size_t level) {
@@ -675,7 +716,11 @@ void Raycaster::setCallbacks(std::function<void(double)> fpsCallback,
                              std::function<void(int)> modeCallback,
                              std::function<void(int)> volumeCallback,
                              std::function<void(int)> levelCallback,
-                             std::function<void(bool)> useOrthoCallback) {
+                             std::function<void(bool)> useOrthoCallback,
+                             std::function<void(double)> samplingCallback,
+                             std::function<void(int)> virtualSamplesCallback,
+                             std::function<void(bool)> constantSampleCountCallback,
+                             std::function<void(int, int)> scriptFinishedCallback) {
   GLApp::setCallbacks(fpsCallback, messageCallback);
   this->transformCallback = transformCallback;
   this->tfCallback = tfCallback;
@@ -685,6 +730,22 @@ void Raycaster::setCallbacks(std::function<void(double)> fpsCallback,
   this->volumeCallback = volumeCallback;
   this->levelCallback = levelCallback;
   this->useOrthoCallback = useOrthoCallback;
+  this->samplingCallback = samplingCallback;
+  this->virtualSamplesCallback = virtualSamplesCallback;
+  this->constantSampleCountCallback = constantSampleCountCallback;
+  this->scriptFinishedCallback = scriptFinishedCallback;
+}
+
+void Raycaster::mouseWheel(double x_offset, double y_offset, double xPosition, double yPosition) {
+  (void)x_offset; (void)xPosition; (void)yPosition;
+  if (y_offset == 0.0) return;
+  // Wheel zoom: dolly along view axis. Shift-free Up/Down use 0.1 steps;
+  // scale wheel notches the same way and clamp to the validated range.
+  translation.z += float(y_offset) * 0.1f;
+  if (translation.z > 2.0f) translation.z = 2.0f;
+  if (translation.z < -2.0f) translation.z = -2.0f;
+  updateMatrices();
+  if (transformCallback) transformCallback(genTransformString());
 }
 
 void Raycaster::drawTransferFunctionEditor() {

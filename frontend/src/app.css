@@ -35,3 +35,87 @@
   max-width: 100%;
   height: auto;
 }
+
+/* GSC Live Preview workbench: Chat 40% / Stage 60% in a core SplitPane. */
+.gav-topbar-trailing {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.gav-workbench {
+  min-height: 100%;
+  width: 100%;
+}
+
+.gav-workbench--narrow {
+  display: block;
+}
+
+.gav-chat-pane,
+.gav-stage-pane {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.gav-live {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.25rem 0.5rem 1rem;
+  min-width: 0;
+}
+
+.gav-live-missing {
+  border: 1px dashed var(--fynns-color-border-strong);
+  border-radius: 12px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.gav-canvas-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+@media (max-width: 70rem) {
+  .gav-canvas-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.gav-canvas-host {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.gav-wasm-frame {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  min-height: 320px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--fynns-color-app-bg);
+  display: block;
+}
+
+/*
+ * Custom TF curve editor: functional canvas styles only (size, pointer
+ * affordance). Colors resolve core tokens at draw time in TS.
+ */
+.gav-tf-canvas {
+  width: 100%;
+  height: 120px;
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none;
+}

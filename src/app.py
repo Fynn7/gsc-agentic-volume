@@ -19,6 +19,74 @@ RUNTIME.mkdir(exist_ok=True)
 FRONTEND = ROOT/'frontend'/'dist'
 
 
+def imports_root():
+    root = RUNTIME/'volume-imports'
+    root.mkdir(exist_ok=True)
+    return root
+
+
+VOLUME_IMPORTS = {}
+VOLUME_IMPORTS_LOCK = threading.Lock()
+
+
+def _import_artifact_url(path):
+    rel = Path(path).resolve().relative_to(RUNTIME.resolve()).as_posix()
+    return '/artifact/'+rel
+
+
+def create_volume_import(source):
+    import shutil
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError('Volume path required')
+    with VOLUME_IMPORTS_LOCK:
+        import_id = str(uuid.uuid4())
+        directory = imports_root()/import_id
+        directory.mkdir(parents=True, exist_ok=False)
+        try:
+            volume = prepare(source.strip(), directory/'volume')
+        except Exception:
+            try:
+                shutil.rmtree(directory, ignore_errors=True)
+            except Exception:
+                pass
+            raise
+        record = {'importId': import_id, 'source': str(Path(source).resolve()) if Path(source).exists() else source.strip(),
+                  'directory': str(directory), 'volume': volume,
+                  'datUrl': _import_artifact_url(Path(volume['rendererPath']).resolve()),
+                  'rawUrl': _import_artifact_url(Path(volume['rendererPath']).with_name('render.raw').resolve())}
+        (directory/'import.json').write_text(json.dumps(
+            {'importId': import_id, 'source': record['source'], 'volume': volume,
+             'datUrl': record['datUrl'], 'rawUrl': record['rawUrl']}, indent=2))
+        VOLUME_IMPORTS[import_id] = record
+        return record
+
+
+def get_volume_import(import_id):
+    if not isinstance(import_id, str) or not import_id.strip():
+        raise ValueError('importId required')
+    key = import_id.strip()
+    record = VOLUME_IMPORTS.get(key)
+    if record is not None:
+        return record
+    # Reload from disk (survives harness restart within same runtime dir).
+    candidate = imports_root()/key/'import.json'
+    if candidate.is_file():
+        try:
+            data = json.loads(candidate.read_text())
+            directory = imports_root()/key
+            volume_path = directory/'volume'/'volume.json'
+            volume = json.loads(volume_path.read_text()) if volume_path.is_file() else data.get('volume')
+            record = {'importId': key, 'source': data.get('source', ''),
+                      'directory': str(directory), 'volume': volume,
+                      'datUrl': data.get('datUrl') or _import_artifact_url(directory/'volume'/'render.dat'),
+                      'rawUrl': data.get('rawUrl') or _import_artifact_url(directory/'volume'/'render.raw')}
+            VOLUME_IMPORTS[key] = record
+            return record
+        except Exception as error:
+            raise ValueError(f'Volume import is unreadable: {error}')
+    raise ValueError('Unknown volume import')
+
+
 def pick_volume_file():
     """Open the OS-native file chooser on the harness machine and return the picked header path."""
     try:
@@ -180,6 +248,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {'service': 'gav-native-renderer', 'toolContractVersion': 1})
         if route == '/api/sessions':
             return self.send(200, [{'id': s.id, 'state': s.state} for s in sessions.values()])
+        if route == '/api/volume/imports':
+            items = []
+            try:
+                for child in sorted(imports_root().iterdir()):
+                    meta = child/'import.json'
+                    if meta.is_file():
+                        try:
+                            data = json.loads(meta.read_text())
+                            items.append({'importId': data.get('importId', child.name),
+                                          'source': data.get('source', ''),
+                                          'datUrl': data.get('datUrl'), 'rawUrl': data.get('rawUrl'),
+                                          'dimensions': (data.get('volume') or {}).get('dimensions')})
+                        except Exception:
+                            continue
+            except Exception:
+                items = []
+            return self.send(200, {'imports': items})
+        if route.startswith('/api/volume/import/'):
+            try:
+                record = get_volume_import(route.rsplit('/', 1)[-1])
+                return self.send(200, {'importId': record['importId'], 'source': record['source'],
+                                       'volume': record['volume'], 'datUrl': record['datUrl'], 'rawUrl': record['rawUrl']})
+            except Exception as error:
+                return self.send(404, {'error': str(error)})
         if route.startswith('/api/session/'):
             s = sessions.get(route.split('/')[-1])
             return self.send(200, json.loads((s.directory/'session.json').read_text())) if s else self.send(404, {'error': 'Unknown session'})
@@ -223,11 +315,35 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Another task owns the renderer')
                 if not isinstance(body.get('source'), str) or not isinstance(body.get('goal'), str) or not body['goal'].strip():
                     raise ValueError('Source and task required')
+                import_id = body.get('importId')
+                if import_id is not None and (not isinstance(import_id, str) or not import_id.strip()):
+                    raise ValueError('importId must be a non-empty string when provided')
                 s = Session(body['source'], body['goal'],
                             body.get('model', 'qwen3.5:9b'))
+                if import_id:
+                    # Reuse the preview import snapshot: copy the already-converted
+                    # render.dat/render.raw/volume.json into the session directory
+                    # so the agent run never reconverts and stays on identical bytes.
+                    import shutil
+                    record = get_volume_import(import_id.strip())
+                    s.source = record['source']
+                    src_volume = Path(record['directory'])/'volume'
+                    dst_volume = s.directory/'volume'
+                    if dst_volume.exists():
+                        shutil.rmtree(dst_volume)
+                    shutil.copytree(src_volume, dst_volume)
+                    # Guard against a snapshot that changed on disk after import.
+                    snapshot_volume = json.loads((dst_volume/'volume.json').read_text())
+                    s.volume = snapshot_volume
+                    s.event('volume_reused', importId=record['importId'], source=s.source)
                 sessions[s.id] = s
                 threading.Thread(target=s.run, daemon=True).start()
                 return self.send(202, {'id': s.id})
+            if route == '/api/volume/import':
+                source = body.get('path', body.get('source', ''))
+                record = create_volume_import(source)
+                return self.send(200, {'importId': record['importId'], 'source': record['source'],
+                                       'volume': record['volume'], 'datUrl': record['datUrl'], 'rawUrl': record['rawUrl']})
             if route == '/api/browse-file':
                 picked = pick_volume_file()
                 return self.send(200, {'cancelled': picked is None} if picked is None else {'cancelled': False, 'path': picked})

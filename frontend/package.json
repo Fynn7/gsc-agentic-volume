@@ -10,6 +10,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
+    "wasm:build": "node scripts/build-wasm.mjs",
+    "wasm:sync": "node scripts/build-wasm.mjs",
     "fynns-ui:sync": "node scripts/fynns-ui-bootstrap.mjs",
     "fynns-ui:prepare": "node scripts/fynns-ui-bootstrap.mjs --prepare",
     "fynns-ui:check-exports": "node node_modules/@fynn7/ui-design-core/scripts/check-ui-exports.mjs --target .",

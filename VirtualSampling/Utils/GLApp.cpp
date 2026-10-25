@@ -245,9 +245,11 @@ void GLApp::processScript() {
     } else if (result == CommandResultCode::waitingNoop) {
     } else if (result == CommandResultCode::finished) {
       scriptRunning = false;
+      onScriptFinished(result, -1);
     } else {
       std::cerr << "Scripting Error: " << result << " in line " << interpreter.getLastInstructionIndex()+1 << "\n";
       scriptRunning = false;
+      onScriptFinished(result, interpreter.getLastInstructionIndex()+1);
     }
   }
 }
@@ -1298,10 +1300,20 @@ bool GLApp::mouseButtonDownCallback(int eventType, const EmscriptenMouseEvent *m
 
 bool GLApp::scrollCallback(int eventType, const EmscriptenWheelEvent *wheelEvent, void *userData) {
   GLApp* glApp = static_cast<GLApp*>(userData);
-  if (!glApp) return EM_FALSE;
+  if (!glApp || !wheelEvent) return EM_FALSE;
 
-  // TODO
-
+  // Normalize wheel deltas: GLFW y_offset is +1 per wheel notch up.
+  // Emscripten deltaY is in pixels/lines/pages (deltaMode 0/1/2); scale to notches.
+  double rawY = -wheelEvent->deltaY;
+  int mode = wheelEvent->deltaMode;
+  double scale = 1.0 / 100.0;
+  if (mode == 1) scale = 1.0 / 3.0;
+  else if (mode == 2) scale = 1.0;
+  double yOffset = rawY * scale;
+  if (yOffset > 4.0) yOffset = 4.0;
+  if (yOffset < -4.0) yOffset = -4.0;
+  double xOffset = 0.0;
+  glApp->mouseWheel(xOffset, yOffset, glApp->xMousePos, glApp->yMousePos);
   return EM_TRUE;
 }
 #else

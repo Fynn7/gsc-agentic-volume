@@ -192,6 +192,30 @@ std::shared_ptr<Raycaster> raycaster = nullptr;
       }
     });
 
+    EM_JS(void, jsSetSampling, (double rate), {
+      if (typeof window.setWasmSampling === "function") {
+        window.setWasmSampling(rate);
+      }
+    });
+
+    EM_JS(void, jsSetVirtualSamples, (int count), {
+      if (typeof window.setWasmVirtualSamples === "function") {
+        window.setWasmVirtualSamples(count);
+      }
+    });
+
+    EM_JS(void, jsSetConstant, (bool enabled), {
+      if (typeof window.setWasmConstant === "function") {
+        window.setWasmConstant(enabled);
+      }
+    });
+
+    EM_JS(void, jsScriptFinished, (int code, int line), {
+      if (typeof window.onWasmScriptFinished === "function") {
+        window.onWasmScriptFinished(code, line);
+      }
+    });
+
     static double lastfps = -1;
     static void forwardFpsToJs(double fps) {
       if (fps != lastfps) {
@@ -235,6 +259,22 @@ std::shared_ptr<Raycaster> raycaster = nullptr;
     static void forwardUseOrthoToJs(bool useOrtho) {
       jsUseOrtho(useOrtho);
     }
+
+    static void forwardSamplingToJs(double rate) {
+      jsSetSampling(rate);
+    }
+
+    static void forwardVirtualToJs(int count) {
+      jsSetVirtualSamples(count);
+    }
+
+    static void forwardConstantToJs(bool enabled) {
+      jsSetConstant(enabled);
+    }
+
+    static void forwardScriptFinishedToJs(int code, int line) {
+      jsScriptFinished(code, line);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -244,7 +284,9 @@ int main(int argc, char** argv) {
                             forwardTransformToJs, forwardTFToJs,
                             forwardCustomTFToJs, forwardAlphaThreshold,
                             forwardModeToJs, forwardVolumeToJs,
-                            forwardLevelToJs, forwardUseOrthoToJs);
+                            forwardLevelToJs, forwardUseOrthoToJs,
+                            forwardSamplingToJs, forwardVirtualToJs,
+                            forwardConstantToJs, forwardScriptFinishedToJs);
     raycaster->run();
   }
   catch (const GLException& e) {

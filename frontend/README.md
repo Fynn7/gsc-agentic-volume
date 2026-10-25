@@ -9,6 +9,7 @@ React 19 + TypeScript + Vite UI for the local harness in the parent repo. It con
 - `npm run lint` — oxlint.
 - `npm run fynns-ui:check-exports` — standalone ui-export gate against this app.
 - `npm run fynns-ui:check-update` — advisory core-version check.
+- `npm run wasm:build` — one-shot Wasm engine build from `VirtualSampling/Raycaster` (`make emscripten_release`) synced to ignored `public/wasm/` (`sampling.js/.wasm/.data`; `preview-shell.html` bridge is committed). Never runs on `dev`/`build`; the stage shows a build prompt when assets are missing. `em++` is auto-activated from `%USERPROFILE%/emsdk` when not on `PATH`; use `npm run wasm:sync -- --sync-only` to copy an existing `web/` without rebuilding.
 
 The `pre*` and `postinstall` hooks run `scripts/fynns-ui-bootstrap.mjs`, which syncs/prepares the linked core. When the sibling core checkout must stay read-only, run npm with `FYNNS_UI_SKIP_SIBLING_SYNC=1` (PowerShell: `$env:FYNNS_UI_SKIP_SIBLING_SYNC='1'`).
 

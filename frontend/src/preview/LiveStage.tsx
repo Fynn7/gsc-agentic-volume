@@ -13,11 +13,15 @@ import {
   FieldBlock,
   FieldHint,
   FieldStack,
+  IconButton,
+  InfoIcon,
   Slider,
   Textarea,
+  Tooltip,
   snackbar,
 } from '@fynns/ui'
 import { importVolumeFile, pickVolumeFile, type VolumeImport } from '../api'
+import { GscReferenceDialog } from './gscReference'
 import { BUILTIN_DATASETS, datasetLabel } from './datasets'
 import { RENDER_METHODS, SAMPLING_RATE_EXPS, formatSamplingRate, isVirtualMethod } from './methods'
 import { CustomTfEditor } from './CustomTfEditor'
@@ -67,6 +71,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const [runResult, setRunResult] = useState<string>('Standby')
   const [importing, setImporting] = useState(false)
   const [externalIndex, setExternalIndex] = useState<number | null>(null)
+  const [referenceOpen, setReferenceOpen] = useState(false)
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const hostRef = useRef<WasmHost | null>(null)
@@ -580,11 +585,27 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         />
       </Card>
 
-      <Card title={`GSC script — Run only (${RUN_SHORTCUT_HINT})`}>
+      <Card
+        title="GSC Code Editor"
+        actions={
+          <Tooltip content="GSC language reference">
+            <IconButton
+              variant="ghost"
+              size="sm"
+              aria-label="Open GSC language reference"
+              onClick={() => setReferenceOpen(true)}
+            >
+              <InfoIcon aria-hidden />
+            </IconButton>
+          </Tooltip>
+        }
+      >
         <div className="fynns-control-cluster fynns-control-cluster--start-align">
-          <Button variant="primary" size="sm" disabled={!wasmReady || runBusy} onClick={() => void handleRun()}>
-            {runBusy ? 'Running…' : 'Run'}
-          </Button>
+          <Tooltip content={`Run the script (${RUN_SHORTCUT_HINT})`}>
+            <Button variant="primary" size="sm" disabled={!wasmReady || runBusy} onClick={() => void handleRun()}>
+              {runBusy ? 'Running…' : 'Run'}
+            </Button>
+          </Tooltip>
           <Button variant="ghost" size="sm" onClick={handleSyncParams}>
             Sync params to script
           </Button>
@@ -603,6 +624,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           then reads panel state back from Wasm. Sync only rewrites the marked generated zone.
         </FieldHint>
       </Card>
+      <GscReferenceDialog open={referenceOpen} onOpenChange={setReferenceOpen} />
     </div>
   )
 }

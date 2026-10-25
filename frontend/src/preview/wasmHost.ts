@@ -14,6 +14,7 @@ export type WasmHost = {
   restoreDataset: (index: number) => void
   loadExternalVolume: (datUrl: string, rawUrl: string) => Promise<number>
   setCustomTf: (encoding: string) => void
+  captureScreenshot: () => Promise<Blob>
   dispose: () => void
 }
 
@@ -95,6 +96,8 @@ export function createWasmHost(
 
         const pendingRuns = new Map<number, { resolve: (code: number) => void; reject: (e: Error) => void; timer: number }>()
         let runSeq = 0
+        const pendingShots = new Map<number, { resolve: (blob: Blob) => void; reject: (e: Error) => void; timer: number }>()
+        let shotSeq = 0
 
         const cleanup = () => {
           window.clearTimeout(timeout)
@@ -105,6 +108,11 @@ export function createWasmHost(
             pending.reject(new Error('Preview host disposed'))
           }
           pendingRuns.clear()
+          for (const [, pending] of pendingShots) {
+            window.clearTimeout(pending.timer)
+            pending.reject(new Error('Preview host disposed'))
+          }
+          pendingShots.clear()
         }
 
         const onMessageHandler = (event: MessageEvent) => {
@@ -187,6 +195,16 @@ export function createWasmHost(
                 })
               },
               setCustomTf: (encoding: string) => postToIframe(iframe, { type: 'setCustomTf', encoding }),
+              captureScreenshot: () =>
+                new Promise<Blob>((res, rej) => {
+                  const id = ++shotSeq
+                  const timer = window.setTimeout(() => {
+                    pendingShots.delete(id)
+                    rej(new Error('Screenshot timed out'))
+                  }, 15000)
+                  pendingShots.set(id, { resolve: res, reject: rej, timer })
+                  postToIframe(iframe, { type: 'captureScreenshot', id })
+                }),
               dispose: () => {
                 cleanup()
               },
@@ -219,6 +237,27 @@ export function createWasmHost(
           // Granular state readback from C++ callbacks.
           if (type === 'wasmState' && data['patch'] && typeof data['patch'] === 'object') {
             onState?.(data['patch'] as WasmStatePatch)
+            return
+          }
+          if (type === 'screenshotResult') {
+            const id = typeof data['id'] === 'number' ? (data['id'] as number) : 0
+            const pending = id ? pendingShots.get(id) : undefined
+            if (id != null && pending) {
+              pendingShots.delete(id)
+              window.clearTimeout(pending.timer)
+              if (typeof data['error'] === 'string' && (data['error'] as string)) {
+                pending.reject(new Error(data['error'] as string))
+              } else if (data['bytes'] instanceof ArrayBuffer) {
+                const mime = typeof data['mime'] === 'string' ? (data['mime'] as string) : 'image/png'
+                pending.resolve(new Blob([data['bytes'] as ArrayBuffer], { type: mime }))
+              } else if (typeof data['dataUrl'] === 'string') {
+                fetch(data['dataUrl'] as string)
+                  .then((r) => r.blob())
+                  .then(pending.resolve, pending.reject)
+              } else {
+                pending.reject(new Error('Screenshot produced no image'))
+              }
+            }
             return
           }
         }

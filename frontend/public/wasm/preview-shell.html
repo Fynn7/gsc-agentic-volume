@@ -246,6 +246,51 @@ window.addEventListener('message', (event) => {
     pendingExternal.set(data.id, entry);
     tryFinishExternal(data.id);
   }
+  if (data.type === 'captureScreenshot' && (typeof data.id === 'number' || typeof data.id === 'string')) {
+    const shotId = data.id;
+    try {
+      const done = (blob) => {
+        if (!blob) {
+          parent.postMessage({ type: 'screenshotResult', id: shotId, error: 'Capture produced no image' }, '*');
+          return;
+        }
+        blob.arrayBuffer().then(
+          (buf) => {
+            parent.postMessage(
+              { type: 'screenshotResult', id: shotId, mime: blob.type || 'image/png', bytes: buf },
+              '*',
+              [buf],
+            );
+          },
+          (err) => {
+            parent.postMessage(
+              { type: 'screenshotResult', id: shotId, error: err instanceof Error ? err.message : String(err) },
+              '*',
+            );
+          },
+        );
+      };
+      if (typeof canvasEl.toBlob === 'function') {
+        canvasEl.toBlob(done, 'image/png');
+      } else {
+        // Fallback for very old browsers: synchronous data URL.
+        try {
+          const url = canvasEl.toDataURL('image/png');
+          parent.postMessage({ type: 'screenshotResult', id: shotId, mime: 'image/png', dataUrl: url }, '*');
+        } catch (err) {
+          parent.postMessage(
+            { type: 'screenshotResult', id: shotId, error: err instanceof Error ? err.message : String(err) },
+            '*',
+          );
+        }
+      }
+    } catch (err) {
+      parent.postMessage(
+        { type: 'screenshotResult', id: shotId, error: err instanceof Error ? err.message : String(err) },
+        '*',
+      );
+    }
+  }
 });
 </script>
 <script async src="sampling.js"></script>

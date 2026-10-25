@@ -48,14 +48,30 @@
   width: 100%;
 }
 
+/*
+ * Fill host for the core FillColumn → Chat chain (chat.css / content.css):
+ * Chat is height:100% with the composer docked at the column bottom, so
+ * every .gav-* wrapper between the destination canvas and FillColumn must
+ * resolve a full height. Wide mode caps at the canvas (SplitPane panes own
+ * their scroll); narrow chat grows the same way while the long stage page
+ * keeps content height and scrolls with the canvas.
+ */
+.gav-workbench:not(.gav-workbench--narrow) {
+  height: 100%;
+}
+
 .gav-workbench--narrow {
-  display: block;
+  display: flex;
+  flex-direction: column;
 }
 
 .gav-chat-pane,
 .gav-stage-pane {
   min-width: 0;
+  min-height: 0;
   width: 100%;
+  height: 100%;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;

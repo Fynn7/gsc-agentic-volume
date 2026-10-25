@@ -9,6 +9,7 @@ import {
   ControlRow,
   DropdownMenu,
   DropdownMenuItem,
+  DownloadIcon,
   EmptyState,
   FieldBlock,
   FieldHint,
@@ -70,6 +71,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const [runBusy, setRunBusy] = useState(false)
   const [runResult, setRunResult] = useState<string>('Standby')
   const [importing, setImporting] = useState(false)
+  const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [externalIndex, setExternalIndex] = useState<number | null>(null)
   const [referenceOpen, setReferenceOpen] = useState(false)
 
@@ -365,6 +367,49 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     snackbar('Preview params written to the generated zone.', { severity: 'info', duration: 'long', dismissible: true })
   }, [])
 
+  const handleSnapshot = useCallback(async () => {
+    const host = hostRef.current
+    if (!host || !wasmReady) {
+      snackbar('Preview engine is not ready yet.', { severity: 'info', duration: 'long', dismissible: true })
+      return
+    }
+    setSnapshotBusy(true)
+    try {
+      const blob = await host.captureScreenshot()
+      const current = paramsRef.current
+      const stamp = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const name =
+        `gsc-preview-d${current.dataset}-m${current.method}-` +
+        `${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-` +
+        `${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.png`
+      const url = URL.createObjectURL(blob)
+      try {
+        const a = document.createElement('a')
+        a.href = url
+        a.download = name
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(url), 4000)
+      }
+      snackbar(`Snapshot saved to your downloads as ${name}.`, {
+        severity: 'info',
+        duration: 'long',
+        dismissible: true,
+      })
+    } catch (err) {
+      snackbar(`Snapshot failed: ${err instanceof Error ? err.message : String(err)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    } finally {
+      setSnapshotBusy(false)
+    }
+  }, [wasmReady])
+
   const handleGscKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -403,10 +448,19 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         <div className="gav-canvas-row">
           <div className="gav-canvas-host">
             <iframe ref={iframeRef} title="Raycaster live preview" className="gav-wasm-frame" src="about:blank" />
-            <FieldHint>
-              Left-drag rotates (Arcball) · Right-drag adjusts TF start/width · Wheel zooms. Values write back on
-              release.
-            </FieldHint>
+            <div className="fynns-control-cluster fynns-control-cluster--end-align">
+              <Tooltip content="Download current preview as PNG">
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Download current preview as PNG"
+                  disabled={!wasmReady || snapshotBusy}
+                  onClick={() => void handleSnapshot()}
+                >
+                  <DownloadIcon aria-hidden />
+                </IconButton>
+              </Tooltip>
+            </div>
           </div>
 
           <Card title="Rendering parameters">

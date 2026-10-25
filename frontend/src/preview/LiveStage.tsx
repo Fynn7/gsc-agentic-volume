@@ -5,6 +5,7 @@ import {
   Checkbox,
   CheckIcon,
   CodeBlock,
+  Collapsible,
   ControlBlock,
   ControlRow,
   DropdownMenu,
@@ -12,17 +13,20 @@ import {
   DownloadIcon,
   EmptyState,
   FieldBlock,
-  FieldHint,
   FieldStack,
   IconButton,
   InfoIcon,
   Slider,
-  Textarea,
+  Surface,
   Tooltip,
   snackbar,
 } from '@fynns/ui'
+import { Code, Rocket } from 'lucide-react'
 import { importVolumeFile, pickVolumeFile, type VolumeImport } from '../api'
 import { GscReferenceDialog } from './gscReference'
+import { GscEditor } from './GscEditor'
+import { GSC_LANGUAGE } from './gscHighlight'
+import { formatValidationSummary, validateGscSource, type GscValidationIssue } from './gscValidate'
 import { BUILTIN_DATASETS, datasetLabel } from './datasets'
 import { RENDER_METHODS, SAMPLING_RATE_EXPS, formatSamplingRate, isVirtualMethod } from './methods'
 import { CustomTfEditor } from './CustomTfEditor'
@@ -43,8 +47,6 @@ type LiveStageProps = {
   onPreviewImport: (value: VolumeImport | null) => void
   onSourceChange: (path: string) => void
 }
-
-const RUN_SHORTCUT_HINT = 'Ctrl/Cmd+Enter'
 
 /** Window event fired by the top bar to download .gsc + preview PNG. */
 export const STAGE_EXPORT_EVENT = 'gav:export-stage'
@@ -77,6 +79,15 @@ function clampInt(v: number, lo: number, hi: number, fallback: number): number {
   return Math.min(hi, Math.max(lo, Math.round(v)))
 }
 
+/** Default scratch diagnostic while editor / Wasm / run settle (mirrors gsc-live-preview). */
+function formatStartupDiagnostic(ready: boolean, wasm: boolean, busy: boolean): string {
+  if (!ready && !wasm) return 'Preparing workspace…'
+  if (!ready) return 'Loading editor…'
+  if (!wasm) return 'Loading Raycaster…'
+  if (busy) return 'Rendering preview…'
+  return 'Standby'
+}
+
 export function LiveStage({ source, previewImport, onPreviewImport, onSourceChange }: LiveStageProps) {
   const [params, setParams] = useState<PreviewParams>(() => {
     const stored = readStoredParams()
@@ -92,10 +103,14 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     return stored
   })
   const [gscText, setGscText] = useState<string>(() => readStoredDraft())
+  const [editorReady, setEditorReady] = useState(false)
   const [wasmReady, setWasmReady] = useState(false)
   const [wasmMissing, setWasmMissing] = useState(false)
   const [runBusy, setRunBusy] = useState(false)
-  const [runResult, setRunResult] = useState<string>('Standby')
+  const [diagnostics, setDiagnostics] = useState<{ message: string; isError: boolean }>({
+    message: 'Standby',
+    isError: false,
+  })
   const [importing, setImporting] = useState(false)
   const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [externalIndex, setExternalIndex] = useState<number | null>(null)
@@ -106,9 +121,37 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const paramsRef = useRef(params)
   const gscRef = useRef(gscText)
   const previewImportRef = useRef(previewImport)
+  const runBusyRef = useRef(runBusy)
+  const editorIssuesRef = useRef<GscValidationIssue[]>([])
   paramsRef.current = params
   gscRef.current = gscText
   previewImportRef.current = previewImport
+  runBusyRef.current = runBusy
+
+  const handleEditorReady = useCallback((ready: boolean) => {
+    setEditorReady(ready)
+  }, [])
+
+  const handleEditorValidation = useCallback(
+    (issues: GscValidationIssue[]) => {
+      editorIssuesRef.current = issues
+      if (issues.length > 0) {
+        setDiagnostics({ message: formatValidationSummary(issues), isError: true })
+        return
+      }
+      // Validation cleared: keep an in-flight run's status, else fall back to
+      // the startup copy (Standby once editor + Wasm are both ready).
+      if (runBusyRef.current) return
+      setDiagnostics({ message: formatStartupDiagnostic(editorReady, wasmReady, false), isError: false })
+    },
+    [editorReady, wasmReady],
+  )
+
+  // Surface boot copy (Preparing / Loading … / Standby) while editor + Wasm settle.
+  useEffect(() => {
+    if (editorIssuesRef.current.length > 0 || runBusyRef.current) return
+    setDiagnostics({ message: formatStartupDiagnostic(editorReady, wasmReady, false), isError: false })
+  }, [editorReady, wasmReady])
 
   // Autosave editor + params.
   useEffect(() => {
@@ -393,11 +436,20 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       return
     }
     if (runBusy) return
+    // Flush any pending debounced sync so Run executes the settled GUI state,
+    // then validate the exact script (a script error never reaches Wasm).
+    flushGscSync()
+    const script = syncParamsToScript(gscRef.current, paramsRef.current)
+    if (script !== gscRef.current) setGscText(script)
+    const issues = validateGscSource(script, GSC_LANGUAGE)
+    editorIssuesRef.current = issues
+    if (issues.length > 0) {
+      setDiagnostics({ message: formatValidationSummary(issues), isError: true })
+      return
+    }
     setRunBusy(true)
-    setRunResult('Rendering preview…')
+    setDiagnostics({ message: 'Rendering preview…', isError: false })
     try {
-      // Flush any pending debounced sync so Run executes the settled GUI state.
-      flushGscSync()
       // Reset semantics: reset the renderer, restore the current dataset,
       // then execute the script. State after the run is read back via callbacks.
       host.reset()
@@ -406,20 +458,23 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       // Restore dataset only; the script owns every other knob.
       host.restoreDataset(current.dataset)
       await new Promise((r) => setTimeout(r, 60))
-      const script = syncParamsToScript(gscRef.current, paramsRef.current)
-      if (script !== gscRef.current) setGscText(script)
       const code = await host.runScript(script)
       if (code === 0) {
-        setRunResult('Ran — panel reflects Wasm state')
+        setDiagnostics({ message: 'Ran — panel reflects Wasm state', isError: false })
       } else {
-        setRunResult(`Load failed: code ${code}`)
+        setDiagnostics({ message: `Load failed: code ${code}`, isError: true })
       }
     } catch (err) {
-      setRunResult(`Run failed: ${err instanceof Error ? err.message : String(err)}`)
+      setDiagnostics({
+        message: `Run failed: ${err instanceof Error ? err.message : String(err)}`,
+        isError: true,
+      })
     } finally {
       setRunBusy(false)
     }
   }, [runBusy, wasmReady, flushGscSync])
+
+  const canRun = editorReady && wasmReady && !runBusy
 
   const handleSnapshot = useCallback(async () => {
     const host = hostRef.current
@@ -494,16 +549,6 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     window.addEventListener(STAGE_EXPORT_EVENT, onExport)
     return () => window.removeEventListener(STAGE_EXPORT_EVENT, onExport)
   }, [])
-
-  const handleGscKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        e.preventDefault()
-        void handleRun()
-      }
-    },
-    [handleRun],
-  )
 
   const externalLabel = previewImport ? `External — ${previewImport.source.split(/[\\/]/).pop()}` : 'External volume (import…)'
   const currentDataset = params.dataset
@@ -724,43 +769,61 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         />
       </Card>
 
-      <Card
-        title="GSC Code Editor"
+      <Collapsible
+        title="GSC"
+        chrome="plain"
+        icon={<Code aria-hidden size={16} />}
+        defaultOpen
         actions={
-          <Tooltip content="GSC language reference">
-            <IconButton
-              variant="ghost"
-              size="sm"
-              aria-label="Open GSC language reference"
-              onClick={() => setReferenceOpen(true)}
-            >
-              <InfoIcon aria-hidden />
-            </IconButton>
-          </Tooltip>
+          <>
+            <Tooltip content="Run the current script (Ctrl+Enter)">
+              <IconButton
+                aria-label="Run"
+                disabled={!canRun}
+                onClick={() => void handleRun()}
+              >
+                <Rocket aria-hidden size={16} strokeWidth={2} />
+              </IconButton>
+            </Tooltip>
+            <Tooltip content="GSC language reference">
+              <IconButton
+                variant="ghost"
+                size="sm"
+                aria-label="Open GSC language reference"
+                onClick={() => setReferenceOpen(true)}
+              >
+                <InfoIcon aria-hidden />
+              </IconButton>
+            </Tooltip>
+          </>
         }
       >
-        <div className="fynns-control-cluster fynns-control-cluster--start-align">
-          <Tooltip content={`Run the script (${RUN_SHORTCUT_HINT})`}>
-            <Button variant="primary" size="sm" disabled={!wasmReady || runBusy} onClick={() => void handleRun()}>
-              {runBusy ? 'Running…' : 'Run'}
-            </Button>
-          </Tooltip>
+        <div className="gsc-pane-card-body gsc-gsc-body">
+          <div className="gsc-script-pane">
+            <GscEditor
+              value={gscText}
+              onChange={setGscText}
+              onReady={handleEditorReady}
+              onRunShortcut={() => void handleRun()}
+              onValidationChange={handleEditorValidation}
+            />
+          </div>
+          <Surface variant="outlined" padded className="gsc-diagnostics-well">
+            <p
+              className={[
+                'gsc-diagnostics',
+                'fynns-scroll',
+                diagnostics.isError ? 'gsc-diagnostics--error' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              role={diagnostics.isError ? 'alert' : 'status'}
+            >
+              {diagnostics.message || 'Standby'}
+            </p>
+          </Surface>
         </div>
-        <FieldHint>{runResult}</FieldHint>
-        <Textarea
-          autoGrow={false}
-          rows={14}
-          aria-label="GSC script"
-          value={gscText}
-          onChange={(e) => setGscText(e.target.value)}
-          onKeyDown={handleGscKeyDown}
-        />
-        <FieldHint>
-          Draft + params autosave locally. The generated zone rewrites once a GUI operation settles (no per-tick
-          churn while dragging); Run resets the renderer, restores the current dataset, executes the script, then
-          reads panel state back from Wasm.
-        </FieldHint>
-      </Card>
+      </Collapsible>
       <GscReferenceDialog open={referenceOpen} onOpenChange={setReferenceOpen} />
     </div>
   )

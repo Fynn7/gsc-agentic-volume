@@ -124,6 +124,75 @@
   display: block;
 }
 
+/* Script editor + diagnostics Surface (unit stack, no DIY divider). */
+.gsc-pane-card-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.gsc-gsc-body {
+  gap: var(--fynns-layout-unit-stack-gap);
+}
+
+.gsc-script-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.gsc-diagnostics-well {
+  flex: 0 0 auto;
+  max-height: 6rem;
+  overflow: auto;
+}
+
+.gsc-diagnostics {
+  margin: 0;
+  color: var(--fynns-color-text-muted);
+  font-family: var(--fynns-font-mono);
+  font-size: var(--fynns-font-size-caption);
+  line-height: var(--fynns-line-height-body);
+  white-space: pre-wrap;
+}
+
+.gsc-diagnostics--error {
+  color: var(--fynns-color-danger);
+}
+
+.gsc-editor-host {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Keep-set editable CodeBlock fills the pane; layout via host + element hooks. */
+.gsc-editor-code {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Head (copy) stays compact; editor stack fills the rest. */
+.gsc-editor-host .gsc-editor-code > *:last-child {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
 /*
  * Custom TF curve editor: functional canvas styles only (size, pointer
  * affordance). Colors resolve core tokens at draw time in TS.

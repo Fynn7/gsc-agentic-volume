@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@fynn7/ui-design-core": "file:../../fynns_ui_design_core",
+    "lucide-react": "^1.61.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

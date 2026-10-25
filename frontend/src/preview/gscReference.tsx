@@ -1,7 +1,7 @@
 import { ClipboardIcon, CodeBlock, Dialog, FieldBlock, IconButton, Tooltip, snackbar } from '@fynns/ui'
 
 /**
- * GSC language reference shown from the `GSC Code Editor` header.
+ * GSC language reference shown from the `GSC` header.
  *
  * Content is extracted from the GSC Live Preview system prompt
  * (`llmPrompt.ts` + `gscCommandSignatures.ts`: output contract, command

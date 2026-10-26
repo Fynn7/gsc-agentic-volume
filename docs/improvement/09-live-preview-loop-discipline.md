@@ -115,7 +115,7 @@ GUI 拖滑块 → Wasm 预览、`.gsc` 文本、localStorage 三条链路互相�
   set_iso_value→TF start/width；set_clipping（归一化 min/max）→setclipbounds
   （体素先乘维度）；wait_until_rendered→Run+读回；capture_screenshot→导出 PNG；
   settings JSON→GSC 文本本身即设置记录。对方失败尝试如实记日志、
-  数据集不行就换（WholeBody→MelEXAMPLE）、交付物固定 PNG+参数三点直接照搬。
-- 实验室机器：2×NVIDIA RTX PRO 5000 48GB（驱动 596.(array)1CUDA 13.2取数时
+  数据集不行就换（WholeBody→Melanix）、交付物固定 PNG+参数三点直接照搬。
+- 实验室机器：2×NVIDIA RTX PRO 5000 48GB（驱动 596.59，CUDA 13.2，取数时
   均空闲）+ ASPEED BMC 亮机卡无外网/SSH。本轮所有帧率数字都是 SwiftShader
   软件栈下测的最终性能验证应在实验室 headed Chrome（走独显）下重跑。

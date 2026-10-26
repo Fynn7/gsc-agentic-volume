@@ -31,4 +31,14 @@ VirtualSampling/Raycaster/VS/*.lz4
 /.playwright-mcp/
 /gav-*.png
 
+# Frontend build artifacts & deps (all regenerable: npm install / npm run build / npm run wasm:build).
+# Kept out of git so switching branches never shows a dirty tree.
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
+frontend/public/wasm/sampling.js
+frontend/public/wasm/sampling.wasm
+frontend/public/wasm/sampling.data
+frontend/public/wasm/upstream-index.html
+
 repomix-output.xml

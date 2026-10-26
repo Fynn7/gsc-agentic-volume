@@ -62,3 +62,38 @@ GUI 拖滑块 → Wasm 预览、`.gsc` 文本、localStorage 三条链路互相�
   headed 外部体 45 秒人味拖拽：104 采样 0 回跳。
 - headless 通过 ≠ headed 通过（GPU/负载差异）；context kill/restore 全链路
   用 `WEBGL_lose_context` 强制走一遍，看画布是真回来还是假恢复。
+
+## 后续：脚本执行与回读（2026-10-26 追加）
+
+> 用户手写脚本 `settfparams true 0.28 0.04` + `setclipbounds 0.25 …` 后按 Run，
+> 画布全蓝、面板维持旧值、诊断显示 Standby——三处各自独立的原因：
+
+1. **黑屏主因是脚本语义不是引擎 bug**：`setclipbounds` 取**体素坐标**
+   （`resetclipbounds` 传的就是 `0,voxelCount…`），`0.25 0.75 …` 是合法但只有
+   0.5 体素宽的切盒，渲染出来就是一个看不见的点。同样体数据改用
+   `61.5 184.5 61.5 184.5 44.2 176.8` 后教堂结构正常显示。【实测】
+   教训：凡是“看起来引擎坏了先查单位约定”，GSC 参考里已补体素单位说明。
+2. **面板不同步是父子乒乓**：脚本批量逐帧执行，C++ 回声到达时父级已推送了
+   更新的快照，旧回声把新值洗回去来回打架，UI 表现为抖动/面板不跟。
+   修法：回声取消器——回声键若匹配最近 8 次推送中的任一快照就地丢弃
+   （`wasRecentlySent`，UI 输入永远走另一条路不受影响）。【实测：交替推送消失】
+3. **诊断被 settle 回写踩回 Standby**：Run 完成后 500ms 内的回声触发 settle
+   重写编辑器 → 校验通过 → 逻辑回落到启动文案。修法：`completedRunRef`
+   守住已完成的 Run 结果只进不出。【实测：诊断稳定在 Ran】
+4. **生成区不再写 transform**：位姿没有 GUI 旋钮，面板值只是只读回读；
+   把它写进执行区会用过期位姿覆盖手写 `resetrotation/addrotation*`
+   （之前时好时坏取决于启动回声竞态）。位姿归脚本所有。【实测：旋转脚本稳定生效】
+
+## 后续2：setLevel 旁路上传（2026-10-26 追加）
+
+> setVolume 加守卫后重测：Christmas 512³ + 2880px 风暴依然卡（13.9s/61 长任务）。
+> 原因是 `Raycaster::setLevel()` 无条件调 `updateVolume()` 做全量纹理重传，
+> 而 shell 每个 `applyControls` 都带 level（恒为 0）——守卫被旁路了，
+> 每 tick 照样重传 13MB。修法同 setMethod/setVolume：在 C++ 侧 level 相等直接返回。
+
+- 验证（headed 真机 + 外部体 + 用户参数，45 秒人味拖拽）：
+  主线程从 ~1fps 恢复到锁定 60fps（2701 帧/45s，max 17ms，0 长任务），
+  104 采样 0 回跳，松手后 15s 静默；风暴测试 13.9s→4.1s，61 长任务→0。
+- 教训：**守卫必须盖住所有触发重传的入口**，只修 setVolume 不够；
+  凡是“每 tick 都带下来的字段”（dataset/method/level/rate…），
+  对应 C++ setter 必须全部是等值 no-op。以后加新字段先查这一条。

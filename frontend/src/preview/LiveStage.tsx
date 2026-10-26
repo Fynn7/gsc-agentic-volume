@@ -131,6 +131,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const gscRef = useRef(gscText)
   const previewImportRef = useRef(previewImport)
   const runBusyRef = useRef(runBusy)
+  const completedRunRef = useRef(false)
   const editorIssuesRef = useRef<GscValidationIssue[]>([])
   paramsRef.current = params
   gscRef.current = gscText
@@ -148,9 +149,11 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         setDiagnostics({ message: formatValidationSummary(issues), isError: true })
         return
       }
-      // Validation cleared: keep an in-flight run's status, else fall back to
-      // the startup copy (Standby once editor + Wasm are both ready).
-      if (runBusyRef.current) return
+      // Validation cleared: keep an in-flight run's status, keep a completed
+      // run's result, else fall back to the startup copy (Standby once editor
+      // + Wasm are both ready). Without the completed-run guard, the settle
+      // rewrite after a run would demote "Ran …" back to "Standby".
+      if (runBusyRef.current || completedRunRef.current) return
       setDiagnostics({ message: formatStartupDiagnostic(editorReady, wasmReady, false), isError: false })
     },
     [editorReady, wasmReady],
@@ -172,11 +175,38 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   // tick-by-tick while dragging. Updaters stay pure; the push lives in this
   // effect so StrictMode double-invoked updaters can never double-send.
   // (.gsc text + params persistence keep the settle rhythm below.)
+  //
+  // Echo cancellation: every push is recorded in a short history. C++ emits
+  // full-state bursts that can arrive AFTER newer state was pushed (script
+  // batches run over frames; messages queue behind renders). Without a check,
+  // a stale burst re-commits old values, the effect re-pushes them, C++
+  // re-reports — a self-sustaining ping-pong that shakes the UI forever.
+  // An echo key that matches ANY recently sent snapshot is a delayed
+  // confirmation, never news, and is dropped before it can clobber.
+  const recentSentRef = useRef<PreviewParams[]>([])
+  const noteSent = useCallback((snapshot: PreviewParams) => {
+    const history = recentSentRef.current
+    history.push(snapshot)
+    if (history.length > 8) history.splice(0, history.length - 8)
+  }, [])
+  const wasRecentlySent = useCallback((key: keyof PreviewParams, value: PreviewParams[keyof PreviewParams]): boolean => {
+    const history = recentSentRef.current
+    for (let i = history.length - 1; i >= 0; i--) {
+      const sent = history[i][key]
+      if (typeof sent === 'number' && typeof value === 'number') {
+        if (Math.abs(sent - value) < 1e-6) return true
+      } else if (Object.is(sent, value)) {
+        return true
+      }
+    }
+    return false
+  }, [])
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
     host.applyControls(params)
-  }, [params])
+    noteSent(params)
+  }, [params, noteSent])
 
   // Single rAF mailbox for ALL params traffic (GUI gestures + Wasm echoes).
   // Every input event / echo only records the latest value per key; at most
@@ -191,6 +221,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     const merged = paramsMailboxRef.current
     paramsMailboxRef.current = null
     if (!merged) return
+    // TEMP-DEBUG: trace commits (removed before ship).
+    try {
+      console.debug(`[mbox] flush keys=${Object.keys(merged).join(',')}`)
+    } catch { /* ignore */ }
     setParams((prev) => {
       // Bail out when the merged snapshot adds nothing: no render, and the
       // preview effect below stays quiet (echo convergence fast-path).
@@ -232,6 +266,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     }
     if (!pending) return paramsRef.current
     const snap: PreviewParams = { ...paramsRef.current, ...pending }
+    // TEMP-DEBUG: trace drain (removed before ship).
+    try {
+      console.debug(`[mbox] drain keys=${Object.keys(pending).join(',')}`)
+    } catch { /* ignore */ }
     setParams((prev) => {
       for (const key of Object.keys(pending) as (keyof PreviewParams)[]) {
         if (!Object.is(pending[key], prev[key])) return { ...prev, ...pending }
@@ -291,57 +329,66 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       }
       // Validate against the last committed snapshot and queue only real
       // changes; the rAF flush merges everything into one setState.
+      // Echo cancellation: a value that matches ANY recently sent snapshot is
+      // a delayed confirmation of our own push, never news — dropping it here
+      // breaks the parent<->engine ping-pong that otherwise shakes the UI.
+      // (UI input bypasses this entirely in updateParams and always commits.)
       const base = paramsRef.current
+      const fresh = <K extends keyof PreviewParams>(key: K, value: PreviewParams[K]): boolean => {
+        if (Object.is(value, base[key])) return false
+        if (wasRecentlySent(key, value)) return false
+        return true
+      }
       const clean: Partial<PreviewParams> = {}
       if (typeof patch.dataset === 'number' && Number.isFinite(patch.dataset)) {
         const v = clampInt(patch.dataset, 0, 64, base.dataset)
-        if (v !== base.dataset) clean.dataset = v
+        if (v !== base.dataset && !wasRecentlySent('dataset', v)) clean.dataset = v
       }
       if (typeof patch.method === 'number' && Number.isFinite(patch.method)) {
         const v = clampInt(patch.method, 0, RENDER_METHODS.length - 1, base.method)
-        if (v !== base.method) clean.method = v
+        if (v !== base.method && !wasRecentlySent('method', v)) clean.method = v
       }
       if (typeof patch.samplingRateExp === 'number' && Number.isFinite(patch.samplingRateExp)) {
         const v = clampInt(patch.samplingRateExp, -5, 6, base.samplingRateExp)
-        if (v !== base.samplingRateExp) clean.samplingRateExp = v
+        if (v !== base.samplingRateExp && !wasRecentlySent('samplingRateExp', v)) clean.samplingRateExp = v
       }
       if (typeof patch.virtualSamples === 'number' && Number.isFinite(patch.virtualSamples)) {
         const v = clampInt(patch.virtualSamples, 1, 50, base.virtualSamples)
-        if (v !== base.virtualSamples) clean.virtualSamples = v
+        if (v !== base.virtualSamples && !wasRecentlySent('virtualSamples', v)) clean.virtualSamples = v
       }
-      if (typeof patch.constantSampleCount === 'boolean' && patch.constantSampleCount !== base.constantSampleCount) {
+      if (typeof patch.constantSampleCount === 'boolean' && fresh('constantSampleCount', patch.constantSampleCount)) {
         clean.constantSampleCount = patch.constantSampleCount
       }
-      if (typeof patch.ortho === 'boolean' && patch.ortho !== base.ortho) {
+      if (typeof patch.ortho === 'boolean' && fresh('ortho', patch.ortho)) {
         clean.ortho = patch.ortho
       }
-      if (typeof patch.ertEnabled === 'boolean' && patch.ertEnabled !== base.ertEnabled) {
+      if (typeof patch.ertEnabled === 'boolean' && fresh('ertEnabled', patch.ertEnabled)) {
         clean.ertEnabled = patch.ertEnabled
       }
       if (typeof patch.tfType === 'number' && (patch.tfType === 0 || patch.tfType === 1 || patch.tfType === 2)) {
-        if (patch.tfType !== base.tfType) clean.tfType = patch.tfType
+        if (patch.tfType !== base.tfType && !wasRecentlySent('tfType', patch.tfType)) clean.tfType = patch.tfType
       }
       if (typeof patch.tfStart === 'number' && Number.isFinite(patch.tfStart)) {
         const v = Math.min(1, Math.max(0, patch.tfStart))
-        if (Math.abs(v - base.tfStart) > 1e-6) clean.tfStart = v
+        if (Math.abs(v - base.tfStart) > 1e-6 && !wasRecentlySent('tfStart', v)) clean.tfStart = v
       }
       if (typeof patch.tfWidth === 'number' && Number.isFinite(patch.tfWidth)) {
         const v = Math.min(1, Math.max(0.00001, patch.tfWidth))
-        if (Math.abs(v - base.tfWidth) > 1e-6) clean.tfWidth = v
+        if (Math.abs(v - base.tfWidth) > 1e-6 && !wasRecentlySent('tfWidth', v)) clean.tfWidth = v
       }
-      if (typeof patch.customTf === 'string' && patch.customTf !== base.customTf) {
+      if (typeof patch.customTf === 'string' && patch.customTf !== base.customTf && !wasRecentlySent('customTf', patch.customTf)) {
         clean.customTf = patch.customTf
       }
-      if (typeof patch.transform === 'string' && patch.transform !== base.transform) {
+      if (typeof patch.transform === 'string' && patch.transform !== base.transform && !wasRecentlySent('transform', patch.transform)) {
         clean.transform = patch.transform
       }
       if (typeof patch.level === 'number' && Number.isFinite(patch.level)) {
         const v = clampInt(patch.level, 0, 8, base.level)
-        if (v !== base.level) clean.level = v
+        if (v !== base.level && !wasRecentlySent('level', v)) clean.level = v
       }
       if (Object.keys(clean).length > 0) queueParamsPatch(clean)
     },
-    [queueParamsPatch],
+    [queueParamsPatch, wasRecentlySent],
   )
 
   const ensureExternalLoaded = useCallback(
@@ -426,8 +473,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       signal: controller.signal,
       onState: (patch) => {
         if (!disposed) applyPatch(patch)
-      },
-      onContextLost: () => {
+      },      onContextLost: () => {
         if (!disposed) onPreviewContextLost()
       },
       onContextRestored: () => {
@@ -460,6 +506,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         }
         // First push also opens the echo gate (same tick — no echo can slip in).
         bootPushedRef.current = true
+        noteSent(paramsRef.current)
         host.applyControls(paramsRef.current)
       })
       .catch((err) => {
@@ -476,7 +523,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           })
         }
       })
-  }, [applyPatch, ensureExternalLoaded, onPreviewContextLost, onPreviewContextRestored])
+  }, [applyPatch, ensureExternalLoaded, noteSent, onPreviewContextLost, onPreviewContextRestored])
 
   useEffect(() => {
     bootPreviewRef.current = bootPreview
@@ -599,12 +646,14 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       host.restoreDataset(snap.dataset)
       await new Promise((r) => setTimeout(r, 60))
       const code = await host.runScript(script)
+      completedRunRef.current = true
       if (code === 0) {
         setDiagnostics({ message: 'Ran — panel reflects Wasm state', isError: false })
       } else {
         setDiagnostics({ message: `Load failed: code ${code}`, isError: true })
       }
     } catch (err) {
+      completedRunRef.current = true
       setDiagnostics({
         message: `Run failed: ${err instanceof Error ? err.message : String(err)}`,
         isError: true,

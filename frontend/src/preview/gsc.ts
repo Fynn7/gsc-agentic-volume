@@ -23,6 +23,11 @@ export type PreviewParams = {
   level: number
 }
 
+/** Identity pose in the C++ setTransformParams encoding (rotation ~ translation).
+ * Used as the default (instead of '') so the boot echo of the same string is
+ * a no-op — otherwise a boot race decides whether rotation readback works. */
+export const IDENTITY_TRANSFORM = '1_0_0_0_0_1_0_0_0_0_1_0_0_0_0_1~0_0_0'
+
 export const DEFAULT_PREVIEW_PARAMS: PreviewParams = {
   dataset: 7,
   method: 0,
@@ -35,7 +40,7 @@ export const DEFAULT_PREVIEW_PARAMS: PreviewParams = {
   tfStart: 0.1,
   tfWidth: 0.12,
   customTf: '',
-  transform: '',
+  transform: IDENTITY_TRANSFORM,
   level: 0,
 }
 
@@ -66,7 +71,11 @@ function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v))
 }
 
-/** Render current panel params as GSC lines for the generated zone. */
+/** Render current panel params as GSC lines for the generated zone.
+ * NOTE: transform is deliberately excluded. It has no GUI knob — the panel
+ * value is a read-only C++ readback. Emitting it here would let a stale
+ * readback override hand-written pose lines (resetrotation/addrotation*),
+ * since the zone executes after them. Pose is owned by the script. */
 export function paramsToGsc(params: PreviewParams): string {
   const lines: string[] = []
   lines.push(`setvolume ${params.dataset}`)
@@ -81,9 +90,6 @@ export function paramsToGsc(params: PreviewParams): string {
     lines.push(`settfcode ${params.customTf}`)
   } else {
     lines.push(`settfparams ${params.tfType === 1 ? 'true' : 'false'} ${fmt(clamp01(params.tfStart))} ${fmt(Math.max(0.00001, params.tfWidth))}`)
-  }
-  if (params.transform) {
-    lines.push(`settransformparams ${params.transform}`)
   }
   return lines.join('\n')
 }

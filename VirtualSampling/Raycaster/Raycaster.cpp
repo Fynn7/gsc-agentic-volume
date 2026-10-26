@@ -435,6 +435,11 @@ void Raycaster::setTransformParams(const std::string& transformStr) {
 
 bool Raycaster::setLevel(size_t level) {
   const size_t prevLevel = volumes[currentVolumeIndex].getLevel();
+  // No-op on the current level: the fallthrough re-uploads the whole volume
+  // texture on every call, which stalls the main thread once per GUI tick.
+  if (prevLevel == level) {
+    return true;
+  }
 
   if (!volumes[currentVolumeIndex].setLevel(level)) return false;
   updateVolume();

@@ -95,6 +95,10 @@ ${GSC_COMMANDS}
 
 After \`setvolume\` rotation starts at identity; \`resetrotation\` returns to that pose. \`addrotationx/y/z\` take degrees and compose in the order written. An explicit degree rotate is \`resetrotation\` followed by only that axis line; named views reset first, then follow the volume's orientation notes.
 
+## Clipping (voxel units!)
+
+\`setclipbounds <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>\` takes **voxel coordinates**, not normalized 0–1 fractions — e.g. for a 246×246×221 volume, keeping the middle half is \`setclipbounds 61.5 184.5 61.5 184.5 55.25 165.75\`. Values like \`0.25 0.75 …\` select a sub-voxel sliver and render (correctly) almost nothing. \`resetclipbounds\` restores the full volume.
+
 ## Running in this editor
 
 Run (Ctrl/Cmd+Enter) resets the renderer, restores the current dataset, executes the script, then reads the panel state back from Wasm. GUI edits update the marked generated zone once the operation settles; hand-written lines outside the markers stay untouched. File-output and termination commands (\`setdir\`, \`screenshot\`, \`quit\`) belong to native batch runs.
@@ -183,6 +187,15 @@ export function GscReferenceDialog({
           <code>addrotationx/y/z</code> take degrees and compose in the order written. An explicit degree rotate is{' '}
           <code>resetrotation</code> followed by only that axis line; named views reset first, then follow the
           volume&rsquo;s orientation notes.
+        </p>
+      </FieldBlock>
+      <FieldBlock label="Clipping (voxel units!)">
+        <p>
+          <code>setclipbounds</code> takes <strong>voxel coordinates</strong>, not normalized 0–1 fractions — e.g.
+          for a 246×246×221 volume, keeping the middle half is{' '}
+          <code>setclipbounds 61.5 184.5 61.5 184.5 55.25 165.75</code>. Values like <code>0.25 0.75 …</code> select
+          a sub-voxel sliver and render (correctly) almost nothing. <code>resetclipbounds</code> restores the full
+          volume.
         </p>
       </FieldBlock>
       <FieldBlock label="Running in this editor">

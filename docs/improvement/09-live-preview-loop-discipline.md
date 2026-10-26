@@ -105,3 +105,17 @@ GUI 拖滑块 → Wasm 预览、`.gsc` 文本、localStorage 三条链路互相�
 - **新增旗舰演示任务（可解）**：判据=单连通主目标 + 未被致密壳包裹 + 密度可分 + AABB 可裁。候选见 `10-solvable-demo-tasks.md`。
 - **refuse 策略**：不做硬编码拒绝；做证据驱动的拒绝——先跑直方图+连通域统计等轻量检查，测到重叠/包容超过阈值才输出带数字的局限说明；同时永远先给最好结果（best-effort + 残留量化）。
 - **与教授方向对齐**：BorgVR 范式（找数据集→裁剪隔离→迭代优化视角→存图→报参）照搬到本仓库 agent 循环，无需换栈（同为 Jens Der Krüger 引擎家族）。
+
+## 实验室对接更新（2026-10-26）：BorgVR 范式确认 + 硬件
+
+- 教授用 BorgVR+MCP（Codex + GPT-6 Astra）完整跑通了“找数据集→裁剪隔离→迭代
+  优化视角→存图→报参”闭环（足底朝上视角原协议见
+  `borgvr-fusssohle-protokoll.txt`）。结论：本仓 agent 走同一范式无需换栈。
+- 对方关键动作本仓逐一有等价物：list_datasets→导入/数据集下拉；
+  set_iso_value→TF start/width；set_clipping（归一化 min/max）→setclipbounds
+  （体素先乘维度）；wait_until_rendered→Run+读回；capture_screenshot→导出 PNG；
+  settings JSON→GSC 文本本身即设置记录。对方失败尝试如实记日志、
+  数据集不行就换（WholeBody→MelEXAMPLE）、交付物固定 PNG+参数三点直接照搬。
+- 实验室机器：2×NVIDIA RTX PRO 5000 48GB（驱动 596.(array)1CUDA 13.2取数时
+  均空闲）+ ASPEED BMC 亮机卡无外网/SSH。本轮所有帧率数字都是 SwiftShader
+  软件栈下测的最终性能验证应在实验室 headed Chrome（走独显）下重跑。

@@ -15,3 +15,19 @@
 下一步（待与教授面谈确认后执行）：选定一个任务后，用现有 agent 循环完整跑一遍
 （render_scene 迭代 + 截图判定 + 最终 PNG + 参数报告），把轨迹记为 eval 用例；
 教堂保持为边界案例，不再投入调参。
+
+## 附：BorgVR 足底协议对照（教授 2026-10-26 会话原文见 `borgvr-fusssohle-protokoll.txt`）
+
+对方 agent 的真实循环（约 10 次截图迭代含一次失败的平移与一次换数据集）：
+list_datasets → open_dataset → wait_until_rendered → set_render_mode(isovalue) →
+set_iso_value（0.13→0.2→0.23→0.21→0.23）→ set_transform（四元数旋转+缩放+平移）→
+set_clipping（归一化 min/max）→ set_lighting → capture_screenshot → close_dataset，
+最后存 PNG + 完整设置 JSON。
+
+映射到本仓的等价物：list_datasets→导入/数据集下拉；iso_value→TF start/width；
+set_clipping（归一化）→setclipbounds（体素先乘维度）；wait_until_rendered→Run+读回；
+capture_screenshot→导出 PNG；settings JSON→GSC 文本本身即设置记录。
+
+三点可直接借鉴：(1) 失败尝试如实记录进日志（对方 7.2 平移出界被保留）；
+(2) 数据集不行就换（对方 WholeBody→Melanix），本仓等价动作是换数据集/重导入；
+(3) 交付物固定为 PNG+参数（对方存 einstellungen.json；本仓存 .gsc+PNG）。

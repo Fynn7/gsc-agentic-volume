@@ -61,6 +61,16 @@ function resizeCanvas() {
 }
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
+// A lost GL context blanks the canvas permanently unless we preventDefault
+// (which permits restore) and re-render afterwards. The parent re-pushes the
+// current controls when it hears back about the restore.
+canvasEl.addEventListener('webglcontextlost', (event) => {
+  try { event.preventDefault(); } catch (e) {}
+  try { parent.postMessage({ type: 'wasmContextLost' }, '*'); } catch (e) {}
+});
+canvasEl.addEventListener('webglcontextrestored', () => {
+  try { parent.postMessage({ type: 'wasmContextRestored' }, '*'); } catch (e) {}
+});
 // Right-drag drives the transfer function; never let the browser steal
 // the gesture with its native context menu.
 canvasEl.addEventListener('contextmenu', (e) => {

@@ -30,6 +30,7 @@
 | `06-evaluation-protocol.md` | 成功的程序化定义、真值格式、评分流程、统计方法 |
 | `07-worker-implementation-plan.md` | 给 coding agent 的可直接执行计划：分阶段任务、文件级改动、接口契约、验收命令 |
 | `08-repository-recheck.md` | 对本地运行证据的复核记录：已核实事实、对原稿的更正、仍待验证项与建议的下一步 |
+| `09-live-preview-loop-discipline.md` | Live Preview 四轮 freeze/抖动/黑屏的根因、铁律与验证纪律（2026-10-26） |
 | `diagrams/*.mermaid` | 两张流程图的源文件（同时内嵌在 03 中） |
 
 ## 目录与后续文件

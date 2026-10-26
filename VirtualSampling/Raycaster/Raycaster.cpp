@@ -337,8 +337,14 @@ void Raycaster::setRendermode(uint32_t index) {
 }
 
 void Raycaster::setVolume(uint32_t index) {
-  resetClipBounds();
   const uint32_t clampedIndex = index % volumes.size();
+  // No-op on the current volume: re-uploading the same texture every call
+  // stalls the main thread (one full GPU upload per GUI tick) and wipes state
+  // (clip bounds) that the caller did not ask to reset.
+  if (clampedIndex == currentVolumeIndex) {
+    return;
+  }
+  resetClipBounds();
 
   if (volumeCallback && clampedIndex != currentVolumeIndex) {
     volumeCallback(int(clampedIndex));

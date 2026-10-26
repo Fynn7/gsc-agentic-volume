@@ -51,6 +51,15 @@ type LiveStageProps = {
 /** Window event fired by the top bar to download .gsc + preview PNG. */
 export const STAGE_EXPORT_EVENT = 'gav:export-stage'
 
+function persistParams(p: PreviewParams): void {
+  storeParams(p)
+  try {
+    localStorage.setItem(GSC_DATASET_KEY, String(p.dataset))
+  } catch {
+    /* ignore */
+  }
+}
+
 function downloadBlob(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob)
   try {
@@ -153,38 +162,108 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     setDiagnostics({ message: formatStartupDiagnostic(editorReady, wasmReady, false), isError: false })
   }, [editorReady, wasmReady])
 
-  // Autosave editor + params.
+  // Autosave the editor text (params persist on the settle path below, not per tick).
   useEffect(() => {
     storeDraft(gscText)
   }, [gscText])
+
+  // Preview push policy: every committed params change is pushed to Wasm
+  // immediately — the original live behavior: the canvas follows the hand
+  // tick-by-tick while dragging. Updaters stay pure; the push lives in this
+  // effect so StrictMode double-invoked updaters can never double-send.
+  // (.gsc text + params persistence keep the settle rhythm below.)
   useEffect(() => {
-    storeParams(params)
-    try {
-      localStorage.setItem(GSC_DATASET_KEY, String(params.dataset))
-    } catch {
-      /* ignore */
-    }
+    const host = hostRef.current
+    if (!host) return
+    host.applyControls(params)
   }, [params])
 
-  // .gsc sync waits for one whole GUI operation to finish: continuous gestures
-  // (slider drags, TF canvas strokes) only touch live params + Wasm preview per
-  // tick, and the generated zone is rewritten once the gesture settles.
-  // No manual sync UI; discrete picks also flow through the same debounced slot.
+  // Single rAF mailbox for ALL params traffic (GUI gestures + Wasm echoes).
+  // Every input event / echo only records the latest value per key; at most
+  // one setState commits per animation frame. The committed snapshot is never
+  // older than one frame, so the slider thumb can't snap back to stale values
+  // (the infinite-jitter pattern) no matter how slow renders get. Sends stay
+  // live: the preview effect pushes every committed snapshot to Wasm.
+  const paramsMailboxRef = useRef<Partial<PreviewParams> | null>(null)
+  const paramsFlushRafRef = useRef<number | null>(null)
+  const flushParamsMailbox = useCallback(() => {
+    paramsFlushRafRef.current = null
+    const merged = paramsMailboxRef.current
+    paramsMailboxRef.current = null
+    if (!merged) return
+    setParams((prev) => {
+      // Bail out when the merged snapshot adds nothing: no render, and the
+      // preview effect below stays quiet (echo convergence fast-path).
+      for (const key of Object.keys(merged) as (keyof PreviewParams)[]) {
+        if (!Object.is(merged[key], prev[key])) return { ...prev, ...merged }
+      }
+      return prev
+    })
+  }, [])
+  const queueParamsPatch = useCallback(
+    (patch: Partial<PreviewParams>) => {
+      paramsMailboxRef.current = { ...paramsMailboxRef.current, ...patch }
+      if (paramsFlushRafRef.current == null) {
+        paramsFlushRafRef.current = requestAnimationFrame(flushParamsMailbox)
+      }
+    },
+    [flushParamsMailbox],
+  )
+  // Drop any pending flush on unmount.
+  useEffect(
+    () => () => {
+      if (paramsFlushRafRef.current != null) {
+        cancelAnimationFrame(paramsFlushRafRef.current)
+        paramsFlushRafRef.current = null
+      }
+      paramsMailboxRef.current = null
+    },
+    [],
+  )
+
+  // Drain the mailbox synchronously and return the fresh snapshot. Used by
+  // Run/export so they never act on a snapshot that is a frame stale.
+  const drainMailboxSnapshot = useCallback((): PreviewParams => {
+    const pending = paramsMailboxRef.current
+    paramsMailboxRef.current = null
+    if (paramsFlushRafRef.current != null) {
+      cancelAnimationFrame(paramsFlushRafRef.current)
+      paramsFlushRafRef.current = null
+    }
+    if (!pending) return paramsRef.current
+    const snap: PreviewParams = { ...paramsRef.current, ...pending }
+    setParams((prev) => {
+      for (const key of Object.keys(pending) as (keyof PreviewParams)[]) {
+        if (!Object.is(pending[key], prev[key])) return { ...prev, ...pending }
+      }
+      return prev
+    })
+    return snap
+  }, [])
+
+  // Settle path: persistence + .gsc generated-zone rewrite wait for one whole
+  // GUI operation to finish — no per-tick localStorage churn or editor churn.
+  // No manual sync UI; Run/export flush first so they see the settled state.
   const GSC_SYNC_DEBOUNCE_MS = 500
   const gscSyncTimer = useRef<number | null>(null)
-  const flushGscSync = useCallback(() => {
+  const flushGscSync = useCallback((): PreviewParams => {
     if (gscSyncTimer.current != null) {
       window.clearTimeout(gscSyncTimer.current)
       gscSyncTimer.current = null
     }
-    const next = syncParamsToScript(gscRef.current, paramsRef.current)
+    // Drain first: the mailbox may hold a snapshot newer than the last commit.
+    const snap = drainMailboxSnapshot()
+    persistParams(snap)
+    const next = syncParamsToScript(gscRef.current, snap)
     if (next !== gscRef.current) setGscText(next)
-  }, [])
+    return snap
+  }, [drainMailboxSnapshot])
 
   useEffect(() => {
     if (gscSyncTimer.current != null) window.clearTimeout(gscSyncTimer.current)
     gscSyncTimer.current = window.setTimeout(() => {
       gscSyncTimer.current = null
+      persistParams(paramsRef.current)
       const next = syncParamsToScript(gscRef.current, paramsRef.current)
       if (next !== gscRef.current) setGscText(next)
     }, GSC_SYNC_DEBOUNCE_MS)
@@ -196,91 +275,74 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     }
   }, [params])
 
-  const applyPatch = useCallback((patch: WasmStatePatch) => {
-    setParams((prev) => {
-      const next: PreviewParams = { ...prev }
-      let changed = false
+  const applyPatch = useCallback(
+    (patch: WasmStatePatch) => {
+      // Boot gate: until the first post-boot push is sent, shell echoes only
+      // carry stale startup defaults (dataset 0, TF 0.1/0.12, ...) that must not
+      // clobber the panel — especially stored params or the pre-reboot state.
+      // The single exception is external slot discovery, which params may lack.
+      if (!bootPushedRef.current) {
+        const discovered = patch.dataset
+        if (typeof discovered === 'number' && Number.isFinite(discovered) && discovered >= BUILTIN_DATASETS.length) {
+          setExternalIndex(discovered)
+          queueParamsPatch({ dataset: discovered })
+        }
+        return
+      }
+      // Validate against the last committed snapshot and queue only real
+      // changes; the rAF flush merges everything into one setState.
+      const base = paramsRef.current
+      const clean: Partial<PreviewParams> = {}
       if (typeof patch.dataset === 'number' && Number.isFinite(patch.dataset)) {
-        const v = clampInt(patch.dataset, 0, 64, prev.dataset)
-        if (v !== prev.dataset) {
-          next.dataset = v
-          changed = true
-        }
-        if (v >= BUILTIN_DATASETS.length) {
-          setExternalIndex(v)
-        }
+        const v = clampInt(patch.dataset, 0, 64, base.dataset)
+        if (v !== base.dataset) clean.dataset = v
       }
       if (typeof patch.method === 'number' && Number.isFinite(patch.method)) {
-        const v = clampInt(patch.method, 0, RENDER_METHODS.length - 1, prev.method)
-        if (v !== prev.method) {
-          next.method = v
-          changed = true
-        }
+        const v = clampInt(patch.method, 0, RENDER_METHODS.length - 1, base.method)
+        if (v !== base.method) clean.method = v
       }
       if (typeof patch.samplingRateExp === 'number' && Number.isFinite(patch.samplingRateExp)) {
-        const v = clampInt(patch.samplingRateExp, -5, 6, prev.samplingRateExp)
-        if (v !== prev.samplingRateExp) {
-          next.samplingRateExp = v
-          changed = true
-        }
+        const v = clampInt(patch.samplingRateExp, -5, 6, base.samplingRateExp)
+        if (v !== base.samplingRateExp) clean.samplingRateExp = v
       }
       if (typeof patch.virtualSamples === 'number' && Number.isFinite(patch.virtualSamples)) {
-        const v = clampInt(patch.virtualSamples, 1, 50, prev.virtualSamples)
-        if (v !== prev.virtualSamples) {
-          next.virtualSamples = v
-          changed = true
-        }
+        const v = clampInt(patch.virtualSamples, 1, 50, base.virtualSamples)
+        if (v !== base.virtualSamples) clean.virtualSamples = v
       }
-      if (typeof patch.constantSampleCount === 'boolean' && patch.constantSampleCount !== prev.constantSampleCount) {
-        next.constantSampleCount = patch.constantSampleCount
-        changed = true
+      if (typeof patch.constantSampleCount === 'boolean' && patch.constantSampleCount !== base.constantSampleCount) {
+        clean.constantSampleCount = patch.constantSampleCount
       }
-      if (typeof patch.ortho === 'boolean' && patch.ortho !== prev.ortho) {
-        next.ortho = patch.ortho
-        changed = true
+      if (typeof patch.ortho === 'boolean' && patch.ortho !== base.ortho) {
+        clean.ortho = patch.ortho
       }
-      if (typeof patch.ertEnabled === 'boolean' && patch.ertEnabled !== prev.ertEnabled) {
-        next.ertEnabled = patch.ertEnabled
-        changed = true
+      if (typeof patch.ertEnabled === 'boolean' && patch.ertEnabled !== base.ertEnabled) {
+        clean.ertEnabled = patch.ertEnabled
       }
       if (typeof patch.tfType === 'number' && (patch.tfType === 0 || patch.tfType === 1 || patch.tfType === 2)) {
-        if (patch.tfType !== prev.tfType) {
-          next.tfType = patch.tfType
-          changed = true
-        }
+        if (patch.tfType !== base.tfType) clean.tfType = patch.tfType
       }
       if (typeof patch.tfStart === 'number' && Number.isFinite(patch.tfStart)) {
         const v = Math.min(1, Math.max(0, patch.tfStart))
-        if (Math.abs(v - prev.tfStart) > 1e-6) {
-          next.tfStart = v
-          changed = true
-        }
+        if (Math.abs(v - base.tfStart) > 1e-6) clean.tfStart = v
       }
       if (typeof patch.tfWidth === 'number' && Number.isFinite(patch.tfWidth)) {
         const v = Math.min(1, Math.max(0.00001, patch.tfWidth))
-        if (Math.abs(v - prev.tfWidth) > 1e-6) {
-          next.tfWidth = v
-          changed = true
-        }
+        if (Math.abs(v - base.tfWidth) > 1e-6) clean.tfWidth = v
       }
-      if (typeof patch.customTf === 'string' && patch.customTf !== prev.customTf) {
-        next.customTf = patch.customTf
-        changed = true
+      if (typeof patch.customTf === 'string' && patch.customTf !== base.customTf) {
+        clean.customTf = patch.customTf
       }
-      if (typeof patch.transform === 'string' && patch.transform !== prev.transform) {
-        next.transform = patch.transform
-        changed = true
+      if (typeof patch.transform === 'string' && patch.transform !== base.transform) {
+        clean.transform = patch.transform
       }
       if (typeof patch.level === 'number' && Number.isFinite(patch.level)) {
-        const v = clampInt(patch.level, 0, 8, prev.level)
-        if (v !== prev.level) {
-          next.level = v
-          changed = true
-        }
+        const v = clampInt(patch.level, 0, 8, base.level)
+        if (v !== base.level) clean.level = v
       }
-      return changed ? next : prev
-    })
-  }, [])
+      if (Object.keys(clean).length > 0) queueParamsPatch(clean)
+    },
+    [queueParamsPatch],
+  )
 
   const ensureExternalLoaded = useCallback(
     async (host: WasmHost, record: VolumeImport, wantDataset: number) => {
@@ -300,19 +362,79 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     [],
   )
 
-  // Boot the Wasm shell once.
-  useEffect(() => {
+  const bootControllerRef = useRef<AbortController | null>(null)
+  const bootPreviewRef = useRef<() => void>(() => {})
+  const lastContextRebootRef = useRef(0)
+  // Closed until the first post-boot push is sent; while closed, applyPatch
+  // drops stale shell-default echoes so they can't clobber stored params or
+  // the pre-reboot panel state.
+  const bootPushedRef = useRef(false)
+
+  const onPreviewContextLost = useCallback(() => {
+    snackbar('Preview GPU context was lost — waiting for it to restore, then rebooting the preview.', {
+      severity: 'error',
+      duration: 'long',
+      dismissible: true,
+    })
+  }, [])
+
+  const onPreviewContextRestored = useCallback(() => {
+    // A restored context still has dead GL resources (volume textures etc.),
+    // so re-pushing controls cannot repaint. Reboot the shell instead — the
+    // boot path re-uploads everything and re-applies the panel snapshot.
+    // Guard against reboot storms when the GPU keeps failing.
+    const now = Date.now()
+    if (now - lastContextRebootRef.current < 10000) {
+      snackbar('Preview GPU context keeps failing — reload the page to restart the preview.', {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+      return
+    }
+    lastContextRebootRef.current = now
+    snackbar('Preview GPU context restored — rebooting the preview engine.', {
+      severity: 'info',
+      duration: 'long',
+      dismissible: true,
+    })
+    bootPreviewRef.current()
+  }, [])
+
+  // Boot (and reboot) the Wasm shell. Re-entrant: aborts any in-flight boot,
+  // disposes the old host, and forces the iframe to reload the shell so GL
+  // resources are recreated from scratch.
+  const bootPreview = useCallback(() => {
     const iframe = iframeRef.current
     if (!iframe) return
+    bootControllerRef.current?.abort()
+    hostRef.current?.dispose()
+    hostRef.current = null
+    bootPushedRef.current = false
+    setWasmReady(false)
+    setWasmMissing(false)
+    // Force a real navigation: re-assigning the same shell URL would be a no-op.
+    iframe.src = 'about:blank'
     const controller = new AbortController()
+    bootControllerRef.current = controller
     let disposed = false
+    const markDisposed = () => {
+      disposed = true
+    }
+    controller.signal.addEventListener('abort', markDisposed)
     void createWasmHost(iframe, {
       signal: controller.signal,
       onState: (patch) => {
         if (!disposed) applyPatch(patch)
       },
+      onContextLost: () => {
+        if (!disposed) onPreviewContextLost()
+      },
+      onContextRestored: () => {
+        if (!disposed) onPreviewContextRestored()
+      },
     })
-      .then((host) => {
+      .then(async (host) => {
         if (disposed) {
           host.dispose()
           return
@@ -320,13 +442,25 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         hostRef.current = host
         setWasmReady(true)
         setWasmMissing(false)
-        // Restore current params after boot.
-        host.applyControls(paramsRef.current)
-        // If an external import is already known, load it so the slot exists.
+        // Load the external slot BEFORE the first push: pushing a dataset
+        // index into an empty MEMFS makes C++ fall back to defaults and the
+        // follow-up full-state echoes would clobber the panel.
         const known = previewImportRef.current
         if (known) {
-          void ensureExternalLoaded(host, known, paramsRef.current.dataset).catch(() => undefined)
+          try {
+            await ensureExternalLoaded(host, known, paramsRef.current.dataset)
+          } catch {
+            /* surfaced by the import flow; boot continues with builtins */
+          }
+          if (disposed) return
+          // Let the load's echoes flush through React, so the push below
+          // carries the discovered slot index rather than a stale one.
+          await new Promise((r) => setTimeout(r, 300))
+          if (disposed) return
         }
+        // First push also opens the echo gate (same tick — no echo can slip in).
+        bootPushedRef.current = true
+        host.applyControls(paramsRef.current)
       })
       .catch((err) => {
         if (disposed) return
@@ -342,16 +476,26 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           })
         }
       })
+  }, [applyPatch, ensureExternalLoaded, onPreviewContextLost, onPreviewContextRestored])
+
+  useEffect(() => {
+    bootPreviewRef.current = bootPreview
+  }, [bootPreview])
+
+  // Boot the Wasm shell once.
+  useEffect(() => {
+    bootPreview()
+    const iframe = iframeRef.current
     return () => {
-      disposed = true
-      controller.abort()
+      bootControllerRef.current?.abort()
+      bootControllerRef.current = null
       hostRef.current?.dispose()
       hostRef.current = null
       if (iframe) iframe.src = 'about:blank'
     }
     // Boot once; later dataset/import changes use the live host.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyPatch, ensureExternalLoaded])
+  }, [bootPreview])
 
   const handleImportPick = useCallback(async () => {
     setImporting(true)
@@ -396,11 +540,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           void handleImportPick()
           return
         }
+        // Pure state update; the preview effect pushes it (same as every path).
         setParams((prev) => ({ ...prev, dataset: externalIndex ?? BUILTIN_DATASETS.length }))
         if (host) {
-          if (externalIndex != null) {
-            host.applyControls({ ...paramsRef.current, dataset: externalIndex })
-          } else {
+          if (externalIndex == null) {
             void ensureExternalLoaded(host, record, BUILTIN_DATASETS.length).catch((err) => {
               snackbar(`External preview failed: ${err instanceof Error ? err.message : String(err)}`, {
                 severity: 'error',
@@ -413,20 +556,17 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         return
       }
       setParams((prev) => ({ ...prev, dataset: index }))
-      host?.applyControls({ ...paramsRef.current, dataset: index })
     },
     [ensureExternalLoaded, externalIndex, handleImportPick],
   )
 
   const updateParams = useCallback(
     (patch: Partial<PreviewParams>) => {
-      setParams((prev) => {
-        const next = { ...prev, ...patch }
-        hostRef.current?.applyControls(next)
-        return next
-      })
+      // Into the rAF mailbox: at most one commit per frame, always the latest
+      // values, so the slider thumb can never snap back to a stale snapshot.
+      queueParamsPatch(patch)
     },
-    [],
+    [queueParamsPatch],
   )
 
   const handleRun = useCallback(async () => {
@@ -438,8 +578,9 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     if (runBusy) return
     // Flush any pending debounced sync so Run executes the settled GUI state,
     // then validate the exact script (a script error never reaches Wasm).
-    flushGscSync()
-    const script = syncParamsToScript(gscRef.current, paramsRef.current)
+    // flushGscSync returns the drained snapshot — paramsRef may lag a frame.
+    const snap = flushGscSync()
+    const script = syncParamsToScript(gscRef.current, snap)
     if (script !== gscRef.current) setGscText(script)
     const issues = validateGscSource(script, GSC_LANGUAGE)
     editorIssuesRef.current = issues
@@ -454,9 +595,8 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       // then execute the script. State after the run is read back via callbacks.
       host.reset()
       await new Promise((r) => setTimeout(r, 120))
-      const current = paramsRef.current
       // Restore dataset only; the script owns every other knob.
-      host.restoreDataset(current.dataset)
+      host.restoreDataset(snap.dataset)
       await new Promise((r) => setTimeout(r, 60))
       const code = await host.runScript(script)
       if (code === 0) {
@@ -515,10 +655,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     setSnapshotBusy(true)
     try {
       // Settle the debounced sync first so the downloaded .gsc matches the panel.
-      flushGscSync()
-      const script = syncParamsToScript(gscRef.current, paramsRef.current)
+      const snap = flushGscSync()
+      const script = syncParamsToScript(gscRef.current, snap)
       if (script !== gscRef.current) setGscText(script)
-      const base = stageStamp(paramsRef.current).base
+      const base = stageStamp(snap).base
       const gscName = `${base}.gsc`
       const pngName = `${base}.png`
       downloadBlob(new Blob([script], { type: 'text/plain;charset=utf-8' }), gscName)
@@ -760,11 +900,8 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           tfStart={params.tfStart}
           tfWidth={params.tfWidth}
           onChange={(encoding) => {
-            setParams((prev) => {
-              const next = { ...prev, customTf: encoding, tfType: 2 as const }
-              hostRef.current?.applyControls(next)
-              return next
-            })
+            // Into the rAF mailbox; the flush bailout covers unchanged values.
+            updateParams({ customTf: encoding, tfType: 2 as const })
           }}
         />
       </Card>

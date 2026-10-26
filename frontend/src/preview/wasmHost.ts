@@ -69,12 +69,16 @@ export function createWasmHost(
     onProgress?: (label: string, value?: number | null) => void
     onState?: (patch: WasmStatePatch) => void
     onMessage?: (text: string) => void
+    onContextLost?: () => void
+    onContextRestored?: () => void
   },
 ): Promise<WasmHost> {
   const signal = options?.signal
   const onProgress = options?.onProgress
   const onState = options?.onState
   const onMessage = options?.onMessage
+  const onContextLost = options?.onContextLost
+  const onContextRestored = options?.onContextRestored
 
   return assertWasmAssets(signal).then(
     () =>
@@ -232,6 +236,16 @@ export function createWasmHost(
           }
           if (type === 'wasmMessage' && typeof data['text'] === 'string') {
             onMessage?.(data['text'] as string)
+            return
+          }
+          // GPU context lifecycle: the shell preventDefaults the loss so the
+          // context can be restored; the parent then re-pushes the controls.
+          if (type === 'wasmContextLost') {
+            onContextLost?.()
+            return
+          }
+          if (type === 'wasmContextRestored') {
+            onContextRestored?.()
             return
           }
           // Granular state readback from C++ callbacks.

@@ -31,7 +31,7 @@
 | `07-worker-implementation-plan.md` | 给 coding agent 的可直接执行计划：分阶段任务、文件级改动、接口契约、验收命令 |
 | `10-solvable-demo-tasks.md` | 可解旗舰演示任务菜单（判据+三个候选+验证状态）：脚/颅骨/动脉瘤 |
 | `08-repository-recheck.md` | 对本地运行证据的复核记录：已核实事实、对原稿的更正、仍待验证项与建议的下一步 |
-| `09-live-preview-loop-discipline.md` || `borgvr-fusssohle-protokoll.txt` | 教授 BorgVR 足底会话逐字协议（德文原文，10 的参照范式） |
+| `borgvr-fusssohle-protokoll.txt` | 教授 BorgVR 足底会话逐字协议（德文原文，10 的参照范式） |
 | `chapel-best-effort.gsc` | 可复现的教堂最好结果脚本（高斯 0.24/0.03 + 体素裁剪） |
 | `09-live-preview-loop-discipline.md` | Live Preview 四轮 freeze/抖动/黑屏的根因、铁律与验证纪律（2026-10-26） |
 | `diagrams/*.mermaid` | 两张流程图的源文件（同时内嵌在 03 中） |

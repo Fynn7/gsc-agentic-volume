@@ -176,6 +176,12 @@ function applyControls(c) {
   if (Number.isInteger(c.samplingRateExp)) safeCcall('setSamplingRateExp', 'void', ['number'], [c.samplingRateExp]);
   if (typeof c.alpha === 'number' && Number.isFinite(c.alpha)) safeCcall('setAlphaThreshold', 'void', ['number'], [c.alpha]);
   if (Number.isInteger(c.level)) safeCcall('setLevel', 'void', ['number'], [c.level]);
+  // Native agent renderer pins black (renderer.py `setbackground 0 0 0 1`);
+  // the preview must follow or agent/preview frames can never match.
+  if (Array.isArray(c.background) && c.background.length === 4) {
+    const bg = c.background.map(Number);
+    if (bg.every(Number.isFinite)) safeCcall('setBackground', 'void', ['number', 'number', 'number', 'number'], bg);
+  }
   safeCcall('setUseOrtho', 'void', ['boolean'], [!!c.ortho]);
   if (c.tfType === 2 && typeof c.customTf === 'string' && c.customTf.length > 0) {
     safeCcall('setCustomTF', 'void', ['string'], [c.customTf]);

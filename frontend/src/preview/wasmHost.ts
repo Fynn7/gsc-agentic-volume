@@ -179,6 +179,8 @@ export function createWasmHost(
                     alpha: params.ertEnabled ? 0.99 : 2.0,
                     level: params.level,
                     transform: params.transform,
+                    // Match the native agent renderer (renderer.py): black.
+                    background: [0, 0, 0, 1],
                   },
                 }),
               restoreDataset: (index: number) =>

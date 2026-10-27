@@ -86,6 +86,8 @@ export function paramsToGsc(params: PreviewParams): string {
   lines.push(`setuseortho ${params.ortho ? 'true' : 'false'}`)
   lines.push(`setalphathreshold ${params.ertEnabled ? '0.99' : '2.0'}`)
   lines.push(`setLevel ${Math.max(0, Math.round(params.level))}`)
+  // Native agent renderer pins black (renderer.py); keep preview identical.
+  lines.push('setbackground 0 0 0 1')
   if (params.tfType === 2 && params.customTf) {
     lines.push(`settfcode ${params.customTf}`)
   } else {

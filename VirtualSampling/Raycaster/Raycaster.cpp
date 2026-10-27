@@ -162,7 +162,7 @@ void Raycaster::updateTransferFunction() {
 }
 
 void Raycaster::reset() {
-  useOrtho = false;
+  useOrtho = true;
   useNNFilter = false;
   rotation = Mat4{};
   setTFParams(false, 0.1f, 0.12f);
@@ -227,7 +227,7 @@ void Raycaster::init() {
   cubeArray.bind();
   vbCube.setData(cube.getVertices(), 3);
   cubeArray.connectVertexAttrib(vbCube, renderModes[currentRenderModeIndex].program, "vPos", 3);
-  setBackground(0.3f,0.3f,0.8f,1.0f);
+  setBackground(0.0f,0.0f,0.0f,1.0f);
 
   GL(glEnable(GL_CULL_FACE));
   GL(glCullFace(GL_BACK));

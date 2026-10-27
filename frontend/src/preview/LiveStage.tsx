@@ -134,6 +134,9 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const paramsRef = useRef(params)
   const gscRef = useRef(gscText)
   const previewImportRef = useRef(previewImport)
+  // Tracks which import the preview has already switched to, so the follow
+  // effect below loads + selects each new import exactly once.
+  const syncedImportRef = useRef<string | null>(null)
   // Run gate lives on the ref (set before the paint barrier; the busy state is
   // committed later, so the state value would still read false in that window).
   const runBusyRef = useRef(false)
@@ -553,6 +556,38 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootPreview])
 
+  // Follow the selected volume: whenever the parent resolves a (new) import
+  // for the agent source, load it into the MEMFS slot and switch to it, so the
+  // Stage shows exactly the selected volume instead of a stale built-in.
+  useEffect(() => {
+    if (!previewImport) return
+    if (syncedImportRef.current === previewImport.importId) return
+    syncedImportRef.current = previewImport.importId
+    const host = hostRef.current
+    if (!host) {
+      // Host not ready yet — boot loads previewImportRef before the first
+      // push, so only point at the external slot here.
+      setParams((prev) => (prev.dataset >= BUILTIN_DATASETS.length ? prev : { ...prev, dataset: BUILTIN_DATASETS.length }))
+      return
+    }
+    // Load first, then select: pushing an external index into an empty MEMFS
+    // slot makes C++ fall back to a built-in (same trap as the boot path).
+    void ensureExternalLoaded(host, previewImport, BUILTIN_DATASETS.length)
+      .then(() => {
+        setParams((prev) =>
+          prev.dataset >= BUILTIN_DATASETS.length ? prev : { ...prev, dataset: externalIndex ?? BUILTIN_DATASETS.length },
+        )
+      })
+      .catch((err: unknown) => {
+        syncedImportRef.current = null
+        snackbar(`Preview could not follow the selected volume: ${err instanceof Error ? err.message : String(err)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      })
+  }, [previewImport, ensureExternalLoaded, externalIndex])
+
   const handleImportPick = useCallback(async () => {
     setImporting(true)
     try {
@@ -561,6 +596,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       const record = await importVolumeFile(picked.path)
       onPreviewImport(record)
       onSourceChange(record.source)
+      syncedImportRef.current = record.importId
       // Immediately load into the preview slot and switch to it.
       const host = hostRef.current
       if (host) {
@@ -759,6 +795,9 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   }, [])
 
   const externalLabel = previewImport ? `External — ${previewImport.source.split(/[\\/]/).pop()}` : 'External volume (import…)'
+  const normPath = (s: string) => s.trim().replace(/\\/g, '/').toLowerCase()
+  const inSync =
+    previewImport != null && source.trim() !== '' && normPath(previewImport.source) === normPath(source)
   const currentDataset = params.dataset
   const datasetTriggerLabel = currentDataset < BUILTIN_DATASETS.length ? datasetLabel(currentDataset) : externalLabel
   const virtualDisabled = !isVirtualMethod(params.method)
@@ -831,10 +870,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
 
               <ControlBlock
                 description={
-                  previewImport
-                    ? `Current external: ${previewImport.source}`
+                  inSync
+                    ? `Previewing the selected volume: ${source}`
                     : source
-                      ? `Agent source: ${source} — import to preview it`
+                      ? `Selected volume: ${source} — syncing to preview…`
                       : 'Pick a header; conversion reuses volume.py render.dat/raw.'
                 }
               >

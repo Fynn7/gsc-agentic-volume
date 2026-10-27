@@ -59,7 +59,7 @@ import {
   snackbar,
   type SelectionMenuContext,
 } from '@fynns/ui'
-import { importVolumeFile, pickVolumeFile, type VolumeImport } from './api'
+import { fetchVolumeImport, importVolumeFile, listVolumeImports, pickVolumeFile, type VolumeImport } from './api'
 import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
 import { ErrorRow, TuiBlockRow, WorkedRow, type ZoomPayload } from './TuiThread'
 import {
@@ -194,6 +194,11 @@ function downloadBlob(blob: Blob, name: string): void {
   } finally {
     window.setTimeout(() => URL.revokeObjectURL(url), 4000)
   }
+}
+
+function sameVolumePath(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().replace(/\\/g, '/').toLowerCase()
+  return norm(a) === norm(b)
 }
 
 function App() {
@@ -617,17 +622,9 @@ function App() {
     try {
       const picked = await pickVolumeFile()
       if (!picked.cancelled && picked.path) {
+        // The follow effect below imports the file and switches the preview,
+        // so the Stage always ends up on exactly this volume.
         setSource(picked.path)
-        try {
-          const record = await importVolumeFile(picked.path)
-          setPreviewImport(record)
-        } catch (importError: unknown) {
-          snackbar(`Preview import failed: ${errorText(importError)}`, {
-            severity: 'error',
-            duration: 'long',
-            dismissible: true,
-          })
-        }
       }
     } catch (error: unknown) {
       snackbar(
@@ -640,6 +637,55 @@ function App() {
   }, [])
   const chooseSourceRef = useRef(chooseSource)
   chooseSourceRef.current = chooseSource
+
+  // Single source of truth: the preview always follows the selected volume.
+  // Whenever `source` changes (settings load, volume dialog, composer picker),
+  // resolve the matching preview import — reuse a previous conversion when one
+  // exists, convert once otherwise — so the Stage never stays on a stale
+  // built-in while the agent runs on the selected file.
+  const syncedSourceRef = useRef<string | null>(null)
+  useEffect(() => {
+    const path = source.trim()
+    if (!path) return
+    if (previewImport && sameVolumePath(previewImport.source, path)) {
+      syncedSourceRef.current = path
+      return
+    }
+    if (syncedSourceRef.current === path) return
+    syncedSourceRef.current = path
+    let cancelled = false
+    void (async () => {
+      try {
+        const existing = await listVolumeImports()
+        if (cancelled) return
+        const hit = (existing.imports ?? []).find((item) => item.source && sameVolumePath(item.source, path))
+        if (hit?.importId) {
+          const record = await fetchVolumeImport(hit.importId)
+          if (!cancelled) setPreviewImport(record)
+          return
+        }
+      } catch {
+        if (cancelled) return
+        // Fall through to a fresh conversion below.
+      }
+      if (cancelled) return
+      try {
+        const record = await importVolumeFile(path)
+        if (!cancelled) setPreviewImport(record)
+      } catch (error: unknown) {
+        if (cancelled) return
+        syncedSourceRef.current = null
+        snackbar(`Preview could not follow the selected volume: ${errorText(error)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [source, previewImport])
 
   const toggleTheme = useCallback(() => {
     // Core owns the mode (data-fynns-theme on <html>); read it back instead
@@ -909,7 +955,7 @@ function App() {
       try {
         const saved = await tuiSaveSettings({ ...settings, volumePath: volume.path })
         setSettings(saved)
-        snackbar(`Next run works on ${volume.label}; preview it in the Stage.`, {
+        snackbar(`Next run works on ${volume.label}; the Stage follows it automatically.`, {
           severity: 'info',
           duration: 'long',
           dismissible: true,

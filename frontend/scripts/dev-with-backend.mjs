@@ -12,6 +12,9 @@ import { spawn } from "node:child_process";
 const frontendDir = process.cwd();
 const root = path.resolve(frontendDir, "..");
 const port = Number(process.env.GAV_PORT ?? 8765) || 8765;
+// 前端独占 5177（GSC 5173 / sandbox 5174 / mermaid 5176 / agentic-drive 5178 …）。
+// 被占用时直接报错退出，禁止让 Vite 静默顺延到别的端口。
+const vitePort = Number(process.env.GAV_VITE_PORT ?? 5177) || 5177;
 const backendOnly = process.argv.includes("--backend-only");
 
 function pickPython() {
@@ -26,9 +29,9 @@ function pickPython() {
   return "python";
 }
 
-function portInUse() {
+function portInUse(targetPort) {
   return new Promise((resolve) => {
-    const socket = net.connect(port, "127.0.0.1");
+    const socket = net.connect(targetPort, "127.0.0.1");
     socket.once("connect", () => socket.end(() => resolve(true)));
     socket.once("error", () => resolve(false));
   });
@@ -43,7 +46,7 @@ function waitForBackend(child, timeoutMs = 30000) {
         reject(new Error(`Backend exited before becoming ready (code ${child.exitCode}).`));
         return;
       }
-      if (await portInUse()) {
+      if (await portInUse(port)) {
         clearInterval(timer);
         resolve();
         return;
@@ -68,9 +71,17 @@ for (const event of ["SIGINT", "SIGTERM"]) process.on(event, () => stopAll(event
 process.on("exit", () => stopAll("SIGKILL"));
 
 const python = pickPython();
+// 前端端口预检：被占用直接报错，不启动后端也不让 Vite 顺延（掩盖冲突）。
+if (!backendOnly && (await portInUse(vitePort))) {
+  console.error(
+    `[dev] Vite port 127.0.0.1:${vitePort} is already in use (another app?). ` +
+      `Free it or set GAV_VITE_PORT to another value. Refusing to hop ports.`,
+  );
+  process.exit(1);
+}
 const backendArgs = ["-B", path.join(root, "src", "app.py"), "--port", String(port)];
 let backend = null;
-if (await portInUse()) {
+if (await portInUse(port)) {
   console.log(`[dev] Backend already listening on 127.0.0.1:${port}; reusing it.`);
 } else {
   backend = spawn(python, backendArgs, { cwd: root, stdio: "inherit", windowsHide: false });

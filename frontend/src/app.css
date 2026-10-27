@@ -77,6 +77,19 @@
   gap: 0.75rem;
 }
 
+/*
+ * Collapsed stage: the end pane + separator are removed from layout, chat
+ * takes the full width — but LiveStage stays mounted inside the hidden pane,
+ * so the preview iframe and Wasm engine go dormant instead of being disposed.
+ * Re-expanding is instant; no raycaster reboot. (If the GPU does reclaim the
+ * hidden GL context under pressure, the existing context-restore path in
+ * LiveStage reboots the engine as a fallback.)
+ */
+.gav-split--stage-closed .fynns-split-handle,
+.gav-split--stage-closed .fynns-split-pane--end {
+  display: none;
+}
+
 .gav-live {
   display: flex;
   flex-direction: column;
@@ -94,17 +107,33 @@
   gap: 0.6rem;
 }
 
+/*
+ * Preview + params row. Always stacked (single column) at every zoom level:
+ * preview on top, Rendering parameters below it. No side-by-side layout, so
+ * there is never a blank gutter under the shorter column.
+ * Preview keeps aspect-ratio 4 / 3 (see .gav-wasm-frame).
+ */
 .gav-canvas-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.75rem;
   align-items: start;
 }
 
-@media (max-width: 70rem) {
-  .gav-canvas-row {
-    grid-template-columns: 1fr;
-  }
+.gav-canvas-row > * {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Every LiveStage section shares one right-aligned column (same max-width,
+ * hugging the stage's right edge) so preview, params, Custom TF and GSC
+ * stay aligned at every zoom level with no blank gutter on the right. */
+.gav-params-card,
+.gav-stack-section {
+  width: 100%;
+  max-width: 76rem;
+  margin-left: auto;
+  margin-right: 0;
 }
 
 .gav-canvas-host {
@@ -112,6 +141,13 @@
   flex-direction: column;
   gap: 0.4rem;
   min-width: 0;
+  /* Preview fills the stage but never grows past a sane size on very wide
+   * (zoomed-out) viewports; right-aligned like every other section below.
+   * Ratio unchanged (see .gav-wasm-frame). */
+  width: 100%;
+  max-width: 76rem;
+  margin-left: auto;
+  margin-right: 0;
 }
 
 .gav-wasm-frame {

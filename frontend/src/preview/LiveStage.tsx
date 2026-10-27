@@ -782,7 +782,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
             </div>
           </div>
 
-          <Card title="Rendering parameters">
+          <Card title="Rendering parameters" className="gav-params-card">
             <FieldStack>
               <FieldBlock label="Dataset">
                 <DropdownMenu trigger={datasetTriggerLabel} ariaLabel="Dataset">
@@ -943,7 +943,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         </div>
       )}
 
-      <Card title="Custom transfer function">
+      <Card title="Custom transfer function" className="gav-stack-section">
         <CustomTfEditor
           encoding={params.customTf}
           tfStart={params.tfStart}
@@ -960,6 +960,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         chrome="plain"
         icon={<Code aria-hidden size={16} />}
         defaultOpen
+        className="gav-stack-section"
         actions={
           <>
             <Tooltip content="Run the current script (Ctrl+Enter)">

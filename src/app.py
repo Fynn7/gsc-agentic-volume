@@ -10,7 +10,7 @@ import traceback
 import mimetypes
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qs
 from volume import prepare
 from renderer import render, initial_scene, validate_scene, ROOT
 from model import OllamaDriver, image_message
@@ -466,6 +466,38 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     selected = None
                 return self.send(200, {'volumes': _tui_jsonable(tui_volumes.discover_volumes(selected))})
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route == '/api/tui/models':
+            try:
+                _tui_require()
+                query = parse_qs(urlsplit(self.path).query)
+                settings = tui_config.load_settings()
+                endpoints: list[str] = []
+                for key in ('endpoint', 'endpoints'):
+                    for raw in query.get(key, []):
+                        for part in str(raw).split(','):
+                            part = part.strip()
+                            if part and part not in endpoints:
+                                endpoints.append(part)
+                if not endpoints:
+                    for key in ('endpoint', 'h200Endpoint'):
+                        try:
+                            raw = str(settings.get(key) or '').strip()
+                        except Exception:
+                            raw = ''
+                        if raw and raw not in endpoints:
+                            endpoints.append(raw)
+                names: list[str] = []
+                for endpoint in endpoints:
+                    try:
+                        found = tui_services.list_models(endpoint, timeout=3.0)
+                    except Exception:
+                        found = []
+                    for name in found or []:
+                        if name not in names:
+                            names.append(name)
+                return self.send(200, {'models': sorted(names), 'endpoints': endpoints})
             except Exception as error:
                 return self.send(501, {'error': str(error)})
         if route == '/api/tui/environment':

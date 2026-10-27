@@ -4,8 +4,9 @@
  * HistoryScreen/BatchScreen/BatchDetailScreen/HelpScreen/GlossaryScreen).
  * Only fynns core components: Dialog, Table, DropdownMenu, Field* inputs.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
+  Autocomplete,
   Button,
   BusyRegion,
   CheckIcon,
@@ -16,17 +17,21 @@ import {
   EmptyState,
   FieldBlock,
   FieldStack,
+  IconButton,
   Input,
   List,
   ListItem,
+  RefreshIcon,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableHeaderCell,
   TableRow,
+  Tooltip,
 } from '@fynns/ui'
 import type { TuiBatchRecord, TuiRun, TuiSettings, TuiVolume } from './tuiApi'
+import { tuiListModels } from './tuiApi'
 
 function Shell({ children }: { children: React.ReactNode }) {
   return <FieldStack>{children}</FieldStack>
@@ -50,9 +55,23 @@ export function SettingsDialog({
   saving: boolean
 }) {
   const [draft, setDraft] = useState<TuiSettings>(settings)
+  const [models, setModels] = useState<string[]>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const loadModels = useCallback(async (endpoints: string[]) => {
+    setModelsLoading(true)
+    try {
+      const data = await tuiListModels(endpoints.map((item) => item.trim()).filter(Boolean))
+      setModels(data.models)
+    } finally {
+      setModelsLoading(false)
+    }
+  }, [])
   useEffect(() => {
-    if (open) setDraft(settings)
-  }, [open, settings])
+    if (open) {
+      setDraft(settings)
+      void loadModels([settings.endpoint, settings.h200Endpoint])
+    }
+  }, [open, settings, loadModels])
   const set = <K extends keyof TuiSettings>(key: K, value: TuiSettings[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }))
   const volumeLabel =
@@ -79,13 +98,34 @@ export function SettingsDialog({
             ))}
           </DropdownMenu>
         </FieldBlock>
-        <FieldBlock label="Model" description="Ollama model on this machine (Tab completion lives in the TUI).">
-          <Input
-            value={draft.model}
-            onChange={(event) => set('model', event.target.value)}
-            spellCheck={false}
-            autoComplete="off"
-          />
+        <FieldBlock label="Model">
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Autocomplete
+                value={draft.model}
+                onChange={(value) => {
+                  // 严格单选：手输未知型号直接丢弃，只接受列表中的选择。
+                  if (value) set('model', value)
+                }}
+                options={models}
+                ariaLabel="Model"
+                placeholder="选择本机模型"
+                emptyText="无匹配 — 请先 ollama pull 并刷新"
+              />
+            </div>
+            <Tooltip content="重新读取本机 Ollama 模型">
+              <IconButton
+                variant="ghost"
+                size="sm"
+                aria-label="刷新本机模型列表"
+                disabled={modelsLoading}
+                aria-busy={modelsLoading || undefined}
+                onClick={() => void loadModels([draft.endpoint, draft.h200Endpoint])}
+              >
+                <RefreshIcon aria-hidden />
+              </IconButton>
+            </Tooltip>
+          </div>
         </FieldBlock>
         <FieldBlock label="Volume">
           <DropdownMenu trigger={volumeLabel} ariaLabel="Volume">

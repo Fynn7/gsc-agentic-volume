@@ -266,6 +266,14 @@ export function tuiVolumes() {
   return request<{ volumes: TuiVolume[] }>('/api/tui/volumes')
 }
 
+export function tuiListModels(endpoints?: string[]) {
+  const query =
+    endpoints && endpoints.length > 0
+      ? `?endpoint=${encodeURIComponent(endpoints.join(','))}`
+      : ''
+  return request<{ models: string[]; endpoints: string[] }>(`/api/tui/models${query}`)
+}
+
 export function tuiEnvironment() {
   return request<{
     settings: TuiSettings

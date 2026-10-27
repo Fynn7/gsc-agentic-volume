@@ -12,6 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import {
   applyFynnsThemeMode,
   ArchivedChatsSettingsDialog,
+  ArchiveIcon,
   Avatar,
   BusyRegion,
   Button,
@@ -28,6 +29,8 @@ import {
   ConfirmDialog,
   Dialog,
   DownloadIcon,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
   EmptyState,
   EndAside,
   ExpandableCodeBlock,
@@ -43,8 +46,8 @@ import {
   PageScroll,
   PanelLeftIcon,
   PanelRightIcon,
+  PencilIcon,
   PlusIcon,
-  RefreshIcon,
   restoreFynnsThemeMode,
   SettingsIcon,
   SnackbarHost,
@@ -52,11 +55,13 @@ import {
   Tabs,
   TopAppBar,
   Tooltip,
+  TrashIcon,
   snackbar,
+  type SelectionMenuContext,
 } from '@fynns/ui'
 import { importVolumeFile, pickVolumeFile, type VolumeImport } from './api'
 import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
-import { TuiBlockRow, WorkedRow, type ZoomPayload } from './TuiThread'
+import { ErrorRow, TuiBlockRow, WorkedRow, type ZoomPayload } from './TuiThread'
 import {
   BatchDetailDialog,
   BatchDialog,
@@ -1003,6 +1008,72 @@ function App() {
     [openRun, refreshArchived, refreshRuns, unarchiving],
   )
 
+  // Left-nav menus (core renderMenu extension point): rows keep the ChatGPT
+  // order Rename / Archive / Delete; blank-area right-click and the More
+  // menu offer New task / Archive all / Delete all. Selection menus stay
+  // off — the drawer does not enable multi-select.
+  const renderRunMenu = useCallback(
+    (context: SelectionMenuContext): ReactNode => {
+      if (context.kind === 'item' && context.targetId != null) {
+        const id = context.targetId
+        return (
+          <>
+            <DropdownMenuItem
+              icon={<PencilIcon aria-hidden />}
+              onClick={() => {
+                const run = runs.find((item) => item.runId === id)
+                if (!run) return
+                setRenameTarget(run)
+                setRenameDraft(run.task)
+              }}
+            >
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem icon={<ArchiveIcon aria-hidden />} onClick={() => void handleArchiveRun(id)}>
+              Archive
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              icon={<TrashIcon aria-hidden />}
+              tone="danger"
+              onClick={() => {
+                const run = runs.find((item) => item.runId === id)
+                if (run) setDeleteTarget(run)
+              }}
+            >
+              Delete
+            </DropdownMenuItem>
+          </>
+        )
+      }
+      if (context.kind === 'selection') return null
+      return (
+        <>
+          <DropdownMenuItem icon={<PlusIcon aria-hidden />} onClick={handleNewTask}>
+            New task
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            icon={<ArchiveIcon aria-hidden />}
+            disabled={archiving || runs.length === 0}
+            onClick={() => setArchiveConfirm(true)}
+          >
+            Archive all
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            icon={<TrashIcon aria-hidden />}
+            tone="danger"
+            disabled={runs.length === 0}
+            onClick={() => setDeleteAllConfirm(true)}
+          >
+            Delete all
+          </DropdownMenuItem>
+        </>
+      )
+    },
+    [runs, handleNewTask, handleArchiveRun, archiving],
+  )
+
   const handleRenameRun = useCallback(async () => {
     if (!renameTarget || renameSaving) return
     const name = renameDraft.trim()
@@ -1170,28 +1241,7 @@ function App() {
         {taskText}
       </ChatMessage>,
     )
-    rows.push(
-      <ChatMessage
-        key="failed-assistant"
-        role="assistant"
-        actions={
-          <Tooltip content="Retry">
-            <IconButton
-              type="button"
-              size="sm"
-              aria-label="Retry"
-              onClick={() => void startCustomRun(retryTask, retryKind)}
-            >
-              <RefreshIcon size={16} aria-hidden />
-            </IconButton>
-          </Tooltip>
-        }
-      >
-        <p role="alert" style={{ color: 'var(--fynns-color-danger)', margin: 0 }}>
-          {failedRed}
-        </p>
-      </ChatMessage>,
-    )
+    rows.push(<ErrorRow key="failed-assistant" message={failedRed} onRetry={() => void startCustomRun(retryTask, retryKind)} />)
   }
   // Terminal run: thinking is over, so every step collapses into one summary
   // disclosure ("Worked for …"). The user prompt, frame figures and alerts
@@ -1212,7 +1262,13 @@ function App() {
         return
       }
       const row = (
-        <TuiBlockRow key={`${block.kind}-${index}`} block={block} showPlumbing={showPlumbing} onZoom={openZoom} />
+        <TuiBlockRow
+          key={`${block.kind}-${index}`}
+          block={block}
+          showPlumbing={showPlumbing}
+          onZoom={openZoom}
+          onRetryError={() => void startCustomRun(transcript.task || '', 'custom')}
+        />
       )
       if (row) rows.push(row)
     })
@@ -1539,6 +1595,7 @@ function App() {
                 revealMore: 'Show more runs',
               }}
               reveal={{ initial: 12, step: 12 }}
+              renderMenu={renderRunMenu}
               footer={
                 <div className="fynns-nav-drawer-footer-account">
                   <div className="fynns-nav-drawer-footer-account-start">

@@ -1142,13 +1142,13 @@ function App() {
         <TuiBlockRow
           key="live"
           block={{
-            kind: 'thinking',
-            title: 'Thinking',
-            subtitle: liveLabel(transcript, pending),
+            kind: 'notice',
+            title: liveLabel(transcript, pending),
+            subtitle: '',
             body: '',
             status: 'running',
             ts: null,
-            data: { reasoning: true },
+            data: {},
           }}
           showPlumbing={showPlumbing}
           onZoom={openZoom}
@@ -1160,13 +1160,13 @@ function App() {
       <TuiBlockRow
         key="live"
         block={{
-          kind: 'thinking',
-          title: 'Thinking',
-          subtitle: liveLabel(transcript, pending),
+          kind: 'notice',
+          title: liveLabel(transcript, pending),
+          subtitle: '',
           body: '',
           status: 'running',
           ts: null,
-          data: { reasoning: true },
+          data: {},
         }}
         showPlumbing={showPlumbing}
         onZoom={openZoom}

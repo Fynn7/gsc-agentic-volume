@@ -292,6 +292,29 @@ class TranscriptBlocks(unittest.TestCase):
         block = self.transcript.find(tui_transcript.META)
         self.assertTrue(block["data"]["plumbing"])
 
+    def test_a_late_transport_row_files_by_run_clock_time(self):
+        """A reopened run reads the transport last: it still interleaves."""
+        self.transcript.ingest({"kind": "tool_call", "name": "inspect_scene",
+                                 "source": "service", "arguments": {},
+                                 "ts": 1020.0, "time": 1020.0})
+        self.transcript.ingest({"kind": "meta", "text": "model call #1",
+                                 "ts": 1010.0, "time": 1010.0})
+        self.transcript.ingest({"kind": "meta", "text": "HTTP 200 in 74s",
+                                 "ts": 1084.0, "time": 1084.0})
+        titles = [block["title"] for block in self.transcript.blocks]
+        self.assertLess(titles.index("model call #1"), titles.index("Inspecting the scene"))
+        self.assertLess(titles.index("Inspecting the scene"), titles.index("HTTP 200 in 74s"))
+
+    def test_a_thinking_start_reuses_the_open_stream_block(self):
+        """No second Thinking row, whichever source the merge reads first."""
+        self.transcript.ingest({"kind": "reasoning_delta", "delta": "look", "call": 1,
+                                "ts": 1011.0, "time": 1011.0})
+        self.transcript.ingest({"kind": "thinking_start", "ts": 1010.0, "time": 1010.0})
+        thinking = [block for block in self.transcript.blocks
+                    if block["kind"] == tui_transcript.THINKING]
+        self.assertEqual(len(thinking), 1)
+        self.assertEqual(thinking[0]["body"], "look")
+
     def test_the_end_of_the_run_names_the_frame_and_the_claim(self):
         self.transcript.ingest({"kind": "finish", "revision": 3,
                                 "verification": "unverified",
@@ -320,6 +343,17 @@ class CompactionAndPerCallThinking(unittest.TestCase):
 
     def setUp(self):
         self.transcript = tui_transcript.Transcript()
+
+    def test_a_superseded_thinking_row_freezes_on_the_run_clock(self):
+        """Replaying old evidence must not bill wall-clock years to a row."""
+        self.transcript.ingest({"kind": "reasoning_delta", "delta": "look", "call": 1,
+                                "ts": 1010.0, "time": 1010.0})
+        self.transcript.ingest({"kind": "reasoning_delta", "delta": "again", "call": 2,
+                                "ts": 1025.0, "time": 1025.0})
+        thinking = [block for block in self.transcript.blocks
+                    if block["kind"] == tui_transcript.THINKING]
+        self.assertEqual(len(thinking), 2)
+        self.assertEqual(thinking[0]["subtitle"], "for 15s")
 
     def test_each_model_call_gets_its_own_thinking_block(self):
         self.transcript.ingest({"kind": "thinking_start"})

@@ -149,6 +149,23 @@ class StreamCallTags(unittest.TestCase):
             self.assertTrue(all("ts" in e for e in events))
             self.assertTrue(all("compaction" not in e for e in events))
 
+    def test_streamed_chunks_carry_run_clock_times_inside_their_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            http = run_dir / "http"
+            http.mkdir()
+            (http / "http-001.response.bin").write_text(
+                _sse({"type": "response.output_text.delta", "delta": "one"}),
+                encoding="utf-8")
+            (http / "http-001.metadata.json").write_text(json.dumps(
+                {"index": 1, "started": 1010.0, "ended": 1084.0, "status": 200}))
+            tail = tui_stream.StreamTail(run_dir)
+            events = tail.poll()
+            self.assertEqual(len(events), 1)
+            self.assertGreaterEqual(events[0]["time"], 1010.0)
+            self.assertLessEqual(events[0]["time"], 1084.0)
+            self.assertEqual(events[0]["call"], 1)
+
     def test_a_compaction_call_is_flagged_from_the_request_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)

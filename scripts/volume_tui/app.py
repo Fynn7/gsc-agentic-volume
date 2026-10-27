@@ -2382,12 +2382,11 @@ if _TEXTUAL:
                 return  # the run changed while the read was running
             if fresh:
                 self.live_events.extend(fresh)
-            # The stream is the model's own order of work (thinking, then the
-            # call): it folds in first, then the service/harness evidence that
-            # the work caused (the tool row, the frame). The other order shows
-            # the call before the thinking that chose it.
-            self._ingest_events(streamed)
-            self._ingest_events(fresh)
+            # Execution order, not read order: a model call was sent, the
+            # model thought, the tool ran, the reply came back. The merge
+            # is by run-clock time, so the transport rows interleave with
+            # the steps they carried instead of piling up at the end.
+            self._ingest_events(trace_mod.sort_events(list(streamed) + list(fresh)))
             # A history run is read-only: anything that is not actually
             # running freezes the view, so an interrupted turn never keeps
             # spinning as "Working". The check runs after the ingest, so a
@@ -2510,6 +2509,7 @@ if _TEXTUAL:
             """The run is over: the thinking block does not spin any more."""
             if self.transcript is None:
                 return
+            end = transcript_mod.run_end_ts(self.transcript.blocks)
             for kind in (transcript_mod.THINKING, transcript_mod.COMPACTION):
                 block = self.transcript.find(kind)
                 if block is not None and block.get("status") == "running":
@@ -2517,7 +2517,7 @@ if _TEXTUAL:
                     # The ticking ends with the run: a thinking row freezes
                     # its final duration instead of counting on.
                     if kind == transcript_mod.THINKING:
-                        block["subtitle"] = transcript_mod._thinking_elapsed(block)
+                        block["subtitle"] = transcript_mod._thinking_elapsed(block, now=end)
                     if isinstance(block.get("data"), dict):
                         block["data"]["open"] = False
                     self._refresh_block_widget(block)

@@ -281,18 +281,38 @@ def _with_event_time(event: dict) -> dict:
     return stamped
 
 
-def _thinking_elapsed(block: dict) -> str:
+def _thinking_elapsed(block: dict, now: float | None = None) -> str:
     """The frozen duration of a finished thinking row ("for 45s").
 
     The row keeps the time it took, the way the tool rows keep theirs —
-    only while it runs does the screen count.
+    only while it runs does the screen count. The reference clock must be
+    the run clock (event times), never the wall clock: a reopened run
+    replays old evidence long after it happened.
     """
     started = block.get("ts") or time.time()
+    if now is None:
+        now = time.time()
     try:
-        elapsed = max(0.0, time.time() - float(started))
+        elapsed = max(0.0, float(now) - float(started))
     except (TypeError, ValueError):
         elapsed = 0.0
     return "for " + text_mod.format_duration(elapsed)
+
+
+def run_end_ts(blocks) -> float | None:
+    """Latest run-clock stamp of the transcript.
+
+    Freezing an open row (a thinking chain the evidence never closed)
+    measures against the end of the evidence, never the wall clock of a
+    later replay.
+    """
+    best: float | None = None
+    for block in blocks or []:
+        stamp = (block or {}).get("ts")
+        if text_mod.is_number(stamp):
+            value = float(stamp)
+            best = value if best is None else max(best, value)
+    return best
 
 
 class Transcript:
@@ -389,6 +409,12 @@ class Transcript:
             return []
 
     def _ingest_thinking_start(self, event: dict) -> list[dict]:
+        # The recorded stream may already reason about this turn: reusing
+        # the open block keeps one Thinking row no matter which source the
+        # merge reads first (stream deltas use run-clock stamps too, so
+        # either order folds into the same row).
+        if self._thinking is not None and self._thinking.get("status") == "running":
+            return [self._thinking]
         block = self.add(THINKING, title="Thinking", status="running",
                          ts=event.get("ts"))
         self._thinking = block
@@ -447,8 +473,11 @@ class Transcript:
             # A new model call reasons in a new row: the old chain is over,
             # and its elapsed time freezes into the row (an ended row never
             # counts, it keeps its final duration like the tool rows do).
+            # The freeze uses the run clock of the event that ended the
+            # chain, never the wall clock of a later replay.
             block["status"] = "done"
-            block["subtitle"] = _thinking_elapsed(block)
+            block["subtitle"] = _thinking_elapsed(
+                block, now=ts if text_mod.is_number(ts) else None)
             self._thinking = None
             self._thinking_call = None
             block = None
@@ -808,10 +837,33 @@ class Transcript:
 
         The evidence stays complete, but the screen hides it by default: a
         reader who never saw this system reads the steps, not the transport.
+        The row is filed by run-clock time, not by poll order, so a reopened
+        run interleaves "model call #N" ahead of the work of call N and
+        "HTTP ..." right after it instead of piling every transport row at
+        the end of the conversation.
         """
-        block = self.add(META, title=str(event.get("text") or ""),
-                         ts=event.get("ts"))
-        block["data"]["plumbing"] = True
+        stamp = event.get("ts")
+        if not text_mod.is_number(stamp):
+            stamp = time.time()
+        block = {
+            "kind": META,
+            "title": str(event.get("text") or ""),
+            "subtitle": "",
+            "body": "",
+            "status": None,
+            "ts": stamp,
+            "data": {"plumbing": True},
+        }
+        index = len(self.blocks)
+        for position, existing in enumerate(self.blocks):
+            try:
+                other = float(existing.get("ts"))
+            except (TypeError, ValueError):
+                continue
+            if other > float(stamp):
+                index = position
+                break
+        self.blocks.insert(index, block)
         return [block]
 
     def _ingest_done(self, event: dict) -> list[dict]:

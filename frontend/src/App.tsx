@@ -1302,16 +1302,28 @@ function App() {
     )
     rows.push(<ErrorRow key="failed-assistant" message={failedRed} onRetry={() => void startCustomRun(retryTask, retryKind)} />)
   }
-  // Terminal run: thinking is over, so every step collapses into one summary
-  // disclosure ("Worked for …"). The user prompt, frame figures and alerts
-  // stay as rows: figures and alerts cannot nest inside thinking.
+  // Terminal run: thinking is over, so the evidence collapses into one summary
+  // disclosure ("Worked for …"). The user prompt and the run's final answer
+  // stay as rows: the answer is the point of the run and reads as primary
+  // text. Intermediate model words fold into the disclosure as quiet reasoning
+  // text (core treaty: thinking holds only muted small text, answers live
+  // outside). Figures and alerts cannot nest inside thinking, so they stay
+  // rows too.
   const terminal = transcript != null && transcript.status !== 'running' && pending === null
   const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'notices', 'notice', 'meta'])
+  // The run's final answer: last assistant block in transcript order.
+  const finalAnswerIndex = transcript
+    ? transcript.blocks.map((block) => block.kind).lastIndexOf('assistant')
+    : -1
   if (transcript && transcript.runId !== 'local-start-failed') {
-    const workedBlocks = terminal ? transcript.blocks.filter((block) => collapsibleKinds.has(block.kind)) : []
+    const workedBlocks = terminal
+      ? transcript.blocks.filter(
+          (block, index) => collapsibleKinds.has(block.kind) && index !== finalAnswerIndex,
+        )
+      : []
     let workedInserted = workedBlocks.length === 0
     transcript.blocks.forEach((block, index) => {
-      if (terminal && collapsibleKinds.has(block.kind)) {
+      if (terminal && collapsibleKinds.has(block.kind) && index !== finalAnswerIndex) {
         if (!workedInserted) {
           workedInserted = true
           rows.push(

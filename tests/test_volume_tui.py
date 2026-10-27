@@ -257,6 +257,61 @@ class TraceEvents(unittest.TestCase):
             encoding="utf-8")
         return run_dir, session_dir
 
+    def test_transport_rows_carry_run_clock_times_and_merge_in_order(self):
+        """The model calls and HTTP rows interleave with the steps they carried.
+
+        Regression: they used to share the poll time, so every reopened run
+        piled "model call #N" and "HTTP ..." at the end of the conversation
+        instead of request -> work -> reply.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run-t"
+            run_dir.mkdir()
+            (run_dir / "run.json").write_text(json.dumps(
+                {"runId": "run-t", "status": "finished", "startedAt": 1000.0}))
+            http_dir = run_dir / "http"
+            http_dir.mkdir()
+            (http_dir / "http-001.request.bin").write_bytes(b"{}")
+            (http_dir / "http-001.metadata.json").write_text(json.dumps(
+                {"index": 1, "method": "POST", "path": "/v1/responses",
+                 "status": 200, "started": 1010.0, "ended": 1084.0, "seconds": 74.0}))
+            (http_dir / "http-002.request.bin").write_bytes(b"{}")
+            (http_dir / "http-002.metadata.json").write_text(json.dumps(
+                {"index": 2, "method": "POST", "path": "/v1/responses",
+                 "status": 200, "started": 1085.0, "ended": 1102.0, "seconds": 17.0}))
+            (run_dir / "session.json").write_text(json.dumps({"id": "s", "events": [
+                {"seq": 0, "kind": "external_tool_call", "name": "inspect_scene",
+                 "arguments": {}, "time": 1020.0},
+                {"seq": 1, "kind": "external_tool_return", "name": "inspect_scene",
+                 "seconds": 0.1, "time": 1021.0}]}))
+            tail = tui_trace.EventTail(run_dir, None)
+            fresh = tail.poll()
+            metas = [e for e in fresh if e.get("kind") == "meta"]
+            self.assertEqual(len(metas), 4)
+            by_prefix = {}
+            for e in metas:
+                for prefix in ("model call #1", "model call #2",
+                               "HTTP 200 in 74s", "HTTP 200 in 17s"):
+                    if str(e.get("text") or "").startswith(prefix):
+                        by_prefix[prefix] = e
+            self.assertEqual(set(by_prefix), {"model call #1", "model call #2",
+                                              "HTTP 200 in 74s", "HTTP 200 in 17s"})
+            self.assertEqual(by_prefix["model call #1"]["time"], 1010.0)
+            self.assertEqual(by_prefix["HTTP 200 in 74s"]["time"], 1084.0)
+            self.assertEqual(by_prefix["model call #2"]["time"], 1085.0)
+            self.assertEqual(by_prefix["HTTP 200 in 17s"]["time"], 1102.0)
+            self.assertTrue(all(e.get("call") in (1, 2) for e in metas))
+            merged = tui_trace.sort_events(fresh)
+            kinds = [(e.get("kind"), e.get("text") or e.get("name")) for e in merged]
+            request = next(i for i, (k, t) in enumerate(kinds)
+                           if k == "meta" and str(t).startswith("model call #1"))
+            tool = next(i for i, k in enumerate([k for k, _ in kinds]) if k == "tool_call")
+            reply = next(i for i, (k, t) in enumerate(kinds)
+                         if k == "meta" and str(t).startswith("HTTP 200 in 74s"))
+            self.assertLess(request, tool)
+            self.assertLess(tool, reply)
+
     def test_poll_order_dedup_and_partial_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir, session_dir = self._fixture_run(Path(tmp))

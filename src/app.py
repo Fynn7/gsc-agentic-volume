@@ -322,22 +322,24 @@ def _tui_transcript_payload(run_id):
         streamed = tui_stream.StreamTail(run_dir).poll()
     except Exception:
         streamed = []
-    # The stream is the model's own order of work (thinking, then the call):
-    # it folds in first, then the service/harness evidence. Same order as app.py.
-    for event in streamed:
-        transcript.ingest(event)
-    for event in fresh:
+    # The stream is the model's own order of work (thinking, then the call),
+    # folded together with the service/harness evidence in execution order:
+    # a model call was sent, the model thought, the tool ran, the reply
+    # came back. Sorting by run-clock time restores that order, so the
+    # transport rows interleave with the steps they carried.
+    for event in tui_trace.sort_events(streamed + fresh):
         transcript.ingest(event)
     state = _tui_run_status(run_dir)
     stopping = (run_dir.parent / 'tui-control' / ('%s.stop' % entry.get('runId'))).is_file()
     if state not in ('running',) or stopping:
+        end = tui_transcript.run_end_ts(transcript.blocks)
         for kind in (tui_transcript.THINKING, tui_transcript.COMPACTION):
             block = transcript.find(kind)
             if block is not None and block.get('status') == 'running':
                 block['status'] = 'done'
                 if kind == tui_transcript.THINKING:
                     try:
-                        block['subtitle'] = tui_transcript._thinking_elapsed(block)
+                        block['subtitle'] = tui_transcript._thinking_elapsed(block, now=end)
                     except Exception:
                         pass
                 if isinstance(block.get('data'), dict):

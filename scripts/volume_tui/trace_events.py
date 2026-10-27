@@ -34,6 +34,114 @@ def _http_index(path: Path) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _epoch_number(value) -> float | None:
+    """Run-clock seconds for a timestamp, None when it carries no time."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(text).timestamp()
+        except (ValueError, OSError):
+            return None
+    return None
+
+
+def _align_harness_tools(events: list[dict]) -> None:
+    """Pin harness tool rows to the measured time of the same call.
+
+    The harness log carries no per-line timestamps, so a reopened run first
+    spreads its lines across the recorded call window (see _harness_stamps).
+    That approximation can place a harness message seconds away from the
+    tool row it describes. The service log and the recorded stream do carry
+    true times, and the transcript folds duplicate tool reports into one
+    row — so a harness tool event borrows the time of the same tool's
+    measured event (nth call of that tool matches nth measurement), and the
+    remaining harness lines keep file-order monotonicity around those pins.
+    Mutates the harness events in place.
+    """
+    from collections import defaultdict
+    pools: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        source = str(event.get("source") or "")
+        if source not in ("service", "stream"):
+            continue
+        kind = str(event.get("kind") or "")
+        group = "call" if kind == "tool_call" else (
+            "result" if kind in ("tool_result", "tool_error") else None)
+        if group is None:
+            continue
+        stamp = _epoch_number(event.get("time"))
+        if stamp is None:
+            continue
+        pools[(group, str(event.get("name") or ""))].append(stamp)
+    for pool in pools.values():
+        pool.sort()
+    previous = float("-inf")
+    for event in events:
+        if not isinstance(event, dict) or str(event.get("source") or "") != "harness":
+            continue
+        kind = str(event.get("kind") or "")
+        if kind in ("tool_call", "tool_result", "tool_error"):
+            group = "call" if kind == "tool_call" else "result"
+            pool = pools.get((group, str(event.get("name") or "")))
+            if pool:
+                stamp = pool.pop(0)
+                event["time"] = stamp
+                event["ts"] = stamp
+                if stamp > previous:
+                    previous = stamp
+                continue
+        stamp = _epoch_number(event.get("time"))
+        if stamp is None or stamp <= previous:
+            stamp = previous + 0.001 if previous != float("-inf") else event_time(event)
+            event["time"] = stamp
+            event["ts"] = stamp
+        else:
+            previous = stamp
+
+
+def event_time(event: dict) -> float:
+    """When the event happened (run clock), for chronological merge.
+
+    Prefers the recorded event time ("time") over the moment the TUI read
+    it ("ts"); events with no usable time sort last so they never jump
+    ahead of measured evidence.
+    """
+    if not isinstance(event, dict):
+        return float("inf")
+    for key in ("time", "ts"):
+        stamp = _epoch_number(event.get(key))
+        if stamp is not None:
+            return stamp
+    return float("inf")
+
+
+def sort_events(events: list[dict]) -> list[dict]:
+    """Chronological merge of one poll batch (stable: ties keep file order).
+
+    Sources are read in a fixed order (harness, session, events, http) plus
+    the recorded model stream, but the run happened in time order: a model
+    call was sent, the model thought, the tool ran, the reply came back.
+    Sorting by event time before folding restores that order, so the
+    conversation reads the way the run actually executed.
+    """
+    aligned = list(events)
+    _align_harness_tools(aligned)
+    return sorted(aligned, key=event_time)
+
+
 def _request_summary(run_dir: Path, index: int) -> tuple[str, str]:
     """What was actually sent to the model for call #index (no base64).
 
@@ -104,6 +212,8 @@ class EventTail:
         self._session_mtime: float = 0.0
         self._session_size: int = -1
         self._turn = 0
+        self._harness_n = 0      # harness lines folded so far (file order)
+        self._harness_last = 0.0  # last harness stamp (keeps live ticks monotonic)
         # What the last call of each tool changed, so a rejection can name it.
         self._last_call: dict = {}
         self.counters = {"images": 0, "tools": 0, "http": 0}
@@ -116,6 +226,115 @@ class EventTail:
     def _now() -> float:
         import time as _time
         return _time.time()
+
+    def _run_finished(self) -> bool:
+        """Has this run recorded an end (history, not live)?"""
+        try:
+            status = str(json.loads(
+                (self.run_dir / "run.json").read_text(encoding="utf-8")).get("status") or "")
+        except (OSError, ValueError):
+            return False
+        return status.strip().lower() in ("finished", "failed", "stopped", "interrupted")
+
+    def _run_window(self) -> tuple[float | None, float | None]:
+        """(first request sent, last reply received) of the recorded calls.
+
+        The harness log carries no per-line timestamps, so a reopened run
+        spreads its harness lines across this window in file order. Live
+        runs use the arrival clock instead (see _harness_stamps).
+        """
+        started: float | None = None
+        ended: float | None = None
+        directory = self.run_dir / "http"
+        try:
+            metas = sorted(directory.glob("http-*.metadata.json"), key=_http_index)
+        except OSError:
+            metas = []
+        for path in metas:
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            start = _epoch_number(meta.get("started"))
+            end = _epoch_number(meta.get("ended"))
+            if start is not None:
+                started = start if started is None else min(started, start)
+            if end is not None:
+                ended = end if ended is None else max(ended, end)
+        if started is None:
+            try:
+                requests = sorted(directory.glob("http-*.request.bin"), key=_http_index)
+                if requests:
+                    started = float(requests[0].stat().st_mtime)
+            except OSError:
+                pass
+        if started is None:
+            try:
+                run = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))
+                start = _epoch_number((run or {}).get("startedAt"))
+                if start is not None:
+                    started = start
+            except (OSError, ValueError):
+                pass
+        if ended is None or (started is not None and ended < started):
+            try:
+                ended = float((self.run_dir / "harness.jsonl").stat().st_mtime)
+            except OSError:
+                ended = self._now()
+        return started, ended
+
+    def _harness_stamps(self, kinds: list[str]) -> list[float]:
+        """One run-clock stamp per new harness event, in file order.
+
+        A reopened run has no per-line timestamps, so its lines are mapped
+        onto the recorded call window: anything before the turn starts
+        (housekeeping warnings) lands just ahead of the first request, the
+        turn itself spans first-request to last-reply, and anything after
+        the turn ends lands just behind the last reply. A live run stamps
+        arrivals, which is already execution order.
+        """
+        now = self._now()
+        count = len(kinds)
+        if count <= 0:
+            return []
+        first_batch = self._harness_n == 0
+        if first_batch and (self._run_finished() or count >= 4):
+            started, ended = self._run_window()
+            if started is not None and ended is not None:
+                # A run that failed fast has a degenerate window: widen it so
+                # the lines keep file order instead of collapsing onto one tick.
+                ended = max(ended, started + count * 0.01 + 0.01)
+                if ended > started + 0.001:
+                    try:
+                        first_turn = kinds.index("thinking_start")
+                    except ValueError:
+                        first_turn = 0
+                    last_turn = -1
+                    for index, kind in enumerate(kinds):
+                        if kind in ("thinking_end", "error"):
+                            last_turn = index
+                    if last_turn < first_turn:
+                        last_turn = first_turn
+                    stamps = []
+                    turn_zero = started + 0.005  # the request itself is the turn's first line
+                    for index in range(count):
+                        if index < first_turn:
+                            stamps.append(started - (first_turn - index) * 0.01)
+                        elif index <= last_turn:
+                            span = max(1, last_turn - first_turn)
+                            stamps.append(turn_zero + (index - first_turn) / span * (ended - turn_zero))
+                        else:
+                            stamps.append(ended + (index - last_turn) * 0.01)
+                    self._harness_last = stamps[-1]
+                    self._harness_n += count
+                    return stamps
+        base = max(now, self._harness_last + 0.001)
+        stamps = [base + index * 0.001 for index in range(count)]
+        self._harness_last = stamps[-1]
+        self._harness_n += count
+        return stamps
 
     def _lines(self, key: str, path: Path):
         state = self._files.setdefault(key, {"path": None, "offset": 0, "buffer": ""})
@@ -153,31 +372,37 @@ class EventTail:
 
     # -- harness.jsonl (model turns) -------------------------------------
     def _poll_harness(self) -> list[dict]:
-        out = []
-        for line in self._lines("harness", self.run_dir / "harness.jsonl"):
+        lines = list(self._lines("harness", self.run_dir / "harness.jsonl"))
+        records = []
+        for line in lines:
             try:
-                record = json.loads(line)
+                records.append(json.loads(line))
             except ValueError:
                 continue  # partial/corrupt line skipped, same as agent_console
-            stamp = self._now()
+        out = []
+        for record in records:
+            stamp = 0.0  # replaced below by the turn-anchored run-clock stamp
             kind = record.get("type")
             if kind == "turn.started":
                 self._turn += 1
                 event = text_mod.model_turn_started(self._turn)
                 out.append({"cat": "MODEL", "kind": "thinking_start",
                             "title": event["title"], "detail": event["detail"],
-                            "turn": self._turn, "ts": stamp})
+                            "turn": self._turn, "source": "harness",
+                            "ts": stamp, "time": stamp})
             elif kind == "turn.completed":
                 usage = record.get("usage") or {}
                 event = text_mod.model_turn_done(self._turn, usage)
                 out.append({"cat": "MODEL", "kind": "thinking_end",
                             "title": event["title"], "detail": event["detail"],
-                            "turn": self._turn, "usage": usage, "ts": stamp})
+                            "turn": self._turn, "usage": usage, "source": "harness",
+                            "ts": stamp, "time": stamp})
             elif kind == "turn.failed":
                 message = str((record.get("error") or {}).get("message")
                               or record.get("message") or "the turn failed")
                 out.append({"cat": "ERROR", "kind": "error", "title": "ERROR  %s" % message,
-                            "detail": message, "message": message, "ts": stamp})
+                            "detail": message, "message": message, "source": "harness",
+                            "ts": stamp, "time": stamp})
             elif kind in ("item.started", "item.updated", "item.completed"):
                 item = record.get("item") or {}
                 item_type = item.get("type")
@@ -191,7 +416,8 @@ class EventTail:
                                   else "assistant")
                     out.append({"cat": "MODEL", "kind": event_kind,
                                 "title": event["title"], "detail": event["detail"],
-                                "text": item.get("text", ""), "ts": stamp})
+                                "text": item.get("text", ""), "source": "harness",
+                                "ts": stamp, "time": stamp})
                 elif item_type == "error":
                     # The codex harness reports its own notices this way; they
                     # do not stop the run, so they are warnings, not errors.
@@ -199,9 +425,15 @@ class EventTail:
                     event = text_mod.harness_warning(message)
                     out.append({"cat": "WARN", "kind": "warn", "title": event["title"],
                                 "detail": event["detail"], "message": message,
-                                "ts": stamp})
+                                "source": "harness", "ts": stamp, "time": stamp})
                 elif item_type == "mcp_tool_call":
                     out.extend(self._harness_tool_event(record, item, stamp))
+        # Turn-anchored run-clock stamps: the merge with the timed evidence
+        # reads in execution order (warnings ahead of the first request, the
+        # turn spanning first-request to last-reply).
+        for event, stamp in zip(out, self._harness_stamps([e.get("kind", "") for e in out])):
+            event["ts"] = stamp
+            event["time"] = stamp
         return out
 
     def _harness_tool_event(self, record: dict, item: dict, stamp: float) -> list[dict]:
@@ -216,15 +448,15 @@ class EventTail:
         if record.get("type") in ("item.started", "item.updated"):
             return [{"cat": "TOOL", "kind": "tool_call", "title": "TOOL  %s" % name,
                      "detail": "", "name": name, "source": "harness",
-                     "arguments": item.get("arguments") or {}, "ts": stamp}]
+                     "arguments": item.get("arguments") or {}, "ts": stamp, "time": stamp}]
         failed = bool(item.get("error")) or status == "failed"
         if failed:
             message = str(item.get("error") or "the tool call failed")
             return [{"cat": "ERROR", "kind": "tool_error", "title": "TOOL  %s  FAILED" % name,
                      "detail": message, "name": name, "source": "harness",
-                     "message": message, "ts": stamp}]
+                     "message": message, "ts": stamp, "time": stamp}]
         return [{"cat": "TOOL", "kind": "tool_result", "title": "TOOL  %s  returned" % name,
-                 "detail": "", "name": name, "source": "harness", "ts": stamp}]
+                 "detail": "", "name": name, "source": "harness", "ts": stamp, "time": stamp}]
 
     # -- run_dir/session.json (embedded events array; always in the run dir) --
     def _poll_session_json(self) -> list[dict]:
@@ -404,6 +636,36 @@ class EventTail:
         return out
 
     # -- http/*.metadata.json (inference) ----------------------------------
+    def _request_time(self, index: int, path: Path) -> float:
+        """When model call #index was sent (run clock, not poll time).
+
+        The metadata records `started`, but it is only written once the
+        reply completes; while a call is in flight the request file's own
+        mtime marks when it was sent.
+        """
+        try:
+            meta = json.loads(
+                (path.parent / ("http-%03d.metadata.json" % index)).read_text(encoding="utf-8"))
+            start = _epoch_number((meta or {}).get("started"))
+            if start is not None:
+                return start
+        except (OSError, ValueError):
+            pass
+        try:
+            return float(path.stat().st_mtime)
+        except OSError:
+            return self._now()
+
+    def _response_time(self, meta: dict, path: Path) -> float:
+        """When the reply to a model call arrived (run clock, not poll time)."""
+        end = _epoch_number((meta or {}).get("ended"))
+        if end is not None:
+            return end
+        try:
+            return float(path.stat().st_mtime)
+        except OSError:
+            return self._now()
+
     def _poll_http(self) -> list[dict]:
         out = []
         directory = self.run_dir / "http"
@@ -416,11 +678,12 @@ class EventTail:
             index = _http_index(path)
             model, summary = _request_summary(self.run_dir, index)
             event = text_mod.infer_request(index, model, summary)
+            stamp = self._request_time(index, path)
             out.append({"cat": "INFER", "kind": "meta", "title": event["title"],
                         "detail": event["detail"],
                         "text": "model call #%d%s" % (
                             index, (" · %s" % model) if model else ""),
-                        "ts": self._now()})
+                        "call": index, "ts": stamp, "time": stamp})
         for path in sorted(directory.glob("http-*.metadata.json"), key=_http_index):
             if path.name in self._seen_metadata:
                 continue
@@ -429,8 +692,10 @@ class EventTail:
                 meta = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            if not isinstance(meta, dict):
+                continue
             self.counters["http"] += 1
-            stamp = self._now()
+            stamp = self._response_time(meta, path)
             event = text_mod.infer_response(meta)
             failed = "FAILED" in event["title"]
             seconds = meta.get("seconds")
@@ -440,7 +705,8 @@ class EventTail:
                         "title": event["title"], "detail": event["detail"],
                         "message": event["title"] if failed else "",
                         "text": "HTTP %s in %s" % (meta.get("status", "?"), elapsed),
-                        "ts": stamp})
+                        "call": meta.get("index", _http_index(path)),
+                        "ts": stamp, "time": stamp})
         return out
 
 

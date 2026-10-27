@@ -145,6 +145,9 @@ class StreamTail:
         self._offsets: dict[str, int] = {}
         self._parsers: dict[str, SseParser] = {}
         self._compaction: dict[str, bool] = {}
+        self._counts: dict[str, int] = {}   # streamed events emitted per file
+        self._last: dict[str, float] = {}   # last stamp per file (monotonic)
+        self._windows: dict[int, tuple] = {}  # model call -> (started, ended)
 
     def _is_compaction(self, key: str) -> bool:
         """Is this recorded model call a context checkpoint compaction?"""
@@ -165,6 +168,39 @@ class StreamTail:
                 break
         self._compaction[key] = found
         return found
+
+    def _call_window(self, call: int) -> tuple[float | None, float | None]:
+        """(sent, reply received) of one recorded model call, run clock.
+
+        The streamed chunks arrive between the two; stamping them inside
+        the window keeps the merge with the tool and transport evidence in
+        execution order instead of piling every stream block at poll time.
+        """
+        if call in self._windows:
+            return self._windows[call]
+        started: float | None = None
+        ended: float | None = None
+        try:
+            meta = json.loads(
+                (self.run_dir / "http" / ("http-%03d.metadata.json" % call)).read_text(
+                    encoding="utf-8"))
+            if isinstance(meta, dict):
+                raw_start, raw_end = meta.get("started"), meta.get("ended")
+                if isinstance(raw_start, (int, float)) and not isinstance(raw_start, bool):
+                    started = float(raw_start)
+                if isinstance(raw_end, (int, float)) and not isinstance(raw_end, bool):
+                    ended = float(raw_end)
+        except (OSError, ValueError):
+            pass
+        if started is None:
+            for name in ("http-%03d.request.bin" % call, "http-%03d.response.bin" % call):
+                try:
+                    started = float((self.run_dir / "http" / name).stat().st_mtime)
+                    break
+                except OSError:
+                    continue
+        self._windows[call] = (started, ended)
+        return started, ended
 
     def poll(self) -> list[dict]:
         """The chunks that arrived since the last poll."""
@@ -191,9 +227,28 @@ class StreamTail:
         if not data:
             return []
         import time as _time
-        stamp = _time.time()
         call = _http_index(path)
         compaction = self._is_compaction(key)
-        return [dict(event, call=call, ts=stamp,
-                     **({"compaction": True} if compaction else {}))
-                for event in parser.feed(data)]
+        started, ended = self._call_window(call)
+        try:
+            fallback = float(path.stat().st_mtime)
+        except OSError:
+            fallback = _time.time()
+        base = started if started is not None else fallback
+        ceiling = ended if ended is not None else None
+        out = []
+        for event in parser.feed(data):
+            count = self._counts.get(key, 0) + 1
+            self._counts[key] = count
+            stamp = base + count * 0.001
+            if ceiling is not None and stamp > ceiling:
+                stamp = ceiling
+            last = self._last.get(key, 0.0)
+            if stamp <= last:
+                stamp = last + 0.001
+                if ceiling is not None and stamp > ceiling:
+                    stamp = ceiling
+            self._last[key] = stamp
+            out.append(dict(event, call=call, ts=stamp, time=stamp,
+                            **({"compaction": True} if compaction else {})))
+        return out

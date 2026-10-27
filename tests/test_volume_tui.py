@@ -1053,5 +1053,101 @@ class RenameDeleteRuns(unittest.TestCase):
             self.assertEqual([r["runId"] for r in remaining], ["run-live"])
 
 
+class SingleRunArchive(unittest.TestCase):
+    def _run_dir(self, base: Path, name: str, run_id: str, status: str = "finished",
+                 session_id: str | None = None) -> Path:
+        run_dir = base / name
+        run_dir.mkdir(parents=True)
+        payload = {"runId": run_id, "status": status}
+        if session_id:
+            payload["sessionId"] = session_id
+        (run_dir / "run.json").write_text(json.dumps(payload))
+        (run_dir / "manifest.json").write_text(json.dumps({"exitCode": 0}))
+        (run_dir / "config.json").write_text(json.dumps({"task": "task %s" % run_id, "model": "m"}))
+        return run_dir
+
+    def test_archive_one_hides_it_and_lists_it_under_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "runtime" / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            self._run_dir(base, "run-1", "run-1")
+            self._run_dir(base, "run-2", "run-2")
+            with patch.object(tui_runs, "ROOT", root):
+                result = tui_runs.archive_run("run-1")
+            self.assertEqual(result["archived"], "run-1")
+            self.assertEqual(result["errors"], [])
+            self.assertTrue((root / "runtime" / "archive" / "run-1").is_dir())
+            with patch.object(tui_runs, "ROOT", root):
+                remaining = [r["runId"] for r in tui_runs.discover_runs(_fresh=True)]
+                archived = [r["runId"] for r in tui_runs.discover_archived_runs()]
+            self.assertEqual(remaining, ["run-2"])
+            self.assertEqual(archived, ["run-1"])
+
+    def test_archive_moves_session_folder_and_refuses_live_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            base = runtime / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            session = runtime / "sess-1"
+            session.mkdir(parents=True)
+            (session / "session.json").write_text(json.dumps({"id": "sess-1"}))
+            self._run_dir(base, "run-old", "run-old", session_id="sess-1")
+            live = self._run_dir(base, "run-live", "run-live", status="running")
+            (live / "run.json").write_text(json.dumps({"runId": "run-live",
+                                                       "status": "running", "pid": 999999}))
+            with patch.object(tui_runs, "process_alive",
+                               side_effect=lambda pid: pid == 999999):
+                with patch.object(tui_runs, "ROOT", root):
+                    result = tui_runs.archive_run("run-old")
+                    with self.assertRaises(ValueError):
+                        tui_runs.archive_run("run-live")
+            self.assertEqual(result["session_archived"], "sess-1")
+            self.assertTrue((root / "runtime" / "archive" / "run-old").is_dir())
+            self.assertTrue((root / "runtime" / "archive" / "sess-1").is_dir())
+            self.assertTrue(live.is_dir())
+
+    def test_unarchive_restores_run_and_session_to_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            base = runtime / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            session = runtime / "sess-2"
+            session.mkdir(parents=True)
+            (session / "session.json").write_text(json.dumps({"id": "sess-2"}))
+            self._run_dir(base, "run-1", "run-1", session_id="sess-2")
+            with patch.object(tui_runs, "ROOT", root):
+                tui_runs.archive_run("run-1")
+                self.assertEqual(tui_runs.discover_runs(_fresh=True), [])
+                result = tui_runs.unarchive_run("run-1")
+            self.assertEqual(result["unarchived"], "run-1")
+            self.assertEqual(result["session_unarchived"], "sess-2")
+            self.assertEqual(result["errors"], [])
+            with patch.object(tui_runs, "ROOT", root):
+                remaining = [r["runId"] for r in tui_runs.discover_runs(_fresh=True)]
+                archived = tui_runs.discover_archived_runs()
+            self.assertEqual(remaining, ["run-1"])
+            self.assertEqual(archived, [])
+            self.assertTrue((root / "runtime" / "sess-2").is_dir())
+
+    def test_archive_and_unarchive_reject_empty_and_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "runtime" / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            self._run_dir(base, "run-1", "run-1")
+            with patch.object(tui_runs, "ROOT", root):
+                with self.assertRaises(ValueError):
+                    tui_runs.archive_run("   ")
+                with self.assertRaises(ValueError):
+                    tui_runs.archive_run("nope")
+                with self.assertRaises(ValueError):
+                    tui_runs.unarchive_run("run-1")
+                with self.assertRaises(ValueError):
+                    tui_runs.unarchive_run("nope")
+
+
 if __name__ == '__main__':
     unittest.main()

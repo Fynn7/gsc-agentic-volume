@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   applyFynnsThemeMode,
+  ArchivedChatsSettingsDialog,
+  Avatar,
   BusyRegion,
   Button,
   Card,
@@ -42,6 +44,7 @@ import {
   PanelRightIcon,
   PlusIcon,
   restoreFynnsThemeMode,
+  SettingsIcon,
   SnackbarHost,
   SplitPane,
   Tabs,
@@ -66,6 +69,7 @@ import {
   errorText,
   transcriptDuration,
   tuiArchiveAll,
+  tuiArchiveRun,
   tuiBatchDetail,
   tuiCancelBatch,
   tuiCopyRun,
@@ -73,6 +77,7 @@ import {
   tuiDeleteRun,
   tuiDownloadChatLog,
   tuiGlossary,
+  tuiListArchived,
   tuiListRuns,
   tuiLoadSettings,
   tuiOpenPath,
@@ -83,6 +88,7 @@ import {
   tuiStartRun,
   tuiStopRun,
   tuiTranscript,
+  tuiUnarchiveRun,
   tuiVerifyRun,
   tuiVerifyState,
   tuiVolumes,
@@ -212,6 +218,10 @@ function App() {
   const [volumesLoading, setVolumesLoading] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [archiving, setArchiving] = useState(false)
+  const [archivedRuns, setArchivedRuns] = useState<TuiRun[]>([])
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  const [archivingOne, setArchivingOne] = useState<string | null>(null)
+  const [unarchiving, setUnarchiving] = useState<string | null>(null)
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchStarting, setBatchStarting] = useState(false)
   const [batchDetail, setBatchDetail] = useState<TuiBatchRecord | null>(null)
@@ -367,11 +377,22 @@ function App() {
     }
   }, [])
 
+  const refreshArchived = useCallback(async () => {
+    try {
+      const data = await tuiListArchived()
+      setArchivedRuns(data.runs)
+      return data.runs
+    } catch {
+      return null
+    }
+  }, [])
+
   useEffect(() => {
     void refreshRuns()
+    void refreshArchived()
     const timer = window.setInterval(() => void refreshRuns(), RUNS_POLL_MS)
     return () => window.clearInterval(timer)
-  }, [refreshRuns])
+  }, [refreshRuns, refreshArchived])
 
   /* -- transcript polling: the live view follows the recorded evidence ---- */
 
@@ -872,6 +893,7 @@ function App() {
       const result = await tuiArchiveAll()
       setArchiveConfirm(false)
       const latest = await refreshRuns()
+      await refreshArchived()
       if (activeRunId && !(latest ?? []).some((run) => run.runId === activeRunId)) handleNewTask()
       snackbar(
         `Archived ${result.moved.length} runs${result.skipped_live.length ? `; kept live: ${result.skipped_live.join(', ')}` : ''}.`,
@@ -886,7 +908,57 @@ function App() {
     } finally {
       setArchiving(false)
     }
-  }, [activeRunId, handleNewTask, refreshRuns])
+  }, [activeRunId, handleNewTask, refreshRuns, refreshArchived])
+
+  const handleArchiveRun = useCallback(
+    async (runId: string) => {
+      if (archivingOne !== null) return
+      setArchivingOne(runId)
+      try {
+        await tuiArchiveRun(runId)
+        const latest = await refreshRuns()
+        await refreshArchived()
+        if (activeRunId === runId && !(latest ?? []).some((run) => run.runId === runId)) handleNewTask()
+        snackbar(`Archived ${runId} — find it under Archived runs.`, {
+          severity: 'info',
+          duration: 'long',
+          dismissible: true,
+        })
+      } catch (error: unknown) {
+        snackbar(`Archive failed: ${errorText(error)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      } finally {
+        setArchivingOne(null)
+      }
+    },
+    [activeRunId, archivingOne, handleNewTask, refreshArchived, refreshRuns],
+  )
+
+  const handleUnarchiveRun = useCallback(
+    async (runId: string) => {
+      if (unarchiving !== null) return
+      setUnarchiving(runId)
+      try {
+        await tuiUnarchiveRun(runId)
+        await refreshRuns()
+        await refreshArchived()
+        openRun(runId)
+        snackbar(`Restored ${runId} to history.`, { severity: 'info', duration: 'long', dismissible: true })
+      } catch (error: unknown) {
+        snackbar(`Unarchive failed: ${errorText(error)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      } finally {
+        setUnarchiving(null)
+      }
+    },
+    [openRun, refreshArchived, refreshRuns, unarchiving],
+  )
 
   const handleRenameRun = useCallback(async () => {
     if (!renameTarget || renameSaving) return
@@ -1371,6 +1443,7 @@ function App() {
                 newChat: 'New task',
                 more: 'Run options',
                 rename: 'Rename',
+                archive: 'Archive',
                 delete: 'Delete',
                 deleteAll: 'Delete all',
                 sessionMenu: 'Run options',
@@ -1381,6 +1454,26 @@ function App() {
                 revealMore: 'Show more runs',
               }}
               reveal={{ initial: 12, step: 12 }}
+              footer={
+                <div className="fynns-nav-drawer-footer-account">
+                  <div className="fynns-nav-drawer-footer-account-start">
+                    <Avatar size="sm" name="Local runs" alt="Local runs" />
+                    <span className="fynns-nav-drawer-footer-account-label">Local runs</span>
+                  </div>
+                  <Tooltip content="Settings">
+                    <IconButton
+                      size="sm"
+                      aria-label="Settings"
+                      onClick={() => {
+                        void refreshArchived()
+                        setArchivedOpen(true)
+                      }}
+                    >
+                      <SettingsIcon size={16} aria-hidden />
+                    </IconButton>
+                  </Tooltip>
+                </div>
+              }
               onNewChat={handleNewTask}
               onSelect={(runId) => openRun(runId)}
               onRename={(runId) => {
@@ -1389,6 +1482,7 @@ function App() {
                 setRenameTarget(run)
                 setRenameDraft(run.task)
               }}
+              onArchive={(runId) => void handleArchiveRun(runId)}
               onDelete={(runId) => {
                 const run = runs.find((item) => item.runId === runId)
                 if (run) setDeleteTarget(run)
@@ -1588,12 +1682,33 @@ function App() {
       />
       <GlossaryDialog open={glossaryOpen} onOpenChange={setGlossaryOpen} entries={glossary} />
       <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
+      <ArchivedChatsSettingsDialog
+        open={archivedOpen}
+        onOpenChange={setArchivedOpen}
+        sessions={archivedRuns.map((run) => ({
+          id: run.runId,
+          label: `${run.runId} — ${run.task.slice(0, 40)}`,
+          disabled: unarchiving !== null,
+        }))}
+        labels={{
+          title: 'Settings',
+          categories: 'Settings categories',
+          general: 'General',
+          generalSample: 'Dark theme',
+          archived: 'Archived runs',
+          unarchive: 'Unarchive',
+          close: 'Close settings',
+          archivedEmptyTitle: 'No archived runs',
+          archivedEmptyDescription: 'Archive a run from its menu to hide it here.',
+        }}
+        onUnarchive={(runId) => void handleUnarchiveRun(runId)}
+      />
 
       <ConfirmDialog
         open={archiveConfirm}
         onOpenChange={setArchiveConfirm}
         title="Archive all runs?"
-        description="Every history run moves to runtime/archive (live runs are kept). No unarchive: move the folders back manually."
+        description="Every history run moves to runtime/archive (live runs are kept). Restore one from the drawer footer under Archived runs."
         confirmLabel="Archive all"
         danger
         loading={archiving}

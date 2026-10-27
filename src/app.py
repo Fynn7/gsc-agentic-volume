@@ -517,6 +517,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {'runs': [_tui_sanitize_run(e) for e in tui_runs.discover_runs(_fresh=True)]})
             except Exception as error:
                 return self.send(501, {'error': str(error)})
+        if route == '/api/tui/archived':
+            try:
+                _tui_require()
+                return self.send(200, {'runs': [_tui_sanitize_run(e) for e in tui_runs.discover_archived_runs()]})
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
         if route == '/api/tui/batches':
             try:
                 _tui_require()
@@ -791,6 +797,24 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     _tui_require()
                     return self.send(200, _tui_jsonable(tui_runs.archive_all_runs()))
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/archive':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    if not run_id:
+                        raise ValueError('runId required')
+                    return self.send(200, _tui_jsonable(tui_runs.archive_run(run_id)))
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/unarchive':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    if not run_id:
+                        raise ValueError('runId required')
+                    return self.send(200, _tui_jsonable(tui_runs.unarchive_run(run_id)))
                 except Exception as error:
                     return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
             if route == '/api/tui/runs/rename':

@@ -233,6 +233,30 @@ export function tuiArchiveAll() {
   }>('/api/tui/archive-all', {})
 }
 
+export function tuiListArchived() {
+  return request<{ runs: TuiRun[] }>('/api/tui/archived')
+}
+
+export function tuiArchiveRun(runId: string) {
+  return postJson<{
+    archived: string
+    session_archived: string | null
+    archive_path: string
+    errors: Array<{ runId: string; error: string }>
+    remaining: number
+  }>('/api/tui/runs/archive', { runId })
+}
+
+export function tuiUnarchiveRun(runId: string) {
+  return postJson<{
+    unarchived: string
+    session_unarchived: string | null
+    directory: string
+    errors: Array<{ runId: string; error: string }>
+    remaining: number
+  }>('/api/tui/runs/unarchive', { runId })
+}
+
 export function tuiRenameRun(runId: string, task: string) {
   return postJson<{ runId: string; task: string }>('/api/tui/runs/rename', { runId, task })
 }

@@ -60,9 +60,10 @@ def task_label(directory: Path, run: dict) -> str:
 _DISCOVER_CACHE = {"at": 0.0, "key": None, "value": None}
 DISCOVER_TTL = 5.0
 
-# One-click tidy for the history list: finished runs move here. No unarchive
-# command exists by design — moving a folder back with the file manager
-# restores it. Discovery never looks inside it, so archived runs stay hidden.
+# One-click tidy for the history list: finished runs move here. Restore one
+# run with unarchive_run (the GUI Archived runs dialog) — moving a folder
+# back with the file manager restores it too. Discovery never looks inside
+# it, so archived runs stay hidden; discover_archived_runs is the only reader.
 ARCHIVE_DIRNAME = "archive"
 
 
@@ -85,6 +86,31 @@ def _is_under_archive(path: str | Path) -> bool:
         return resolved == root or root in resolved.parents
     except Exception:
         return False
+
+
+def _describe_entry(directory: Path) -> dict | None:
+    """One history-shaped entry for a run dir (run.json + manifest + session).
+
+    The single builder behind history and archived listings: both roads read
+    the same fields, so a run looks identical before and after archiving.
+    """
+    run = _read_json(directory / "run.json") or {}
+    if "runId" not in run:
+        return None
+    manifest = _read_json(directory / "manifest.json")
+    verification = _read_json(directory / "verification.json")
+    session = _read_json(directory / "session.json")
+    started = run.get("startedAt") or (directory / "run.json").stat().st_mtime if (directory / "run.json").exists() else 0
+    status = classify(run, manifest)
+    frames = None
+    if isinstance(session, dict) and isinstance(session.get("events"), list):
+        frames = sum(1 for e in session["events"] if e.get("kind") in ("initial_render", "render"))
+    return {"directory": str(directory), "runId": run.get("runId", directory.name),
+            "task": task_label(directory, run), "taskKey": run.get("taskKey", "?"),
+            "startedAt": started, "status": status,
+            "model": (_read_json(directory / "config.json") or {}).get("model", "?"),
+            "frames": frames, "verification": verification,
+            "manifest": manifest, "run": run, "sessionId": run.get("sessionId") or (manifest or {}).get("sessionId")}
 
 
 def discover_runs(limit: int = 200, _fresh: bool = False) -> list[dict]:
@@ -121,21 +147,9 @@ def discover_runs(limit: int = 200, _fresh: bool = False) -> list[dict]:
                 continue
     runs = []
     for directory in found.values():
-        run = _read_json(directory / "run.json") or {}
-        manifest = _read_json(directory / "manifest.json")
-        verification = _read_json(directory / "verification.json")
-        session = _read_json(directory / "session.json")
-        started = run.get("startedAt") or (directory / "run.json").stat().st_mtime if (directory / "run.json").exists() else 0
-        status = classify(run, manifest)
-        frames = None
-        if isinstance(session, dict) and isinstance(session.get("events"), list):
-            frames = sum(1 for e in session["events"] if e.get("kind") in ("initial_render", "render"))
-        runs.append({"directory": str(directory), "runId": run.get("runId", directory.name),
-                     "task": task_label(directory, run), "taskKey": run.get("taskKey", "?"),
-                     "startedAt": started, "status": status,
-                     "model": (_read_json(directory / "config.json") or {}).get("model", "?"),
-                     "frames": frames, "verification": verification,
-                     "manifest": manifest, "run": run, "sessionId": run.get("sessionId") or (manifest or {}).get("sessionId")})
+        entry = _describe_entry(directory)
+        if entry is not None:
+            runs.append(entry)
     runs.sort(key=lambda r: r["startedAt"] or 0, reverse=True)
     _DISCOVER_CACHE.update(at=now, key=cache_key, value=runs)
     return runs
@@ -543,11 +557,13 @@ def archive_all_runs() -> dict:
     history, not live, and moves along with the rest.
     Their session folders (runtime/<sessionId> with the frame PNGs) move
     along so runtime/ is clean; discovery skips runtime/archive, so the
-    history list is empty afterwards. There is intentionally no unarchive:
-    move the folders back with the file manager to restore them.
-    """
-    import shutil
+    history list is empty afterwards. Restore one run with unarchive_run
+    (the GUI Archived runs dialog); moving a folder back with the file
+    manager restores it too.
 
+    Every entry moves through _move_run_to_archive — the same road as the
+    single-run archive_run — so batch and single moves can never diverge.
+    """
     root = archive_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -560,45 +576,31 @@ def archive_all_runs() -> dict:
     sessions_moved: list[str] = []
     skipped_live: list[str] = []
     errors: list[dict] = []
-    moved_srcs: set[str] = set()
     for entry in entries:
         run_id = str(entry.get("runId") or Path(str(entry.get("directory", ""))).name or "?")
-        try:
-            # Verified-live only: paper "running" with no live process behind
-            # it (Unknown in the history list) is stale history, not a live
-            # agent, and is archived like everything else.
-            if (str(entry.get("status") or "") == "Running"
-                    or _launcher_alive_for(entry)):
-                skipped_live.append(run_id)
-                continue
-        except Exception:
-            pass
+        # Verified-live only: paper "running" with no live process behind
+        # it (Unknown in the history list) is stale history, not a live
+        # agent, and is archived like everything else. Same live
+        # definition as the single-run archive_run (_refuse_if_live).
+        if _refuse_if_live(entry) is not None:
+            skipped_live.append(run_id)
+            continue
         src = Path(str(entry.get("directory", "")))
         try:
             if not src.is_dir() or _is_under_archive(src):
                 continue
         except OSError:
             continue
-        session_src = _session_dir_for(entry)
         try:
-            target = _unique_archive_target(src.name or run_id)
-            shutil.move(str(src), str(target))
-            moved.append(run_id)
-            moved_srcs.add(str(src.resolve()) if src.exists() is False else str(src))
-            moved_srcs.add(str(src))
-        except (OSError, ValueError) as error:
+            result = _move_run_to_archive(entry)
+        except ValueError as error:
             errors.append({"runId": run_id, "error": str(error)})
             continue
-        if session_src is not None:
-            try:
-                if session_src.is_dir():
-                    shutil.move(str(session_src), str(_unique_archive_target(session_src.name)))
-                    sessions_moved.append(session_src.name)
-            except (OSError, ValueError) as error:
-                errors.append({"runId": run_id, "error": "session %s: %s" % (session_src.name, error)})
-    _clean_dangling_latest(moved_srcs)
-    global _DISCOVER_CACHE
-    _DISCOVER_CACHE.update(at=0.0, key=None, value=None)
+        moved.append(run_id)
+        if result["session_archived"]:
+            sessions_moved.append(str(result["session_archived"]))
+        errors.extend(result["errors"])
+    _invalidate_discover_cache()
     try:
         entries = discover_runs(_fresh=True)
     except Exception:
@@ -606,6 +608,184 @@ def archive_all_runs() -> dict:
     return {"moved": moved, "sessions_moved": sessions_moved,
             "skipped_live": skipped_live, "errors": errors,
             "archive_dir": str(root), "remaining": len(entries)}
+
+
+def _unique_restore_target(name: str) -> Path:
+    """Restore target under runtime/; never overwrites an existing folder."""
+    parent = ROOT / "runtime"
+    candidate = parent / name
+    if not candidate.exists():
+        return candidate
+    index = 1
+    while True:
+        indexed = parent / ("%s-%d" % (name, index))
+        if not indexed.exists():
+            return indexed
+        index += 1
+
+
+def _archived_session_dir_for(entry: dict) -> Path | None:
+    """Session folder (runtime/archive/<sessionId>) moved along with an archived run, if any."""
+    session_id = entry.get("sessionId")
+    if not session_id:
+        session_id = (entry.get("run") or {}).get("sessionId")
+    if not session_id:
+        return None
+    candidate = archive_root() / str(session_id)
+    try:
+        if candidate.is_dir():
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def discover_archived_runs(limit: int = 200) -> list[dict]:
+    """Find archived run dirs (contain run.json) under runtime/archive. Newest first.
+
+    Discovery never looks inside the archive for history; this is the only
+    reader for the archived list behind the core ArchivedChatsSettingsDialog.
+    No cache: the archived list is small and must show moves at once.
+    """
+    base = archive_root()
+    runs: list[dict] = []
+    if not base.is_dir():
+        return runs
+    try:
+        candidates = sorted(base.rglob("run.json"))
+    except OSError:
+        return runs
+    for run_file in candidates:
+        if len(runs) >= limit:
+            break
+        try:
+            entry = _describe_entry(run_file.parent)
+        except OSError:
+            continue
+        if entry is not None:
+            runs.append(entry)
+    runs.sort(key=lambda r: r["startedAt"] or 0, reverse=True)
+    return runs
+
+
+def find_archived_run(run_id: str) -> dict | None:
+    """Lookup one archived run by runId (read-only)."""
+    rid = str(run_id or "").strip()
+    if not rid:
+        return None
+    for entry in discover_archived_runs():
+        if entry.get("runId") == rid:
+            return entry
+    return None
+
+
+def _move_run_to_archive(entry: dict) -> dict:
+    """Move one history entry (+ its session frames) into runtime/archive."""
+    import shutil
+
+    run_id = str(entry.get("runId") or Path(str(entry.get("directory", ""))).name or "?")
+    src = Path(str(entry.get("directory", "")))
+    if not src.is_dir() or _is_under_archive(src):
+        raise ValueError("Run folder is gone already: %s" % run_id)
+    root = archive_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ValueError("Could not open the archive folder: %s" % error)
+    session_src = _session_dir_for(entry)
+    errors: list[dict] = []
+    try:
+        target = _unique_archive_target(src.name or run_id)
+        shutil.move(str(src), str(target))
+    except (OSError, ValueError) as error:
+        raise ValueError("Could not archive %s: %s" % (run_id, error))
+    session_archived: str | None = None
+    if session_src is not None:
+        try:
+            if session_src.is_dir():
+                moved_session = _unique_archive_target(session_src.name)
+                shutil.move(str(session_src), str(moved_session))
+                session_archived = session_src.name
+        except (OSError, ValueError) as error:
+            errors.append({"runId": run_id, "error": "session %s: %s" % (session_src.name, error)})
+    _clean_dangling_latest({str(src), str(src.resolve()) if src.exists() is False else str(src)})
+    _invalidate_discover_cache()
+    return {"target": target, "session_archived": session_archived, "errors": errors}
+
+
+def archive_run(run_id: str) -> dict:
+    """Archive one history run (run folder + its session frames).
+
+    Same live definition as archive_all_runs: genuinely live runs are
+    refused — stop them first. Archived runs hide from history and appear
+    in the archived list behind the core ArchivedChatsSettingsDialog.
+    """
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise ValueError("runId required")
+    entry = find_run(rid, _fresh=True)
+    if entry is None:
+        raise ValueError("Unknown run: %s" % rid)
+    live = _refuse_if_live(entry)
+    if live is not None:
+        raise ValueError("Run %s is still live - stop it first" % live)
+    moved = _move_run_to_archive(entry)
+    try:
+        remaining = discover_runs(_fresh=True)
+    except Exception:
+        remaining = []
+    return {"archived": str(entry.get("runId") or rid),
+            "session_archived": moved["session_archived"],
+            "archive_path": str(moved["target"]),
+            "errors": moved["errors"],
+            "remaining": len(remaining)}
+
+
+def unarchive_run(run_id: str) -> dict:
+    """Move one archived run back to runtime/ so history shows it again.
+
+    The original nested parent is not recorded by archive moves, so the run
+    (and its session frames) restore flat under runtime/ with a unique name.
+    Discovery finds runs anywhere under runtime/, so the restored run reads
+    exactly like before.
+    """
+    import shutil
+
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise ValueError("runId required")
+    entry = find_archived_run(rid)
+    if entry is None:
+        raise ValueError("Unknown archived run: %s" % rid)
+    src = Path(str(entry.get("directory", "")))
+    if not src.is_dir() or not _is_under_archive(src):
+        raise ValueError("Archived run folder is gone already: %s" % rid)
+    try:
+        target = _unique_restore_target(src.name or rid)
+        shutil.move(str(src), str(target))
+    except (OSError, ValueError) as error:
+        raise ValueError("Could not unarchive %s: %s" % (rid, error))
+    session_unarchived: str | None = None
+    errors: list[dict] = []
+    session_src = _archived_session_dir_for(entry)
+    if session_src is not None:
+        try:
+            if session_src.is_dir():
+                moved_session = _unique_restore_target(session_src.name)
+                shutil.move(str(session_src), str(moved_session))
+                session_unarchived = session_src.name
+        except (OSError, ValueError) as error:
+            errors.append({"runId": rid, "error": "session %s: %s" % (session_src.name, error)})
+    _invalidate_discover_cache()
+    try:
+        remaining = discover_runs(_fresh=True)
+    except Exception:
+        remaining = []
+    return {"unarchived": str(entry.get("runId") or rid),
+            "session_unarchived": session_unarchived,
+            "directory": str(target),
+            "errors": errors,
+            "remaining": len(remaining)}
 
 
 def _invalidate_discover_cache() -> None:

@@ -11,8 +11,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   applyFynnsThemeMode,
-  BotIcon,
-  BrainIcon,
   BusyRegion,
   Button,
   Card,
@@ -1119,7 +1117,6 @@ function App() {
                   <LoadingSkeleton label="Loading run evidence" lines={8} />
                 ) : (
                   <EmptyState
-                    icon={<BrainIcon size={28} aria-hidden />}
                     title="Start a run"
                     description="Describe the task, or type / for presets (/task-a, /task-b), history, batches, verify and exports. Every row is read from the recorded run evidence; model claims stay unverified."
                   />
@@ -1166,7 +1163,6 @@ function App() {
                   size="sm"
                   onClick={() => setSettingsOpen(true)}
                 >
-                  <BotIcon aria-hidden />
                   {settings?.model ?? '…'}
                 </Button>
               </Tooltip>

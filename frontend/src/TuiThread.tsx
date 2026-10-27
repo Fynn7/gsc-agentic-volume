@@ -22,6 +22,10 @@ import {
   Collapsible,
   InlineAlert,
   LoadingSkeleton,
+  ArchiveIcon,
+  BotIcon,
+  CheckCircleIcon,
+  InfoIcon,
   WrenchIcon,
 } from '@fynns/ui'
 import type { ChatThinkingDetail } from '@fynns/ui'
@@ -43,6 +47,10 @@ function ThinkingRow({ block }: { block: TuiBlock }) {
   const label = reasoned ? 'Thought' : 'Model answered'
   const streamingLabel = reasoned ? 'Thinking' : 'Working'
   const body = block.body.trim()
+  // Thought stays label-only (no star); Model answered owns BotIcon. Neither
+  // falls back to the core Sparkles default.
+  const reasonedIcon = null
+  const answeredIcon = <BotIcon aria-hidden />
   return (
     <ChatMessage
       role="assistant"
@@ -54,6 +62,8 @@ function ThinkingRow({ block }: { block: TuiBlock }) {
           label={label}
           summary={block.subtitle || undefined}
           details={body ? [{ id: 'thought', text: body }] : []}
+          icon={reasoned ? reasonedIcon : answeredIcon}
+          marker={reasoned ? 'none' : undefined}
         />
       }
     />
@@ -75,6 +85,7 @@ function CompactionRow({ block }: { block: TuiBlock }) {
           label="Context checkpoint"
           summary={block.subtitle || undefined}
           details={body ? [{ id: 'checkpoint', text: body }] : []}
+          icon={<ArchiveIcon aria-hidden />}
         />
       }
     />
@@ -91,21 +102,36 @@ export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalS
         const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
         const nestedLabel = reasoned ? 'Thought' : 'Model answered'
         const body = block.body.trim()
-        if (!body) return { id, label: nestedLabel, summary: block.subtitle || undefined }
-        return {
-          id,
-          label: nestedLabel,
-          summary: block.subtitle || undefined,
-          details: [{ id: `${id}-body`, text: body }],
-        }
+        // Thought is label-only (no star); Model answered owns BotIcon.
+        if (!body)
+          return reasoned
+            ? { id, label: nestedLabel, summary: block.subtitle || undefined, marker: 'none' as const }
+            : { id, label: nestedLabel, summary: block.subtitle || undefined, icon: <BotIcon aria-hidden /> }
+        return reasoned
+          ? {
+              id,
+              label: nestedLabel,
+              summary: block.subtitle || undefined,
+              marker: 'none' as const,
+              details: [{ id: `${id}-body`, text: body }],
+            }
+          : {
+              id,
+              label: nestedLabel,
+              summary: block.subtitle || undefined,
+              icon: <BotIcon aria-hidden />,
+              details: [{ id: `${id}-body`, text: body }],
+            }
       }
       case 'compaction': {
         const body = block.body.trim()
-        if (!body) return { id, label: 'Context checkpoint', summary: block.subtitle || undefined }
+        if (!body)
+          return { id, label: 'Context checkpoint', summary: block.subtitle || undefined, icon: <ArchiveIcon aria-hidden /> }
         return {
           id,
           label: 'Context checkpoint',
           summary: block.subtitle || undefined,
+          icon: <ArchiveIcon aria-hidden />,
           details: [{ id: `${id}-body`, text: body }],
         }
       }
@@ -126,13 +152,13 @@ export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalS
         return { id, text: block.title }
       case 'finish': {
         const claim = block.body.trim()
-        if (!claim) return { id, label: block.title }
-        return { id, label: block.title, details: [{ id: `${id}-body`, text: claim }] }
+        if (!claim) return { id, label: block.title, icon: <CheckCircleIcon aria-hidden /> }
+        return { id, label: block.title, icon: <CheckCircleIcon aria-hidden />, details: [{ id: `${id}-body`, text: claim }] }
       }
       case 'notices': {
         const body = block.body.trim()
-        if (!body) return { id, label: block.title }
-        return { id, label: block.title, details: [{ id: `${id}-body`, text: body }] }
+        if (!body) return { id, label: block.title, icon: <InfoIcon aria-hidden /> }
+        return { id, label: block.title, icon: <InfoIcon aria-hidden />, details: [{ id: `${id}-body`, text: body }] }
       }
       case 'notice':
       case 'meta':
@@ -143,7 +169,7 @@ export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalS
   return (
     <ChatMessage
       role="assistant"
-      thinking={<ChatThinking label={label} details={details} />}
+      thinking={<ChatThinking label={label} details={details} icon={null} marker="none" />}
     />
   )
 }
@@ -263,7 +289,7 @@ export function TuiBlockRow({
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={block.title || 'harness notices'} details={[]} />}
+          thinking={<ChatThinking variant="status" label={block.title || 'harness notices'} details={[]} icon={<InfoIcon aria-hidden />} />}
         >
           {block.body || undefined}
         </ChatMessage>
@@ -274,7 +300,7 @@ export function TuiBlockRow({
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={block.title} details={[]} />}
+          thinking={<ChatThinking variant="status" label={block.title} details={[]} icon={<InfoIcon aria-hidden />} />}
         />
       )
     case 'error': {
@@ -299,7 +325,7 @@ export function TuiBlockRow({
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={block.title} details={[]} />}
+          thinking={<ChatThinking variant="status" label={block.title} details={[]} icon={null} marker="none" />}
         />
       )
     default:

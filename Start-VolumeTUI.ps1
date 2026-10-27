@@ -13,6 +13,30 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 
+function Reset-ConsoleMode {
+  # Full-screen console apps (Textual TUI) and `cmd /c` chains can exit
+  # without restoring the Win32 console: PSReadLine then loses syntax
+  # highlighting and keys echo raw (Backspace shows ^H) until a new tab.
+  # Restore sane input/output modes in place so the parent shell survives.
+  [Console]::Write("`e[?1049l`e[?25h")
+  try {
+    $sig = '[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, ref uint m); [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m); [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);'
+    $k32 = Add-Type -MemberDefinition $sig -Name GavConsoleModeFix -Namespace Win32 -PassThru
+    $inH = $k32::GetStdHandle(-10)
+    [uint32]$inMode = 0
+    if ($k32::GetConsoleMode($inH, [ref]$inMode)) {
+      # processed + line + echo + window + mouse + insert + quick-edit + extended
+      $null = $k32::SetConsoleMode($inH, 0x1F7)
+    }
+    $outH = $k32::GetStdHandle(-11)
+    [uint32]$outMode = 0
+    if ($k32::GetConsoleMode($outH, [ref]$outMode)) {
+      $null = $k32::SetConsoleMode($outH, ($outMode -bor 0x7))
+    }
+  } catch {}
+  try { Import-Module PSReadLine -ErrorAction SilentlyContinue } catch {}
+}
+
 function Find-Python {
   param([string]$Hint)
   if ($Hint -and (Test-Path -LiteralPath $Hint)) { return $Hint }
@@ -108,5 +132,13 @@ try {
 } catch { Write-Warning 'Renderer not reachable; it will start on the next Run and stay for reuse.' }
 
 Write-Host 'Entering Volume Agent TUI (Ctrl+Q quits and stops the agent run, the local Ollama and the owned services; the hard stop in the command palette also stops a local Ollama this TUI did not start)...'
-& $TuiPython -B (Join-Path $repoRoot 'scripts\volume_tui')
-exit $LASTEXITCODE
+$code = 0
+try {
+  & $TuiPython -B (Join-Path $repoRoot 'scripts\volume_tui')
+  $code = $LASTEXITCODE
+} finally {
+  # Textual may be killed (Ctrl+C/closed window) without restoring the
+  # console; heal the parent shell instead of forcing the user to reopen.
+  Reset-ConsoleMode
+}
+exit $code

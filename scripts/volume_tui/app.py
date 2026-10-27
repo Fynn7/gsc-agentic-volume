@@ -4444,6 +4444,36 @@ if _TEXTUAL:
             self._start_poll()
             self._settle_launch()
 
+    def _restore_windows_console() -> None:
+        """Best-effort console repair for abnormal exits on Windows.
+
+        A killed Textual app can leave the parent PowerShell with the
+        alternate screen active and raw input mode on (PSReadLine then
+        loses highlighting and Backspace echoes ^H). Undo both; never
+        raise, never depend on anything but ctypes.
+        """
+        try:
+            import os as _os
+            if _os.name != "nt":
+                return
+            try:
+                import sys as _s
+                _s.stdout.write("\x1b[?1049l\x1b[?25h")
+                _s.stdout.flush()
+            except Exception:
+                pass
+            try:
+                import ctypes as _ct
+                _k = _ct.windll.kernel32
+                _h = _k.GetStdHandle(-10)
+                _mode = _ct.c_uint(0)
+                if _k.GetConsoleMode(_h, _ct.byref(_mode)):
+                    _k.SetConsoleMode(_h, 0x1F7)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def main() -> int:
         """Crash-safe entry: no model call, non-TTY exits 2, hard stop on close."""
         import sys as _sys
@@ -4474,6 +4504,9 @@ if _TEXTUAL:
                     print(line)
             except Exception as error:
                 print("Shutdown problem: %s" % error)
+            finally:
+                # Heal the parent PowerShell console in place (no new tab).
+                _restore_windows_console()
 
     def _install_termination_handlers() -> None:
         """Turn SIGTERM/SIGBREAK into SystemExit so the cleanup still runs."""

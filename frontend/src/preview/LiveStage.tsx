@@ -21,6 +21,7 @@ import {
   Slider,
   Surface,
   Tooltip,
+  afterNextPaint,
   snackbar,
 } from '@fynns/ui'
 import { Code, Rocket } from 'lucide-react'
@@ -42,6 +43,7 @@ import {
   type PreviewParams,
 } from './gsc'
 import { createWasmHost, WasmEngineMissingError, type WasmHost, type WasmStatePatch } from './wasmHost'
+import { commitThenPaint } from './paintBarrier'
 
 type LiveStageProps = {
   source: string
@@ -132,13 +134,14 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const paramsRef = useRef(params)
   const gscRef = useRef(gscText)
   const previewImportRef = useRef(previewImport)
-  const runBusyRef = useRef(runBusy)
+  // Run gate lives on the ref (set before the paint barrier; the busy state is
+  // committed later, so the state value would still read false in that window).
+  const runBusyRef = useRef(false)
   const completedRunRef = useRef(false)
   const editorIssuesRef = useRef<GscValidationIssue[]>([])
   paramsRef.current = params
   gscRef.current = gscText
   previewImportRef.current = previewImport
-  runBusyRef.current = runBusy
 
   const handleEditorReady = useCallback((ready: boolean) => {
     setEditorReady(ready)
@@ -509,6 +512,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         // First push also opens the echo gate (same tick — no echo can slip in).
         bootPushedRef.current = true
         noteSent(paramsRef.current)
+        // Let the ready state paint before the synchronous (dataset-uploading)
+        // control push; the shell may still share this process on fallback hosts.
+        await afterNextPaint()
+        if (disposed) return
         host.applyControls(paramsRef.current)
       })
       .catch((err) => {
@@ -624,7 +631,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       snackbar('Preview engine is not ready yet.', { severity: 'info', duration: 'long', dismissible: true })
       return
     }
-    if (runBusy) return
+    // Ref gate: the paint barrier below opens a task before the busy state is
+    // committed, so a second click in that window must not start another run.
+    if (runBusyRef.current) return
+    runBusyRef.current = true
     // Flush any pending debounced sync so Run executes the settled GUI state,
     // then validate the exact script (a script error never reaches Wasm).
     // flushGscSync returns the drained snapshot — paramsRef may lag a frame.
@@ -634,12 +644,18 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     const issues = validateGscSource(script, GSC_LANGUAGE)
     editorIssuesRef.current = issues
     if (issues.length > 0) {
+      runBusyRef.current = false
       setDiagnostics({ message: formatValidationSummary(issues), isError: true })
       return
     }
-    setRunBusy(true)
-    setDiagnostics({ message: 'Rendering preview…', isError: false })
     try {
+      // Paint the busy state before the synchronous engine calls. `reset` /
+      // `restoreDataset` / `runScript` block the shell's main thread; when the
+      // shell shares this process the label must already be on screen.
+      await commitThenPaint(() => {
+        setRunBusy(true)
+        setDiagnostics({ message: 'Rendering preview…', isError: false })
+      })
       // Reset semantics: reset the renderer, restore the current dataset,
       // then execute the script. State after the run is read back via callbacks.
       host.reset()
@@ -661,9 +677,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
         isError: true,
       })
     } finally {
+      runBusyRef.current = false
       setRunBusy(false)
     }
-  }, [runBusy, wasmReady, flushGscSync])
+  }, [wasmReady, flushGscSync])
 
   const canRun = editorReady && wasmReady && !runBusy
 

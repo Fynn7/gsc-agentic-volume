@@ -14,6 +14,9 @@
 <div id="status">Loading…</div>
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <script>
+// This shell is loaded from the twin origin (127.0.0.1 ↔ localhost) so the
+// engine runs in its own renderer process and cannot freeze the parent UI.
+// Every bridge here is therefore postMessage-only: never touch parent globals.
 // Parent bridge: forward C++ callbacks as granular wasmState patches.
 function postState(patch) {
   try { parent.postMessage({ type: 'wasmState', patch }, '*'); } catch (e) {}
@@ -206,7 +209,9 @@ window.addEventListener('message', (event) => {
   const data = event.data;
   if (!data || typeof data !== 'object') return;
   if (data.type === 'reset') {
-    safeCcall('resetRaycaster', null, [], []);
+    // Defer like runScript: resetRaycaster is a synchronous ccall, so let the
+    // parent's busy state paint before this frame is blocked.
+    window.setTimeout(() => safeCcall('resetRaycaster', null, [], []), 0);
   }
   if (data.type === 'runScript' && typeof data.source === 'string') {
     // Supersede a still-running script; its finish notice (if any) is ignored.

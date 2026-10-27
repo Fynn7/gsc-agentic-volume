@@ -1,6 +1,6 @@
 # 09 Live Preview 渲染循环纪律：四轮 freeze/抖动/黑屏的根因与铁律
 
-> 日期：2026-10-26　　范围：`frontend/src/preview/LiveStage.tsx`、`wasmHost.ts`、`public/wasm/preview-shell.html`、`VirtualSampling/Raycaster/Raycaster.cpp`
+> 日期：2026-10-26　　范围：`frontend/src/preview/LiveStage.tsx`、`paintBarrier.ts`、`wasmHost.ts`、`public/wasm/preview-shell.html`、`VirtualSampling/Raycaster/Raycaster.cpp`
 > 语言：中文，代码标识符保持英文。结论标签沿用 00-README：【实测】【推断】。
 
 ## 背景（一句话）
@@ -105,6 +105,38 @@ GUI 拖滑块 → Wasm 预览、`.gsc` 文本、localStorage 三条链路互相�
 - **新增旗舰演示任务（可解）**：判据=单连通主目标 + 未被致密壳包裹 + 密度可分 + AABB 可裁。候选见 `10-solvable-demo-tasks.md`。
 - **refuse 策略**：不做硬编码拒绝；做证据驱动的拒绝——先跑直方图+连通域统计等轻量检查，测到重叠/包容超过阈值才输出带数字的局限说明；同时永远先给最好结果（best-effort + 残留量化）。
 - **与教授方向对齐**：BorgVR 范式（找数据集→裁剪隔离→迭代优化视角→存图→报参）照搬到本仓库 agent 循环，无需换栈（同为 Jens Der Krüger 引擎家族）。
+
+## 后续3：跨站 iframe 进程隔离 + 绘制屏障（2026-10-27 追加）
+
+> 现象：GUI 在预览出现的那一刻整体卡住（截图时刻），铁律 6 命中——
+> 同源 iframe 与父页共享主线程，`setDataset` / `setLevel` 触发的 13MB
+> 纹理重传、`runGraphicsScript` 与 `~100MB` MEMFS 解包全在 UI 进程里。
+> 处置：把 `gsc-live-preview` 已在用的两项措施封装进本仓。
+
+1. **跨站 twin host iframe**（`wasmHost.ts` → `wasmShellUrl()`）：父页是
+   `127.0.0.1` 时 shell 走 `localhost`（反之亦然）。Chromium 站点隔离把
+   Raycaster shell 放进独立 renderer process，引擎的同步 ccall 不再占用
+   React 的事件循环。Python harness 的 Host/Origin 校验本就同时接受两个
+   loopback 名（`src/app.py`），Vite 绑 `127.0.0.1`、`localhost` 解析可回落，
+   因此没有新增监听端口或放开 `host: true`。
+2. **绘制屏障**（`frontend/src/preview/paintBarrier.ts` → `commitThenPaint`）：
+   `@fynns/ui` 的 `yieldToMain` + `flushSync` + `afterNextPaint`
+   （与 `gsc-live-preview` 的 `useGscRunner` 同序）。Run 先让
+   “Rendering preview…” 和 BusyRegion 真正上屏，再发 `reset` /
+   `restoreDataset` / `runScript`；首推控制量（含体积纹理上传）前同样等一帧。
+   回落环境（非 loopback、无站点隔离）里至少不会以旧帧假死。
+3. **shell 侧同步调用一律延后**：`resetRaycaster` 与 `runGraphicsScript` /
+   `applyControls` 都走 `setTimeout(0)`，并注明 shell 可能跨站加载，
+   父子桥只能是 postMessage，禁止访问 parent 全局。
+
+验证（headed Chrome，dev 5177，Christmas Tree 512³ + Visible Human Head 512³）：
+- iframe 已是 `http://localhost:5177/wasm/preview-shell.html`（父页
+  `127.0.0.1`），出图正常；跨站 canvas 截图仍可下载（86.7KB PNG）。
+- Run 全流程（reset→restoreDataset→runGraphicsScript，约 19s）父页 rAF
+  连续 1144 帧，最大间隔 75ms 且出现在 Run 之前；切 512³ 数据集后 3s 内
+  180 帧 / 最大 46ms。即引擎忙时 UI 仍在 60fps 出帧。【实测】
+- 【推断】同源回落路径仍有单次 ccall 的阻塞，故铁律 5/6 不因隔离而失效：
+  C++ setter 幂等守卫不能退化为“靠进程隔离兜底”。
 
 ## 实验室对接更新（2026-10-26）：BorgVR 范式确认 + 硬件
 

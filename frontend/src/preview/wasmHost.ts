@@ -48,8 +48,25 @@ export async function assertWasmAssets(signal?: AbortSignal): Promise<void> {
   }
 }
 
+/**
+ * Preview shell URL.
+ *
+ * Prefer a cross-site twin host (127.0.0.1 ↔ localhost) so Chromium keeps the
+ * Raycaster iframe in another renderer process. A same-origin iframe shares
+ * this document's main thread: the ~100MB MEMFS unpack, the Wasm compile and
+ * every synchronous control/script ccall then freeze React and its BusyRegion.
+ * Both loopback names resolve to the same server (Vite binds 127.0.0.1 and
+ * accepts the twin Host; the Python harness accepts both Host headers), so the
+ * engine moves off the UI process without any extra listener.
+ */
 export function wasmShellUrl(): string {
-  return '/wasm/preview-shell.html'
+  const shellPath = '/wasm/preview-shell.html'
+  if (typeof window === 'undefined') return shellPath
+  const { protocol, hostname, port } = window.location
+  const twin =
+    hostname === '127.0.0.1' ? 'localhost' : hostname === 'localhost' ? '127.0.0.1' : null
+  if (!twin) return shellPath
+  return `${protocol}//${twin}${port ? `:${port}` : ''}${shellPath}`
 }
 
 function postToIframe(iframe: HTMLIFrameElement, message: unknown, transfer?: Transferable[]): void {

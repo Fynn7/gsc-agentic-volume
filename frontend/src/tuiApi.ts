@@ -233,6 +233,27 @@ export function tuiArchiveAll() {
   }>('/api/tui/archive-all', {})
 }
 
+export function tuiRenameRun(runId: string, task: string) {
+  return postJson<{ runId: string; task: string }>('/api/tui/runs/rename', { runId, task })
+}
+
+export function tuiDeleteRun(runId: string) {
+  return postJson<{ deleted: string; session_deleted: string | null; errors: Array<{ runId: string; error: string }> }>(
+    '/api/tui/runs/delete',
+    { runId },
+  )
+}
+
+export function tuiDeleteAllRuns() {
+  return postJson<{
+    deleted: string[]
+    sessions_deleted: string[]
+    skipped_live: string[]
+    errors: Array<{ runId: string; error: string }>
+    remaining: number
+  }>('/api/tui/delete-all', {})
+}
+
 export function tuiLoadSettings() {
   return request<TuiSettings>('/api/tui/settings')
 }

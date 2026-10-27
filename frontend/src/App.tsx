@@ -17,6 +17,7 @@ import {
   Chat,
   ChatComposer,
   ChatScrollToBottom,
+  ChatSessionsDrawer,
   ChatThread,
   ClippedNavShell,
   CodeBlock,
@@ -27,18 +28,15 @@ import {
   EmptyState,
   EndAside,
   ExpandableCodeBlock,
-  FileIcon,
   FillColumn,
   getFynnsThemeMode,
   IconButton,
+  Input,
   LinearProgress,
   List,
   ListItem,
   LoadingSkeleton,
   MenuIcon,
-  NavigationDrawer,
-  NavigationDrawerItem,
-  NavigationDrawerNewChat,
   PageScroll,
   PanelLeftIcon,
   PanelRightIcon,
@@ -71,11 +69,14 @@ import {
   tuiBatchDetail,
   tuiCancelBatch,
   tuiCopyRun,
+  tuiDeleteAllRuns,
+  tuiDeleteRun,
   tuiDownloadChatLog,
   tuiGlossary,
   tuiListRuns,
   tuiLoadSettings,
   tuiOpenPath,
+  tuiRenameRun,
   tuiRunImages,
   tuiSaveSettings,
   tuiStartBatch,
@@ -220,6 +221,13 @@ function App() {
   const [helpOpen, setHelpOpen] = useState(false)
   const [quitConfirm, setQuitConfirm] = useState(false)
   const [archiveConfirm, setArchiveConfirm] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<TuiRun | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameSaving, setRenameSaving] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<TuiRun | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteAllConfirm, setDeleteAllConfirm] = useState(false)
+  const [deletingAll, setDeletingAll] = useState(false)
 
   const [verify, setVerify] = useState<VerifyState>({ running: false, result: null })
 
@@ -880,6 +888,76 @@ function App() {
     }
   }, [activeRunId, handleNewTask, refreshRuns])
 
+  const handleRenameRun = useCallback(async () => {
+    if (!renameTarget || renameSaving) return
+    const name = renameDraft.trim()
+    if (!name) {
+      snackbar('Name must not be empty.', { severity: 'error', duration: 'long', dismissible: true })
+      return
+    }
+    setRenameSaving(true)
+    try {
+      await tuiRenameRun(renameTarget.runId, name)
+      setRenameTarget(null)
+      await refreshRuns()
+      if (activeRunId === renameTarget.runId) openRun(renameTarget.runId)
+      snackbar(`Renamed to “${name}”.`, { severity: 'info', duration: 'long', dismissible: true })
+    } catch (error: unknown) {
+      snackbar(`Rename failed: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    } finally {
+      setRenameSaving(false)
+    }
+  }, [renameTarget, renameDraft, renameSaving, refreshRuns, activeRunId, openRun])
+
+  const handleDeleteRun = useCallback(async () => {
+    if (!deleteTarget || deleting) return
+    setDeleting(true)
+    try {
+      await tuiDeleteRun(deleteTarget.runId)
+      setDeleteTarget(null)
+      const latest = await refreshRuns()
+      if (activeRunId === deleteTarget.runId) {
+        if (!(latest ?? []).some((run) => run.runId === deleteTarget.runId)) handleNewTask()
+      }
+      snackbar(`Deleted ${deleteTarget.runId}.`, { severity: 'info', duration: 'long', dismissible: true })
+    } catch (error: unknown) {
+      snackbar(`Delete failed: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    } finally {
+      setDeleting(false)
+    }
+  }, [deleteTarget, deleting, refreshRuns, activeRunId, handleNewTask])
+
+  const handleDeleteAllRuns = useCallback(async () => {
+    if (deletingAll) return
+    setDeletingAll(true)
+    try {
+      const result = await tuiDeleteAllRuns()
+      setDeleteAllConfirm(false)
+      const latest = await refreshRuns()
+      if (activeRunId && !(latest ?? []).some((run) => run.runId === activeRunId)) handleNewTask()
+      snackbar(
+        `Deleted ${result.deleted.length} runs${result.skipped_live.length ? `; kept live: ${result.skipped_live.join(', ')}` : ''}.`,
+        { severity: 'info', duration: 'long', dismissible: true },
+      )
+    } catch (error: unknown) {
+      snackbar(`Delete all failed: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    } finally {
+      setDeletingAll(false)
+    }
+  }, [deletingAll, refreshRuns, activeRunId, handleNewTask])
+
   const handleStartBatch = useCallback(
     async (count: number, task: string) => {
       if (!settings) return
@@ -1282,26 +1360,41 @@ function App() {
         }
         nav={
           navOpen ? (
-            <NavigationDrawer variant="standard" ariaLabel="Runs">
-              <NavigationDrawerNewChat label="New task" disabled={live} onClick={handleNewTask} />
-              {runs.length === 0 ? (
-                <EmptyState
-                  size="sm"
-                  title="No runs yet"
-                  description="Send the first task from the composer, or /task-a for the audited preset."
-                />
-              ) : (
-                runs.slice(0, 12).map((run) => (
-                  <NavigationDrawerItem
-                    key={run.runId}
-                    icon={<FileIcon aria-hidden />}
-                    label={`${run.runId} — ${run.task.slice(0, 40)}`}
-                    active={run.runId === activeRunId}
-                    onClick={() => openRun(run.runId)}
-                  />
-                ))
-              )}
-            </NavigationDrawer>
+            <ChatSessionsDrawer
+              ariaLabel="Runs"
+              sessions={runs.map((run) => ({
+                id: run.runId,
+                label: `${run.runId} — ${run.task.slice(0, 40)}`,
+              }))}
+              activeSessionId={activeRunId}
+              labels={{
+                newChat: 'New task',
+                more: 'Run options',
+                rename: 'Rename',
+                delete: 'Delete',
+                deleteAll: 'Delete all',
+                sessionMenu: 'Run options',
+                listMenu: 'Runs',
+                emptyTitle: 'No runs yet',
+                emptyDescription: 'Send the first task from the composer, or /task-a for the audited preset.',
+                loading: 'Loading runs',
+                revealMore: 'Show more runs',
+              }}
+              reveal={{ initial: 12, step: 12 }}
+              onNewChat={handleNewTask}
+              onSelect={(runId) => openRun(runId)}
+              onRename={(runId) => {
+                const run = runs.find((item) => item.runId === runId)
+                if (!run) return
+                setRenameTarget(run)
+                setRenameDraft(run.task)
+              }}
+              onDelete={(runId) => {
+                const run = runs.find((item) => item.runId === runId)
+                if (run) setDeleteTarget(run)
+              }}
+              onDeleteAll={() => setDeleteAllConfirm(true)}
+            />
           ) : null
         }
       >
@@ -1505,6 +1598,65 @@ function App() {
         danger
         loading={archiving}
         onConfirm={() => void handleArchiveAll()}
+      />
+      <Dialog
+        open={renameTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRenameTarget(null)
+        }}
+        title={renameTarget ? `Rename ${renameTarget.runId}` : 'Rename run'}
+        description="Renames the task label in this run's config.json; the history list and the transcript title follow it."
+        size="sm"
+        feet={
+          <div className="fynns-control-cluster fynns-control-cluster--end-align">
+            <Button variant="ghost" size="sm" disabled={renameSaving} onClick={() => setRenameTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={renameSaving || renameDraft.trim().length === 0}
+              onClick={() => void handleRenameRun()}
+            >
+              {renameSaving ? 'Saving…' : 'Save name'}
+            </Button>
+          </div>
+        }
+      >
+        <Input
+          value={renameDraft}
+          onChange={(event) => setRenameDraft(event.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          maxLength={200}
+          aria-label="Run name"
+          placeholder="New run name"
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') void handleRenameRun()
+          }}
+        />
+      </Dialog>
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null)
+        }}
+        title={deleteTarget ? `Delete ${deleteTarget.runId}?` : 'Delete run?'}
+        description="The run folder and its frame images are deleted permanently. Live runs are kept — stop them first. There is no undelete."
+        confirmLabel="Delete run"
+        danger
+        loading={deleting}
+        onConfirm={() => void handleDeleteRun()}
+      />
+      <ConfirmDialog
+        open={deleteAllConfirm}
+        onOpenChange={setDeleteAllConfirm}
+        title="Delete all runs?"
+        description="Every history run folder and its frame images are deleted permanently (live runs are kept). There is no undelete."
+        confirmLabel="Delete all"
+        danger
+        loading={deletingAll}
+        onConfirm={() => void handleDeleteAllRuns()}
       />
       <ConfirmDialog
         open={quitConfirm}

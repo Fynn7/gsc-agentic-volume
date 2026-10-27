@@ -955,5 +955,103 @@ class ArchiveAllRuns(unittest.TestCase):
             self.assertEqual([r["runId"] for r in remaining], ["run-live"])
 
 
+class RenameDeleteRuns(unittest.TestCase):
+    def _run_dir(self, base: Path, name: str, run_id: str, status: str = "finished",
+                 session_id: str | None = None, task: str = "old task") -> Path:
+        run_dir = base / name
+        run_dir.mkdir(parents=True)
+        payload = {"runId": run_id, "status": status}
+        if session_id:
+            payload["sessionId"] = session_id
+        (run_dir / "run.json").write_text(json.dumps(payload))
+        (run_dir / "manifest.json").write_text(json.dumps({"exitCode": 0}))
+        (run_dir / "config.json").write_text(json.dumps({"task": task, "model": "m"}))
+        return run_dir
+
+    def test_rename_updates_config_and_history_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "runtime" / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            self._run_dir(base, "run-1", "run-1")
+            with patch.object(tui_runs, "ROOT", root):
+                result = tui_runs.rename_run("run-1", "  new name  ")
+            self.assertEqual(result, {"runId": "run-1", "task": "new name"})
+            saved = json.loads((base / "run-1" / "config.json").read_text())
+            self.assertEqual(saved["task"], "new name")
+            self.assertEqual(saved["model"], "m")
+            with patch.object(tui_runs, "ROOT", root):
+                found = tui_runs.find_run("run-1", _fresh=True)
+            self.assertIn("new name", found["task"])
+
+    def test_rename_rejects_empty_and_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "runtime" / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            self._run_dir(base, "run-1", "run-1")
+            with patch.object(tui_runs, "ROOT", root):
+                with self.assertRaises(ValueError):
+                    tui_runs.rename_run("run-1", "   ")
+                with self.assertRaises(ValueError):
+                    tui_runs.rename_run("nope", "name")
+
+    def test_delete_removes_run_and_session_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            base = runtime / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            session = runtime / "sess-9"
+            session.mkdir(parents=True)
+            (session / "session.json").write_text(json.dumps({"id": "sess-9"}))
+            run_dir = self._run_dir(base, "run-1", "run-1", session_id="sess-9")
+            (base / "LATEST.txt").write_text(str(run_dir))
+            with patch.object(tui_runs, "ROOT", root):
+                result = tui_runs.delete_run("run-1")
+            self.assertEqual(result["deleted"], "run-1")
+            self.assertEqual(result["session_deleted"], "sess-9")
+            self.assertFalse(run_dir.exists())
+            self.assertFalse(session.exists())
+            self.assertFalse((base / "LATEST.txt").exists())
+            with patch.object(tui_runs, "ROOT", root):
+                self.assertEqual(tui_runs.discover_runs(_fresh=True), [])
+
+    def test_delete_refuses_live_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "runtime" / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            live = self._run_dir(base, "run-live", "run-live", status="running")
+            (live / "run.json").write_text(json.dumps({"runId": "run-live",
+                                                       "status": "running", "pid": 999999}))
+            with patch.object(tui_runs, "process_alive",
+                               side_effect=lambda pid: pid == 999999):
+                with patch.object(tui_runs, "ROOT", root):
+                    with self.assertRaises(ValueError):
+                        tui_runs.delete_run("run-live")
+            self.assertTrue(live.is_dir())
+
+    def test_delete_all_removes_history_but_keeps_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "runtime" / "local-vlm" / "cli-custom"
+            base.mkdir(parents=True)
+            self._run_dir(base, "run-old", "run-old")
+            live = self._run_dir(base, "run-live", "run-live", status="running")
+            (live / "run.json").write_text(json.dumps({"runId": "run-live",
+                                                       "status": "running", "pid": 999999}))
+            with patch.object(tui_runs, "process_alive",
+                               side_effect=lambda pid: pid == 999999):
+                with patch.object(tui_runs, "ROOT", root):
+                    result = tui_runs.delete_all_runs()
+            self.assertEqual(result["deleted"], ["run-old"])
+            self.assertEqual(result["skipped_live"], ["run-live"])
+            self.assertEqual(result["errors"], [])
+            with patch.object(tui_runs, "ROOT", root):
+                remaining = tui_runs.discover_runs(_fresh=True)
+            self.assertEqual([r["runId"] for r in remaining], ["run-live"])
+
+
 if __name__ == '__main__':
     unittest.main()

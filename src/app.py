@@ -761,6 +761,31 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200, _tui_jsonable(tui_runs.archive_all_runs()))
                 except Exception as error:
                     return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/rename':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    title = str(body.get('task', body.get('title', body.get('name', ''))) or '')
+                    if not run_id:
+                        raise ValueError('runId required')
+                    return self.send(200, _tui_jsonable(tui_runs.rename_run(run_id, title)))
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/delete':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    if not run_id:
+                        raise ValueError('runId required')
+                    return self.send(200, _tui_jsonable(tui_runs.delete_run(run_id)))
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/delete-all':
+                try:
+                    _tui_require()
+                    return self.send(200, _tui_jsonable(tui_runs.delete_all_runs()))
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
             if route == '/api/tui/batches':
                 # One-shot batch: same frozen config N times (TUI /batch semantics).
                 try:

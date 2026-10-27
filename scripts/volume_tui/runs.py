@@ -606,3 +606,138 @@ def archive_all_runs() -> dict:
     return {"moved": moved, "sessions_moved": sessions_moved,
             "skipped_live": skipped_live, "errors": errors,
             "archive_dir": str(root), "remaining": len(entries)}
+
+
+def _invalidate_discover_cache() -> None:
+    """Drop the cached history so a rename/delete shows at once."""
+    global _DISCOVER_CACHE
+    _DISCOVER_CACHE.update(at=0.0, key=None, value=None)
+
+
+def _refuse_if_live(entry: dict) -> str | None:
+    """runId when the run is genuinely live and must not be touched, else None.
+
+    Same live definition as archive_all_runs: a verified Running status or a
+    lock file tying a live process to the run. Paper-"running" with no live
+    process behind it is stale history, not live.
+    """
+    try:
+        if (str(entry.get("status") or "") == "Running"
+                or _launcher_alive_for(entry)):
+            return str(entry.get("runId") or Path(str(entry.get("directory", ""))).name or "?")
+    except Exception:
+        pass
+    return None
+
+
+def rename_run(run_id: str, title: str) -> dict:
+    """Rename the human task label of one run (its config.json task, nothing else).
+
+    The history list and the transcript title both read config.json, so both
+    follow the rename. Never moves, deletes, or re-invokes anything.
+    """
+    name = " ".join(str(title or "").split())
+    if not name:
+        raise ValueError("New name must not be empty.")
+    if len(name) > 200:
+        raise ValueError("New name must be at most 200 characters.")
+    entry = find_run(str(run_id or "").strip(), _fresh=True)
+    if entry is None:
+        raise ValueError("Unknown run: %s" % (run_id,))
+    run_dir = Path(str(entry.get("directory", "")))
+    config_path = run_dir / "config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError("config.json is unreadable: %s" % error)
+    if not isinstance(config, dict):
+        raise ValueError("config.json is not an object.")
+    config["task"] = name
+    try:
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    except OSError as error:
+        raise ValueError("Could not save the new name: %s" % error)
+    _invalidate_discover_cache()
+    return {"runId": entry.get("runId"), "task": name}
+
+
+def _remove_run_dirs(entry: dict) -> dict:
+    """Delete one run folder (+ its session frames); the caller owns the live check."""
+    import shutil
+
+    run_id = str(entry.get("runId") or Path(str(entry.get("directory", ""))).name or "?")
+    src = Path(str(entry.get("directory", "")))
+    if not src.is_dir() or _is_under_archive(src):
+        raise ValueError("Run folder is gone already: %s" % run_id)
+    errors: list[dict] = []
+    try:
+        shutil.rmtree(src)
+    except (OSError, ValueError) as error:
+        raise ValueError("Could not delete %s: %s" % (run_id, error))
+    session_deleted: str | None = None
+    session_src = _session_dir_for(entry)
+    if session_src is not None:
+        try:
+            if session_src.is_dir():
+                shutil.rmtree(session_src)
+                session_deleted = session_src.name
+        except (OSError, ValueError) as error:
+            errors.append({"runId": run_id, "error": "session %s: %s" % (session_src.name, error)})
+    _clean_dangling_latest({str(src), str(src.resolve()) if src.exists() is False else str(src)})
+    _invalidate_discover_cache()
+    return {"deleted": run_id, "session_deleted": session_deleted, "errors": errors}
+
+
+def delete_run(run_id: str) -> dict:
+    """Delete one history run permanently (run folder + its session frames).
+
+    Live runs are refused — stop them first. There is no undelete.
+    """
+    rid = str(run_id or "").strip()
+    if not rid:
+        raise ValueError("runId required")
+    entry = find_run(rid, _fresh=True)
+    if entry is None:
+        raise ValueError("Unknown run: %s" % rid)
+    live = _refuse_if_live(entry)
+    if live is not None:
+        raise ValueError("Run %s is still live - stop it first" % live)
+    return _remove_run_dirs(entry)
+
+
+def delete_all_runs() -> dict:
+    """Delete every history run permanently (the destructive twin of archive_all_runs).
+
+    Only genuinely live runs are kept (a verified live process, or a lock
+    file tying one to the run) — stop them first. Their session folders go
+    with them so runtime/ is clean afterwards.
+    """
+    entries = discover_runs(_fresh=True)
+    deleted: list[str] = []
+    sessions_deleted: list[str] = []
+    skipped_live: list[str] = []
+    errors: list[dict] = []
+    for entry in entries:
+        run_id = str(entry.get("runId") or Path(str(entry.get("directory", ""))).name or "?")
+        try:
+            if _refuse_if_live(entry) is not None:
+                skipped_live.append(run_id)
+                continue
+        except Exception:
+            pass
+        try:
+            result = _remove_run_dirs(entry)
+        except ValueError as error:
+            errors.append({"runId": run_id, "error": str(error)})
+            continue
+        deleted.append(run_id)
+        if result.get("session_deleted"):
+            sessions_deleted.append(str(result["session_deleted"]))
+    _invalidate_discover_cache()
+    try:
+        entries = discover_runs(_fresh=True)
+    except Exception:
+        entries = []
+    return {"deleted": deleted, "sessions_deleted": sessions_deleted,
+            "skipped_live": skipped_live, "errors": errors,
+            "remaining": len(entries)}

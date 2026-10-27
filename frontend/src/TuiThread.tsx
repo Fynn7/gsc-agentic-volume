@@ -311,17 +311,61 @@ export function TuiBlockRow({
       const markdown = `${tuiMark(block.kind)} ${block.title}${claim ? `\n\n${tuiMark('assistant')} ${claim}` : ''}`
       return <ChatMessage role="assistant" markdown={markdown} />
     }
-    case 'notices':
+    case 'notices': {
+      const lines = block.body
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+      const details = lines.map((text, index) => ({ id: `notice-${index}`, text }))
+      if (details.length === 0) {
+        return (
+          <ChatMessage
+            role="assistant"
+            thinking={<ChatThinking variant="status" label={block.title || 'harness notices'} details={[]} icon={<InfoIcon aria-hidden />} />}
+          />
+        )
+      }
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={block.title || 'harness notices'} details={[]} icon={<InfoIcon aria-hidden />} />}
-        >
-          {block.body || undefined}
-        </ChatMessage>
+          thinking={
+            <ChatThinking
+              variant="disclosure"
+              label={block.title || 'harness notices'}
+              details={details}
+              icon={<InfoIcon aria-hidden />}
+              className="gav-harness-notice"
+            />
+          }
+        />
       )
-    case 'warn':
-      return <InlineAlert severity="warning" message={`${tuiMark(block.kind)} ${block.title}`} />
+    }
+    case 'warn': {
+      const body = block.body.trim()
+      const label = block.title || 'harness notice'
+      if (!body) {
+        return (
+          <ChatMessage
+            role="assistant"
+            thinking={<ChatThinking variant="status" label={label} details={[]} icon={<InfoIcon aria-hidden />} className="gav-harness-notice" />}
+          />
+        )
+      }
+      return (
+        <ChatMessage
+          role="assistant"
+          thinking={
+            <ChatThinking
+              variant="disclosure"
+              label={label}
+              details={[{ id: 'warn-body', text: body }]}
+              icon={<InfoIcon aria-hidden />}
+              className="gav-harness-notice"
+            />
+          }
+        />
+      )
+    }
     case 'notice':
       return (
         <ChatMessage

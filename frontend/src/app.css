@@ -295,6 +295,18 @@
 }
 
 /*
+ * Harness notices: one collapsed row (info icon + label); the warning text
+ * lives inside the disclosure as quiet gray small copy.
+ */
+.gav-harness-notice .fynns-chat-thinking-text {
+  color: var(--fynns-color-text-muted);
+  font-size: var(--fynns-font-size-caption);
+  line-height: var(--fynns-line-height-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/*
  * Slash menu scrollbar against the capsule wall: the attachments track
  * bleeds through the shell pad on the right only (left keeps composer
  * text alignment), and clips horizontal overflow so the menu — not the

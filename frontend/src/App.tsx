@@ -53,7 +53,7 @@ import {
 } from '@fynns/ui'
 import { importVolumeFile, pickVolumeFile, type VolumeImport } from './api'
 import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
-import { TuiBlockRow, type ZoomPayload } from './TuiThread'
+import { TuiBlockRow, WorkedRow, type ZoomPayload } from './TuiThread'
 import {
   BatchDetailDialog,
   BatchDialog,
@@ -66,6 +66,7 @@ import {
 import { matchSlashCommands, parseSlashCommand, type SlashAction } from './slash'
 import {
   errorText,
+  transcriptDuration,
   tuiArchiveAll,
   tuiBatchDetail,
   tuiCancelBatch,
@@ -957,8 +958,24 @@ function App() {
   const stopAvailable = pending === null && !!activeRunId && transcript?.status === 'running'
 
   const rows: ReactNode[] = []
+  // Terminal run: thinking is over, so every step collapses into one summary
+  // disclosure ("Worked for …"). The user prompt, frame figures and alerts
+  // stay as rows: figures and alerts cannot nest inside thinking.
+  const terminal = transcript != null && transcript.status !== 'running' && pending === null
+  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'notices', 'notice', 'meta'])
   if (transcript) {
+    const workedBlocks = terminal ? transcript.blocks.filter((block) => collapsibleKinds.has(block.kind)) : []
+    let workedInserted = workedBlocks.length === 0
     transcript.blocks.forEach((block, index) => {
+      if (terminal && collapsibleKinds.has(block.kind)) {
+        if (!workedInserted) {
+          workedInserted = true
+          rows.push(
+            <WorkedRow key="worked" blocks={workedBlocks} totalSeconds={transcriptDuration(transcript.blocks)} />,
+          )
+        }
+        return
+      }
       const row = (
         <TuiBlockRow key={`${block.kind}-${index}`} block={block} showPlumbing={showPlumbing} onZoom={openZoom} />
       )

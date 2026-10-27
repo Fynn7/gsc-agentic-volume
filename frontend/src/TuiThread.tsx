@@ -22,8 +22,10 @@ import {
   Collapsible,
   InlineAlert,
   LoadingSkeleton,
+  WrenchIcon,
 } from '@fynns/ui'
-import { tuiArtifactUrl, tuiMark, type TuiBlock } from './tuiApi'
+import type { ChatThinkingDetail } from '@fynns/ui'
+import { tuiArtifactUrl, formatRunDuration, tuiMark, type TuiBlock } from './tuiApi'
 
 export type ZoomPayload = { url: string; alt: string; caption: string }
 
@@ -75,6 +77,73 @@ function CompactionRow({ block }: { block: TuiBlock }) {
           details={body ? [{ id: 'checkpoint', text: body }] : []}
         />
       }
+    />
+  )
+}
+
+/** Terminal run: whole history collapsed into one summary disclosure. */
+export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalSeconds: number | null }) {
+  const label = totalSeconds == null ? 'Worked' : `Worked for ${formatRunDuration(totalSeconds)}`
+  const details: ChatThinkingDetail[] = blocks.map((block, index) => {
+    const id = `worked-${index}`
+    switch (block.kind) {
+      case 'thinking': {
+        const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
+        const nestedLabel = reasoned ? 'Thought' : 'Model answered'
+        const body = block.body.trim()
+        if (!body) return { id, label: nestedLabel, summary: block.subtitle || undefined }
+        return {
+          id,
+          label: nestedLabel,
+          summary: block.subtitle || undefined,
+          details: [{ id: `${id}-body`, text: body }],
+        }
+      }
+      case 'compaction': {
+        const body = block.body.trim()
+        if (!body) return { id, label: 'Context checkpoint', summary: block.subtitle || undefined }
+        return {
+          id,
+          label: 'Context checkpoint',
+          summary: block.subtitle || undefined,
+          details: [{ id: `${id}-body`, text: body }],
+        }
+      }
+      case 'tool': {
+        const body = block.body.trim()
+        // Tool calls read as work items: wrench marker, never the default sparkle.
+        if (!body && !block.subtitle) return { id, label: block.title, icon: <WrenchIcon aria-hidden /> }
+        return {
+          id,
+          label: block.title,
+          summary: block.subtitle || undefined,
+          icon: <WrenchIcon aria-hidden />,
+          details: body ? [{ id: `${id}-body`, text: body }] : undefined,
+        }
+      }
+      case 'assistant':
+        // The model's own words stay verbatim as muted detail text.
+        return { id, text: block.title }
+      case 'finish': {
+        const claim = block.body.trim()
+        if (!claim) return { id, label: block.title }
+        return { id, label: block.title, details: [{ id: `${id}-body`, text: claim }] }
+      }
+      case 'notices': {
+        const body = block.body.trim()
+        if (!body) return { id, label: block.title }
+        return { id, label: block.title, details: [{ id: `${id}-body`, text: body }] }
+      }
+      case 'notice':
+      case 'meta':
+      default:
+        return { id, text: block.title }
+    }
+  })
+  return (
+    <ChatMessage
+      role="assistant"
+      thinking={<ChatThinking label={label} details={details} />}
     />
   )
 }

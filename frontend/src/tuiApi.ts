@@ -48,6 +48,32 @@ export function tuiMark(kind: string): string {
   return TUI_MARKS[kind] ?? '·'
 }
 
+/**
+ * Total wall-clock span of a transcript: last block time minus first block
+ * time, from the recorded evidence. Null when no block carries a timestamp.
+ */
+export function transcriptDuration(blocks: TuiBlock[]): number | null {
+  const stamps = blocks
+    .map((block) => block.ts)
+    .filter((ts): ts is number => typeof ts === 'number' && Number.isFinite(ts))
+  if (stamps.length === 0) return null
+  return Math.max(0, Math.max(...stamps) - Math.min(...stamps))
+}
+
+/**
+ * A duration for the screen: "45s", "2min 5s", "1h 2min 3s".
+ * Mirrors scripts/volume_tui/event_text.format_duration (whole units, no
+ * fractions) so the GUI and the TUI read the same.
+ */
+export function formatRunDuration(seconds: number): string {
+  const total = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds + 0.5)) : 0
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  const secs = total % 60
+  if (minutes < 60) return `${minutes}min ${secs}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}min ${secs}s`
+}
+
 export type TuiRun = {
   runId: string
   directory: string

@@ -18,6 +18,7 @@ import {
   Card,
   Chat,
   ChatComposer,
+  ChatMessage,
   ChatScrollToBottom,
   ChatSessionsDrawer,
   ChatThread,
@@ -43,6 +44,7 @@ import {
   PanelLeftIcon,
   PanelRightIcon,
   PlusIcon,
+  RefreshIcon,
   restoreFynnsThemeMode,
   SettingsIcon,
   SnackbarHost,
@@ -530,12 +532,53 @@ function App() {
           if (latest && latest.length > 0 && latest[0].runId !== prevActive) openRun(latest[0].runId)
         }
       } catch (error: unknown) {
+        const message = errorText(error)
         setPending(null)
-        snackbar(`Could not start the task: ${errorText(error)}`, {
+        snackbar(`Could not start the task: ${message}`, {
           severity: 'error',
           duration: 'long',
           dismissible: true,
         })
+        // No run was minted: keep the failed attempt in the thread instead of
+        // bouncing back to the empty "Start a run" state (gsc-live-preview
+        // keeps the user turn + error inline the same way).
+        if (activeRef.current == null) {
+          const display = goal || (taskKind === 'custom' ? '(empty task)' : `/${taskKind}`)
+          pushHistory(taskKind === 'custom' ? goal || display : `/${taskKind}`)
+          setDraft('')
+          setTranscript({
+            runId: 'local-start-failed',
+            directory: '',
+            status: 'failed',
+            task: display,
+            model: settings?.model ?? '',
+            budget: 0,
+            used: 0,
+            startedAt: null,
+            sessionId: null,
+            volumePath: source.trim(),
+            blocks: [
+              {
+                kind: 'user',
+                title: display,
+                subtitle: '',
+                body: '',
+                status: 'done',
+                ts: null,
+                data: { retryTask: goal, retryKind: taskKind },
+              },
+              {
+                kind: 'error',
+                title: message || 'Could not start the task',
+                subtitle: '',
+                body: 'Start Ollama / check Connection settings, then retry — the attempted task is kept above.',
+                status: 'failed',
+                ts: null,
+                data: {},
+              },
+            ],
+          })
+        }
       }
     },
     [settings, runs, pending, source, refreshRuns, openRun, pushHistory],
@@ -1108,12 +1151,54 @@ function App() {
   const stopAvailable = pending === null && !!activeRunId && transcript?.status === 'running'
 
   const rows: ReactNode[] = []
+  // Failed start with no minted run: plain chat rows like gsc-live-preview
+  // (user turn + assistant red error text with retry), no InlineAlert.
+  if (transcript?.runId === 'local-start-failed') {
+    const userBlock = transcript.blocks.find((block) => block.kind === 'user')
+    const errBlock = transcript.blocks.find((block) => block.kind === 'error')
+    const taskText = userBlock?.title ?? transcript.task
+    const errText = errBlock?.title || 'Could not start the task'
+    const retryData = (userBlock?.data ?? {}) as { retryTask?: unknown; retryKind?: unknown }
+    const retryTask = typeof retryData.retryTask === 'string' ? retryData.retryTask : transcript.task
+    const retryKind =
+      retryData.retryKind === 'task-a' || retryData.retryKind === 'task-b' ? retryData.retryKind : 'custom'
+    const failedRed = /ollama|11434|inference/i.test(errText)
+      ? 'Ollama is not running — start it, then retry.'
+      : errText
+    rows.push(
+      <ChatMessage key="failed-user" role="user">
+        {taskText}
+      </ChatMessage>,
+    )
+    rows.push(
+      <ChatMessage
+        key="failed-assistant"
+        role="assistant"
+        actions={
+          <Tooltip content="Retry">
+            <IconButton
+              type="button"
+              size="sm"
+              aria-label="Retry"
+              onClick={() => void startCustomRun(retryTask, retryKind)}
+            >
+              <RefreshIcon size={16} aria-hidden />
+            </IconButton>
+          </Tooltip>
+        }
+      >
+        <p role="alert" style={{ color: 'var(--fynns-color-danger)', margin: 0 }}>
+          {failedRed}
+        </p>
+      </ChatMessage>,
+    )
+  }
   // Terminal run: thinking is over, so every step collapses into one summary
   // disclosure ("Worked for …"). The user prompt, frame figures and alerts
   // stay as rows: figures and alerts cannot nest inside thinking.
   const terminal = transcript != null && transcript.status !== 'running' && pending === null
   const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'notices', 'notice', 'meta'])
-  if (transcript) {
+  if (transcript && transcript.runId !== 'local-start-failed') {
     const workedBlocks = terminal ? transcript.blocks.filter((block) => collapsibleKinds.has(block.kind)) : []
     let workedInserted = workedBlocks.length === 0
     transcript.blocks.forEach((block, index) => {

@@ -7,7 +7,8 @@
  * - model turns -> ChatMessage.thinking + ChatThinking (disclosure while the
  *   chain exists, status strip otherwise; streaming while running)
  * - tool calls -> ChatActivity + ChatActivityStep (active = *-ing, done = past)
- * - frames/answers/notices -> ChatMessage rows or InlineAlert quiet rows
+ * - frames/answers/errors/notices -> ChatMessage rows (errors are one plain
+ *   red line with hover retry) or InlineAlert quiet rows
  * - transport (meta) -> hidden unless the caller passes showPlumbing (Ctrl+H)
  */
 import { useEffect, useRef, useState } from 'react'
@@ -18,14 +19,15 @@ import {
   ChatMessage,
   ChatReveal,
   ChatThinking,
-  CodeBlock,
-  Collapsible,
+  IconButton,
   InlineAlert,
   LoadingSkeleton,
   ArchiveIcon,
   BotIcon,
   CheckCircleIcon,
   InfoIcon,
+  RefreshIcon,
+  Tooltip,
   WrenchIcon,
 } from '@fynns/ui'
 import type { ChatThinkingDetail } from '@fynns/ui'
@@ -174,6 +176,28 @@ export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalS
   )
 }
 
+/** A failed turn: one plain red line, no alert box; retry lives in hover. */
+export function ErrorRow({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <ChatMessage
+      role="assistant"
+      actions={
+        onRetry ? (
+          <Tooltip content="Retry">
+            <IconButton type="button" size="sm" aria-label="Retry" onClick={onRetry}>
+              <RefreshIcon size={16} aria-hidden />
+            </IconButton>
+          </Tooltip>
+        ) : undefined
+      }
+    >
+      <p role="alert" style={{ color: 'var(--fynns-color-danger)', margin: 0 }}>
+        {message}
+      </p>
+    </ChatMessage>
+  )
+}
+
 /** One renderer tool call with the numbers it changed and what came back. */
 function ToolRow({ block }: { block: TuiBlock }) {
   const running = block.status === 'running'
@@ -252,10 +276,12 @@ export function TuiBlockRow({
   block,
   showPlumbing,
   onZoom,
+  onRetryError,
 }: {
   block: TuiBlock
   showPlumbing: boolean
   onZoom: (payload: ZoomPayload) => void
+  onRetryError?: (block: TuiBlock) => void
 }) {
   switch (block.kind) {
     case 'user':
@@ -305,20 +331,16 @@ export function TuiBlockRow({
       )
     case 'error': {
       const stopped = /stop/i.test(block.title)
-      return (
-        <div className="fynns-unit-stack">
+      if (stopped) {
+        return (
           <InlineAlert
-            severity={stopped ? 'info' : 'error'}
-            role={stopped ? 'status' : 'alert'}
+            severity="info"
+            role="status"
             message={`${tuiMark(block.kind)} ${block.title}`}
           />
-          {!stopped && block.body ? (
-            <Collapsible title="Failure detail" chrome="plain">
-              <CodeBlock variant="plain" code={block.body} />
-            </Collapsible>
-          ) : null}
-        </div>
-      )
+        )
+      }
+      return <ErrorRow message={block.title} onRetry={onRetryError ? () => onRetryError(block) : undefined} />
     }
     case 'meta':
       if (!showPlumbing) return null

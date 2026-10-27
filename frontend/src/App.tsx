@@ -466,6 +466,15 @@ function App() {
     setDraft('')
   }, [])
 
+  // Guard: the open run can vanish outside this view (archived or deleted
+  // from the TUI or another skin). When history no longer contains it,
+  // fall back to the new-task view instead of showing a dead transcript.
+  // Skipped before the first load and while a start is in flight.
+  useEffect(() => {
+    if (!runsLoaded || pending !== null) return
+    if (activeRunId && !runs.some((run) => run.runId === activeRunId)) handleNewTask()
+  }, [runs, runsLoaded, pending, activeRunId, handleNewTask])
+
   const pushHistory = useCallback((value: string) => {
     const text = value.trim()
     if (!text) return

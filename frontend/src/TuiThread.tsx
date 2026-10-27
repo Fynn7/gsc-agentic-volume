@@ -10,8 +10,9 @@
  * - frames/answers/notices -> ChatMessage rows or InlineAlert quiet rows
  * - transport (meta) -> hidden unless the caller passes showPlumbing (Ctrl+H)
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
+  BusyRegion,
   ChatActivity,
   ChatActivityStep,
   ChatMessage,
@@ -20,6 +21,7 @@ import {
   CodeBlock,
   Collapsible,
   InlineAlert,
+  LoadingSkeleton,
 } from '@fynns/ui'
 import { tuiArtifactUrl, tuiMark, type TuiBlock } from './tuiApi'
 
@@ -107,9 +109,15 @@ function FrameFigure({
   onZoom: (payload: ZoomPayload) => void
 }) {
   const [failed, setFailed] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const imgRef = useRef<HTMLImageElement | null>(null)
   const image = String((block.data as { image?: unknown } | null)?.image ?? '')
   const url = tuiArtifactUrl(image)
   const alt = `${block.title}`
+  useEffect(() => {
+    // Cached frames may complete before React attaches onLoad.
+    if (url && imgRef.current?.complete && imgRef.current.naturalWidth > 0) setLoaded(true)
+  }, [url])
   if (!url || failed) {
     return (
       <InlineAlert
@@ -120,14 +128,26 @@ function FrameFigure({
   }
   return (
     <figure className="fynns-media-figure">
-      <button
-        type="button"
-        className="gav-media-zoom"
-        aria-label={`Zoom: ${alt}`}
-        onClick={() => onZoom({ url, alt, caption: `${alt} · task correctness unverified` })}
+      <BusyRegion
+        busy={!loaded}
+        label={alt}
+        skeleton={<LoadingSkeleton variant="block" aria-hidden />}
       >
-        <img src={url} alt={alt} onError={() => setFailed(true)} />
-      </button>
+        <button
+          type="button"
+          className="gav-media-zoom"
+          aria-label={`Zoom: ${alt}`}
+          onClick={() => onZoom({ url, alt, caption: `${alt} · task correctness unverified` })}
+        >
+          <img
+            ref={imgRef}
+            src={url}
+            alt={alt}
+            onLoad={() => setLoaded(true)}
+            onError={() => setFailed(true)}
+          />
+        </button>
+      </BusyRegion>
       <figcaption>
         {tuiMark(block.kind)} {block.title}
       </figcaption>

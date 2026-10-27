@@ -13,6 +13,7 @@ import {
   applyFynnsThemeMode,
   BotIcon,
   BrainIcon,
+  BusyRegion,
   Button,
   Card,
   Chat,
@@ -35,6 +36,7 @@ import {
   LinearProgress,
   List,
   ListItem,
+  LoadingSkeleton,
   MenuIcon,
   NavigationDrawer,
   NavigationDrawerItem,
@@ -194,6 +196,7 @@ function App() {
   const [histIdx, setHistIdx] = useState<number | null>(null)
 
   const [runs, setRuns] = useState<TuiRun[]>([])
+  const [runsLoaded, setRunsLoaded] = useState(false)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [transcript, setTranscript] = useState<TuiTranscript | null>(null)
   const [pending, setPending] = useState<Pending>(null)
@@ -206,6 +209,7 @@ function App() {
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [volumesOpen, setVolumesOpen] = useState(false)
   const [volumes, setVolumes] = useState<TuiVolume[]>([])
+  const [volumesLoading, setVolumesLoading] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [archiving, setArchiving] = useState(false)
   const [batchOpen, setBatchOpen] = useState(false)
@@ -333,10 +337,23 @@ function App() {
       .catch(() => undefined)
   }, [])
 
+  const ensureVolumes = useCallback(async () => {
+    setVolumesLoading(true)
+    try {
+      const data = await tuiVolumes()
+      setVolumes(data.volumes)
+    } catch {
+      /* keep the previous list; the dialog shows its empty state */
+    } finally {
+      setVolumesLoading(false)
+    }
+  }, [])
+
   const refreshRuns = useCallback(async () => {
     try {
       const data = await tuiListRuns()
       setRuns(data.runs)
+      setRunsLoaded(true)
       return data.runs
     } catch {
       return null
@@ -711,12 +728,11 @@ function App() {
           setArchiveConfirm(true)
           return
         case 'change-volume':
-          void tuiVolumes()
-            .then((data) => setVolumes(data.volumes))
-            .catch(() => undefined)
+          void ensureVolumes()
           setVolumesOpen(true)
           return
         case 'settings':
+          void ensureVolumes()
           setSettingsOpen(true)
           return
         case 'theme':
@@ -754,7 +770,7 @@ function App() {
           return
       }
     },
-    [activeRunId, transcript, handleNewTask, startCustomRun, refreshRuns, toggleTheme],
+    [activeRunId, transcript, handleNewTask, startCustomRun, refreshRuns, toggleTheme, ensureVolumes],
   )
 
   const handleSend = useCallback(
@@ -1094,22 +1110,27 @@ function App() {
   const chatPane = (
     <div className="gav-chat-pane" data-pane="chat">
       <FillColumn>
-        <Chat label="Task conversation">
-          <ChatThread
-            label="Task conversation"
-            empty={
-              <EmptyState
-                icon={<BrainIcon size={28} aria-hidden />}
-                title="Start a run"
-                description="Describe the task, or type / for presets (/task-a, /task-b), history, batches, verify and exports. Every row is read from the recorded run evidence; model claims stay unverified."
-              />
-            }
-          >
-            {rows}
-            {tail}
-          </ChatThread>
-          <ChatScrollToBottom />
-          <ChatComposer
+        {settings ? (
+          <Chat label="Task conversation">
+            <ChatThread
+              label="Task conversation"
+              empty={
+                activeRunId && !transcript ? (
+                  <LoadingSkeleton label="Loading run evidence" lines={8} />
+                ) : (
+                  <EmptyState
+                    icon={<BrainIcon size={28} aria-hidden />}
+                    title="Start a run"
+                    description="Describe the task, or type / for presets (/task-a, /task-b), history, batches, verify and exports. Every row is read from the recorded run evidence; model claims stay unverified."
+                  />
+                )
+              }
+            >
+              {rows}
+              {tail}
+            </ChatThread>
+            <ChatScrollToBottom />
+            <ChatComposer
             value={draft}
             onChange={(value) => {
               setDraft(value)
@@ -1121,7 +1142,6 @@ function App() {
             placeholder="Describe the task, or type / for commands"
             sendLabel="Start run"
             stopLabel="Stop"
-            disabled={!settings}
             busy={live}
             onStop={stopAvailable || pending !== null ? handleStop : undefined}
             attachments={slashList}
@@ -1152,8 +1172,11 @@ function App() {
               </Tooltip>
             }
             textareaProps={{ onKeyDown: composerKeyDown }}
-          />
-        </Chat>
+            />
+          </Chat>
+        ) : (
+          <BusyRegion busy fill label="Loading workspace" />
+        )}
       </FillColumn>
     </div>
   )
@@ -1310,22 +1333,24 @@ function App() {
                     />
                   </Card>
                   <Card title="Verification">
-                    {verify.result ? (
-                      <div className="fynns-unit-stack">
-                        <CodeBlock label="verify summary" code={verify.result.summary.join('\n')} />
-                        {verify.result.output ? (
-                          <Collapsible title="Verifier output" chrome="plain">
-                            <CodeBlock variant="plain" code={verify.result.output} />
-                          </Collapsible>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <EmptyState
-                        size="sm"
-                        title={verify.running ? 'Verifying…' : 'Not verified yet'}
-                        description="Read-only check: execution / image transport / visual-quality UNVERIFIED."
-                      />
-                    )}
+                    <BusyRegion busy={verify.running} label="Verifying evidence">
+                      {verify.result ? (
+                        <div className="fynns-unit-stack">
+                          <CodeBlock label="verify summary" code={verify.result.summary.join('\n')} />
+                          {verify.result.output ? (
+                            <Collapsible title="Verifier output" chrome="plain">
+                              <CodeBlock variant="plain" code={verify.result.output} />
+                            </Collapsible>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <EmptyState
+                          size="sm"
+                          title="Not verified yet"
+                          description="Read-only check: execution / image transport / visual-quality UNVERIFIED."
+                        />
+                      )}
+                    </BusyRegion>
                     <div className="fynns-control-cluster fynns-control-cluster--start-align">
                       <Button
                         variant="primary"
@@ -1412,6 +1437,7 @@ function App() {
         onOpenChange={setVolumesOpen}
         volumes={volumes}
         current={source}
+        loading={volumesLoading}
         onPick={handlePickVolume}
       />
       <HistoryDialog
@@ -1419,6 +1445,7 @@ function App() {
         onOpenChange={setHistoryOpen}
         runs={runs}
         activeRunId={activeRunId}
+        loading={!runsLoaded}
         onOpen={(run) => openRun(run.runId)}
         onArchiveAll={() => setArchiveConfirm(true)}
         archiving={archiving}

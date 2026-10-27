@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react'
 import {
   Button,
+  BusyRegion,
   CheckIcon,
   CodeBlock,
   Dialog,
@@ -198,12 +199,14 @@ export function VolumesDialog({
   onOpenChange,
   volumes,
   current,
+  loading,
   onPick,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   volumes: TuiVolume[]
   current: string
+  loading: boolean
   onPick: (volume: TuiVolume) => void
 }) {
   return (
@@ -214,9 +217,10 @@ export function VolumesDialog({
       description="The volumes on this machine; one becomes the next run's volume."
       size="md"
     >
-      {volumes.length === 0 ? (
-        <EmptyState size="sm" title="No volumes" description="Nothing discoverable under volumes/." />
-      ) : (
+      <BusyRegion busy={loading} label="Loading volumes">
+        {volumes.length === 0 ? (
+          <EmptyState size="sm" title="No volumes" description="Nothing discoverable under volumes/." />
+        ) : (
         <Table>
           <TableHead>
             <TableRow>
@@ -244,6 +248,7 @@ export function VolumesDialog({
           </TableBody>
         </Table>
       )}
+      </BusyRegion>
     </Dialog>
   )
 }
@@ -259,6 +264,7 @@ export function HistoryDialog({
   onOpenChange,
   runs,
   activeRunId,
+  loading,
   onOpen,
   onArchiveAll,
   archiving,
@@ -267,6 +273,7 @@ export function HistoryDialog({
   onOpenChange: (open: boolean) => void
   runs: TuiRun[]
   activeRunId: string | null
+  loading: boolean
   onOpen: (run: TuiRun) => void
   onArchiveAll: () => void
   archiving: boolean
@@ -279,10 +286,11 @@ export function HistoryDialog({
       description="Enter opens one in the conversation. Archived runs live under runtime/archive."
       size="lg"
     >
-      {runs.length === 0 ? (
-        <EmptyState size="sm" title="No runs yet" description="Send the first task from the composer." />
-      ) : (
-        <Table>
+      <BusyRegion busy={loading} label="Loading runs">
+        {runs.length === 0 ? (
+          <EmptyState size="sm" title="No runs yet" description="Send the first task from the composer." />
+        ) : (
+          <Table>
           <TableHead>
             <TableRow>
               <TableHeaderCell>Run</TableHeaderCell>
@@ -310,7 +318,8 @@ export function HistoryDialog({
             ))}
           </TableBody>
         </Table>
-      )}
+        )}
+      </BusyRegion>
       <div className="fynns-control-cluster fynns-control-cluster--end-align">
         <Button variant="ghost" disabled={archiving} onClick={onArchiveAll}>
           {archiving ? 'Archiving…' : 'Archive all (runs only)'}

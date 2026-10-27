@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Button,
+  BusyRegion,
   Card,
   Checkbox,
   CheckIcon,
@@ -16,6 +17,7 @@ import {
   FieldStack,
   IconButton,
   InfoIcon,
+  LoadingSkeleton,
   Slider,
   Surface,
   Tooltip,
@@ -766,20 +768,26 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       ) : (
         <div className="gav-canvas-row">
           <div className="gav-canvas-host">
-            <iframe ref={iframeRef} title="Raycaster live preview" className="gav-wasm-frame" src="about:blank" />
-            <div className="fynns-control-cluster fynns-control-cluster--end-align">
-              <Tooltip content="Download current preview as PNG">
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  aria-label="Download current preview as PNG"
-                  disabled={!wasmReady || snapshotBusy}
-                  onClick={() => void handleSnapshot()}
-                >
-                  <DownloadIcon aria-hidden />
-                </IconButton>
-              </Tooltip>
-            </div>
+            <BusyRegion
+              busy={!wasmReady || runBusy}
+              label={runBusy ? 'Rendering preview' : 'Loading Raycaster'}
+              skeleton={<LoadingSkeleton variant="block" fill aria-hidden />}
+            >
+              <iframe ref={iframeRef} title="Raycaster live preview" className="gav-wasm-frame" src="about:blank" />
+              <div className="fynns-control-cluster fynns-control-cluster--end-align">
+                <Tooltip content="Download current preview as PNG">
+                  <IconButton
+                    variant="ghost"
+                    size="sm"
+                    aria-label="Download current preview as PNG"
+                    disabled={!wasmReady || snapshotBusy}
+                    onClick={() => void handleSnapshot()}
+                  >
+                    <DownloadIcon aria-hidden />
+                  </IconButton>
+                </Tooltip>
+              </div>
+            </BusyRegion>
           </div>
 
           <Card title="Rendering parameters" className="gav-params-card">

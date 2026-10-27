@@ -134,9 +134,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const paramsRef = useRef(params)
   const gscRef = useRef(gscText)
   const previewImportRef = useRef(previewImport)
-  // Tracks which import the preview has already switched to, so the follow
-  // effect below loads + selects each new import exactly once.
-  const syncedImportRef = useRef<string | null>(null)
+  // The import the Stage actually loaded and selected (success only), plus the
+  // in-flight one, so a failed load can neither claim sync nor retry-storm.
+  const [syncedImportId, setSyncedImportId] = useState<string | null>(null)
+  const loadingImportRef = useRef<string | null>(null)
   // Run gate lives on the ref (set before the paint barrier; the busy state is
   // committed later, so the state value would still read false in that window).
   const runBusyRef = useRef(false)
@@ -342,6 +343,12 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       // breaks the parent<->engine ping-pong that otherwise shakes the UI.
       // (UI input bypasses this entirely in updateParams and always commits.)
       const base = paramsRef.current
+      // External slot discovery: C++ appends one entry per loadvolume and
+      // reports the new index. Record it here too (not only pre-boot), so the
+      // follow path can select the real slot instead of guessing size===index.
+      if (typeof patch.dataset === 'number' && Number.isFinite(patch.dataset) && patch.dataset >= BUILTIN_DATASETS.length) {
+        setExternalIndex((prev) => (prev === patch.dataset ? prev : (patch.dataset as number)))
+      }
       const fresh = <K extends keyof PreviewParams>(key: K, value: PreviewParams[K]): boolean => {
         if (Object.is(value, base[key])) return false
         if (wasRecentlySent(key, value)) return false
@@ -399,23 +406,30 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     [queueParamsPatch, wasRecentlySent],
   )
 
-  const ensureExternalLoaded = useCallback(
-    async (host: WasmHost, record: VolumeImport, wantDataset: number) => {
-      // Reuse the single MEMFS slot; the C++ side appends one entry per load
-      // and reports the new index via wasmState.volume.
-      const code = await host.loadExternalVolume(record.datUrl, record.rawUrl)
-      if (code !== 0) throw new Error(`External volume load failed (code ${code})`)
-      // If the caller wanted the external slot, select the freshly reported index.
-      // The state patch arrives async; poll the ref for a bounded time.
-      const start = Date.now()
-      while (Date.now() - start < 5000) {
-        const current = paramsRef.current.dataset
-        if (wantDataset < BUILTIN_DATASETS.length || current >= BUILTIN_DATASETS.length) break
-        await new Promise((r) => setTimeout(r, 120))
-      }
-    },
-    [],
-  )
+  /**
+   * Load an external record into the single MEMFS slot and return the volume
+   * index C++ actually appended it as (null when no echo arrived).
+   *
+   * Every `loadvolume` appends a new entry, so the index is not the built-in
+   * count after the first load; guessing (`externalIndex ?? 8`) can select a
+   * different volume entirely. The C++ side reports the new index through
+   * volumeCallback, so wait for that echo and return it.
+   */
+  const ensureExternalLoaded = useCallback(async (host: WasmHost, record: VolumeImport): Promise<number | null> => {
+    const before = paramsRef.current.dataset
+    const code = await host.loadExternalVolume(record.datUrl, record.rawUrl)
+    if (code !== 0) throw new Error(`External volume load failed (code ${code})`)
+    // The script runs over frames: wait for the C++ echo that reports the
+    // APPENDED index. Never fall back to the current value — a stale index
+    // (e.g. left in localStorage) would select a built-in or the wrong copy.
+    const start = Date.now()
+    while (Date.now() - start < 8000) {
+      const current = paramsRef.current.dataset
+      if (current >= BUILTIN_DATASETS.length && current !== before) return current
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return null
+  }, [])
 
   const bootControllerRef = useRef<AbortController | null>(null)
   const bootPreviewRef = useRef<() => void>(() => {})
@@ -494,15 +508,25 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           return
         }
         hostRef.current = host
-        setWasmReady(true)
         setWasmMissing(false)
         // Load the external slot BEFORE the first push: pushing a dataset
         // index into an empty MEMFS makes C++ fall back to defaults and the
         // follow-up full-state echoes would clobber the panel.
+        //
+        // `wasmReady` stays false until the load settles: the follow effect
+        // keys off it, and publishing readiness first made boot and follow
+        // load the same volume concurrently (two appended copies).
         const known = previewImportRef.current
         if (known) {
           try {
-            await ensureExternalLoaded(host, known, paramsRef.current.dataset)
+            const slot = await ensureExternalLoaded(host, known)
+            if (disposed) return
+            // Adopt the real slot index and only then record the import as
+            // applied: without a confirmed slot the follow effect must retry.
+            if (slot != null) {
+              queueParamsPatch({ dataset: slot })
+              setSyncedImportId(known.importId)
+            }
           } catch {
             /* surfaced by the import flow; boot continues with builtins */
           }
@@ -512,6 +536,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           await new Promise((r) => setTimeout(r, 300))
           if (disposed) return
         }
+        setWasmReady(true)
         // First push also opens the echo gate (same tick — no echo can slip in).
         bootPushedRef.current = true
         noteSent(paramsRef.current)
@@ -535,7 +560,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           })
         }
       })
-  }, [applyPatch, ensureExternalLoaded, noteSent, onPreviewContextLost, onPreviewContextRestored])
+  }, [applyPatch, ensureExternalLoaded, noteSent, queueParamsPatch, onPreviewContextLost, onPreviewContextRestored])
 
   useEffect(() => {
     bootPreviewRef.current = bootPreview
@@ -559,34 +584,55 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   // Follow the selected volume: whenever the parent resolves a (new) import
   // for the agent source, load it into the MEMFS slot and switch to it, so the
   // Stage shows exactly the selected volume instead of a stale built-in.
+  //
+  // Only a *successful* load+select marks the import as applied: the previous
+  // version marked it up front and silently kept a built-in selected when the
+  // fetch failed (backend down), while the label still claimed "previewing".
   useEffect(() => {
     if (!previewImport) return
-    if (syncedImportRef.current === previewImport.importId) return
-    syncedImportRef.current = previewImport.importId
+    if (!wasmReady) return
     const host = hostRef.current
-    if (!host) {
-      // Host not ready yet — boot loads previewImportRef before the first
-      // push, so only point at the external slot here.
-      setParams((prev) => (prev.dataset >= BUILTIN_DATASETS.length ? prev : { ...prev, dataset: BUILTIN_DATASETS.length }))
-      return
+    if (!host) return
+    if (syncedImportId === previewImport.importId) return
+    if (loadingImportRef.current === previewImport.importId) return
+    loadingImportRef.current = previewImport.importId
+    let cancelled = false
+    void (async () => {
+      // The dev proxy answers 500 while the Python harness is down; retry a few
+      // times rather than leaving the Stage on a built-in forever.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const active = hostRef.current
+        if (!active) return
+        try {
+          const slot = await ensureExternalLoaded(active, previewImport)
+          if (cancelled) return
+          // A rebooted shell has a different host; its own boot path loads the
+          // current import, so let that one finish instead of selecting a slot
+          // that belongs to a disposed engine.
+          if (hostRef.current !== active) return
+          setParams((prev) => (prev.dataset === slot || slot == null ? prev : { ...prev, dataset: slot }))
+          setSyncedImportId(previewImport.importId)
+          return
+        } catch (err) {
+          if (cancelled) return
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 1500))
+            continue
+          }
+          snackbar(
+            `Preview could not load the selected volume: ${err instanceof Error ? err.message : String(err)}`,
+            { severity: 'error', duration: 'long', dismissible: true },
+          )
+          return
+        }
+      }
+    })().finally(() => {
+      if (loadingImportRef.current === previewImport.importId) loadingImportRef.current = null
+    })
+    return () => {
+      cancelled = true
     }
-    // Load first, then select: pushing an external index into an empty MEMFS
-    // slot makes C++ fall back to a built-in (same trap as the boot path).
-    void ensureExternalLoaded(host, previewImport, BUILTIN_DATASETS.length)
-      .then(() => {
-        setParams((prev) =>
-          prev.dataset >= BUILTIN_DATASETS.length ? prev : { ...prev, dataset: externalIndex ?? BUILTIN_DATASETS.length },
-        )
-      })
-      .catch((err: unknown) => {
-        syncedImportRef.current = null
-        snackbar(`Preview could not follow the selected volume: ${err instanceof Error ? err.message : String(err)}`, {
-          severity: 'error',
-          duration: 'long',
-          dismissible: true,
-        })
-      })
-  }, [previewImport, ensureExternalLoaded, externalIndex])
+  }, [previewImport, wasmReady, ensureExternalLoaded, syncedImportId])
 
   const handleImportPick = useCallback(async () => {
     setImporting(true)
@@ -596,21 +642,21 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
       const record = await importVolumeFile(picked.path)
       onPreviewImport(record)
       onSourceChange(record.source)
-      syncedImportRef.current = record.importId
       // Immediately load into the preview slot and switch to it.
       const host = hostRef.current
       if (host) {
-        await ensureExternalLoaded(host, record, BUILTIN_DATASETS.length)
-        // Optimistically select the external slot; the precise index arrives via state.
-        setParams((prev) => ({ ...prev, dataset: externalIndex ?? BUILTIN_DATASETS.length }))
+        const slot = await ensureExternalLoaded(host, record)
+        if (slot != null) setParams((prev) => ({ ...prev, dataset: slot }))
+        setSyncedImportId(record.importId)
         snackbar(`External volume loaded: ${record.source}`, {
           severity: 'info',
           duration: 'long',
           dismissible: true,
         })
       } else {
-        // Host not ready yet — remember the dataset; boot effect will load it.
-        setParams((prev) => ({ ...prev, dataset: BUILTIN_DATASETS.length }))
+        // Host not ready yet — the boot path loads previewImportRef, and the
+        // follow effect selects the slot once the engine is up.
+        setSyncedImportId(null)
       }
     } catch (err) {
       snackbar(`Volume import failed: ${err instanceof Error ? err.message : String(err)}`, {
@@ -621,7 +667,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     } finally {
       setImporting(false)
     }
-  }, [ensureExternalLoaded, externalIndex, onPreviewImport, onSourceChange])
+  }, [ensureExternalLoaded, onPreviewImport, onSourceChange])
 
   const handleDatasetChange = useCallback(
     (index: number) => {
@@ -632,24 +678,29 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
           void handleImportPick()
           return
         }
-        // Pure state update; the preview effect pushes it (same as every path).
-        setParams((prev) => ({ ...prev, dataset: externalIndex ?? BUILTIN_DATASETS.length }))
-        if (host) {
-          if (externalIndex == null) {
-            void ensureExternalLoaded(host, record, BUILTIN_DATASETS.length).catch((err) => {
+        // Already loaded: just select it. Never guess a slot index — an extra
+        // load would append another copy and shift the index.
+        if (host && syncedImportId !== record.importId) {
+          void ensureExternalLoaded(host, record)
+            .then((slot) => {
+              if (slot != null) setParams((prev) => ({ ...prev, dataset: slot }))
+              setSyncedImportId(record.importId)
+            })
+            .catch((err) => {
               snackbar(`External preview failed: ${err instanceof Error ? err.message : String(err)}`, {
                 severity: 'error',
                 duration: 'long',
                 dismissible: true,
               })
             })
-          }
+          return
         }
+        setParams((prev) => ({ ...prev, dataset: externalIndex ?? prev.dataset }))
         return
       }
       setParams((prev) => ({ ...prev, dataset: index }))
     },
-    [ensureExternalLoaded, externalIndex, handleImportPick],
+    [ensureExternalLoaded, externalIndex, handleImportPick, syncedImportId],
   )
 
   const updateParams = useCallback(
@@ -795,9 +846,12 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   }, [])
 
   const externalLabel = previewImport ? `External — ${previewImport.source.split(/[\\/]/).pop()}` : 'External volume (import…)'
-  const normPath = (s: string) => s.trim().replace(/\\/g, '/').toLowerCase()
+  // "Synced" means the canvas is actually rendering the selected volume, not
+  // merely that a matching import record exists: the dataset must point at the
+  // loaded external slot and that exact import must have loaded successfully.
+  const showingExternal = params.dataset >= BUILTIN_DATASETS.length
   const inSync =
-    previewImport != null && source.trim() !== '' && normPath(previewImport.source) === normPath(source)
+    previewImport != null && showingExternal && syncedImportId === previewImport.importId
   const currentDataset = params.dataset
   const datasetTriggerLabel = currentDataset < BUILTIN_DATASETS.length ? datasetLabel(currentDataset) : externalLabel
   const virtualDisabled = !isVirtualMethod(params.method)
@@ -872,9 +926,11 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
                 description={
                   inSync
                     ? `Previewing the selected volume: ${source}`
-                    : source
-                      ? `Selected volume: ${source} — syncing to preview…`
-                      : 'Pick a header; conversion reuses volume.py render.dat/raw.'
+                    : previewImport
+                      ? `Selected volume: ${previewImport.source} — not shown yet (still on a built-in dataset)`
+                      : source
+                        ? `Selected volume: ${source} — no preview import yet`
+                        : 'Pick a header; conversion reuses volume.py render.dat/raw.'
                 }
               >
                 <ControlRow label="Volume file (.dat/.nhdr/.nrrd)">

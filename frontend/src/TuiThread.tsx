@@ -1,0 +1,222 @@
+/**
+ * The TUI conversation as fynns core chat rows.
+ *
+ * Block semantics come from scripts/volume_tui/transcript.py + event_text.py
+ * (server-built): task is the user's (▌), » lines are the model's own words,
+ * ● ▣ ⚠ ✓ ✗ are measured facts. Component mapping follows core contracts:
+ * - model turns -> ChatMessage.thinking + ChatThinking (disclosure while the
+ *   chain exists, status strip otherwise; streaming while running)
+ * - tool calls -> ChatActivity + ChatActivityStep (active = *-ing, done = past)
+ * - frames/answers/notices -> ChatMessage rows or InlineAlert quiet rows
+ * - transport (meta) -> hidden unless the caller passes showPlumbing (Ctrl+H)
+ */
+import { useState } from 'react'
+import {
+  ChatActivity,
+  ChatActivityStep,
+  ChatMessage,
+  ChatReveal,
+  ChatThinking,
+  CodeBlock,
+  Collapsible,
+  InlineAlert,
+} from '@fynns/ui'
+import { tuiArtifactUrl, tuiMark, type TuiBlock } from './tuiApi'
+
+export type ZoomPayload = { url: string; alt: string; caption: string }
+
+function ToolStepStatus(status: string | null): 'active' | 'done' {
+  // Core step states are pending/active/done; a refused call is done work —
+  // the ✗ stays in the label copy, exactly like the TUI row suffix.
+  if (status === 'running') return 'active'
+  return 'done'
+}
+
+/** One model turn: Thinking/Thought when it reasoned, Working/Model answered when not. */
+function ThinkingRow({ block }: { block: TuiBlock }) {
+  const running = block.status === 'running'
+  const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
+  const label = reasoned ? 'Thought' : 'Model answered'
+  const streamingLabel = reasoned ? 'Thinking' : 'Working'
+  const body = block.body.trim()
+  return (
+    <ChatMessage
+      role="assistant"
+      thinking={
+        <ChatThinking
+          variant={body ? 'disclosure' : 'status'}
+          streaming={running}
+          streamingLabel={streamingLabel}
+          label={`${tuiMark(block.kind)} ${label}`}
+          summary={block.subtitle || undefined}
+        >
+          {body || undefined}
+        </ChatThinking>
+      }
+    />
+  )
+}
+
+/** Context checkpoint: housekeeping summary, never a » answer line. */
+function CompactionRow({ block }: { block: TuiBlock }) {
+  const running = block.status === 'running'
+  const body = block.body.trim()
+  return (
+    <ChatMessage
+      role="assistant"
+      thinking={
+        <ChatThinking
+          variant={body ? 'disclosure' : 'status'}
+          streaming={running}
+          streamingLabel="Context checkpoint"
+          label="◈ Context checkpoint"
+          summary={block.subtitle || undefined}
+        >
+          {body || undefined}
+        </ChatThinking>
+      }
+    />
+  )
+}
+
+/** One renderer tool call with the numbers it changed and what came back. */
+function ToolRow({ block }: { block: TuiBlock }) {
+  const running = block.status === 'running'
+  const subtitle = block.subtitle ? `  ${block.subtitle}` : ''
+  const timeSuffix =
+    !running && typeof (block.data as { seconds?: unknown } | null)?.seconds === 'number'
+      ? `  ✓ ${Math.round(Number((block.data as { seconds: number }).seconds) + 0.5)}s`
+      : ''
+  const statusSuffix = running ? '  …' : block.status === 'failed' ? '  ✗' : timeSuffix
+  return (
+    <ChatActivity
+      label={`${tuiMark(block.kind)} ${block.title}${subtitle}${statusSuffix}`}
+      streaming={running}
+      defaultOpen={running}
+    >
+      <ChatActivityStep status={ToolStepStatus(block.status)} label={block.title} description={block.body || undefined} />
+    </ChatActivity>
+  )
+}
+
+function FrameFigure({
+  block,
+  onZoom,
+}: {
+  block: TuiBlock
+  onZoom: (payload: ZoomPayload) => void
+}) {
+  const [failed, setFailed] = useState(false)
+  const image = String((block.data as { image?: unknown } | null)?.image ?? '')
+  const url = tuiArtifactUrl(image)
+  const alt = `${block.title}`
+  if (!url || failed) {
+    return (
+      <InlineAlert
+        severity="warning"
+        message={`The frame could not be loaded from the local artifact route. The recorded row and its hash remain valid: ${block.title}`}
+      />
+    )
+  }
+  return (
+    <figure className="fynns-media-figure">
+      <button
+        type="button"
+        className="gav-media-zoom"
+        aria-label={`Zoom: ${alt}`}
+        onClick={() => onZoom({ url, alt, caption: `${alt} · task correctness unverified` })}
+      >
+        <img src={url} alt={alt} onError={() => setFailed(true)} />
+      </button>
+      <figcaption>
+        {tuiMark(block.kind)} {block.title}
+      </figcaption>
+    </figure>
+  )
+}
+
+/** One transcript block as core chat rows. Returns null for hidden plumbing. */
+export function TuiBlockRow({
+  block,
+  showPlumbing,
+  onZoom,
+}: {
+  block: TuiBlock
+  showPlumbing: boolean
+  onZoom: (payload: ZoomPayload) => void
+}) {
+  switch (block.kind) {
+    case 'user':
+      return <ChatMessage role="user" markdown={block.title} />
+    case 'thinking':
+      return <ThinkingRow block={block} />
+    case 'compaction':
+      return <CompactionRow block={block} />
+    case 'assistant': {
+      const open = (block.data as { open?: unknown } | null)?.open === true
+      return <ChatMessage role="assistant" markdown={block.title} streaming={open} />
+    }
+    case 'tool':
+      return (
+        <ChatReveal>
+          <ToolRow block={block} />
+        </ChatReveal>
+      )
+    case 'image':
+      return (
+        <ChatReveal>
+          <FrameFigure block={block} onZoom={onZoom} />
+        </ChatReveal>
+      )
+    case 'finish': {
+      const claim = block.body.trim()
+      const markdown = `${tuiMark(block.kind)} ${block.title}${claim ? `\n\n${tuiMark('assistant')} ${claim}` : ''}`
+      return <ChatMessage role="assistant" markdown={markdown} />
+    }
+    case 'notices':
+      return (
+        <ChatMessage
+          role="assistant"
+          thinking={<ChatThinking variant="status" label={`${tuiMark(block.kind)} ${block.title || 'harness notices'}`} />}
+        >
+          {block.body || undefined}
+        </ChatMessage>
+      )
+    case 'warn':
+      return <InlineAlert severity="warning" message={`${tuiMark(block.kind)} ${block.title}`} />
+    case 'notice':
+      return (
+        <ChatMessage
+          role="assistant"
+          thinking={<ChatThinking variant="status" label={`${tuiMark(block.kind)} ${block.title}`} />}
+        />
+      )
+    case 'error': {
+      const stopped = /stop/i.test(block.title)
+      return (
+        <div className="fynns-unit-stack">
+          <InlineAlert
+            severity={stopped ? 'info' : 'error'}
+            role={stopped ? 'status' : 'alert'}
+            message={`${tuiMark(block.kind)} ${block.title}`}
+          />
+          {!stopped && block.body ? (
+            <Collapsible title="Failure detail" chrome="plain">
+              <CodeBlock variant="plain" code={block.body} />
+            </Collapsible>
+          ) : null}
+        </div>
+      )
+    }
+    case 'meta':
+      if (!showPlumbing) return null
+      return (
+        <ChatMessage
+          role="assistant"
+          thinking={<ChatThinking variant="status" label={`${tuiMark(block.kind)} ${block.title}`} />}
+        />
+      )
+    default:
+      return null
+  }
+}

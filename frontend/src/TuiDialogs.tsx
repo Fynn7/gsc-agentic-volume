@@ -1,0 +1,507 @@
+/**
+ * Run-management dialogs: the GUI counterpart of the TUI modal screens
+ * (scripts/volume_tui/app.py SettingsScreen/VolumesScreen/RunsScreen/
+ * HistoryScreen/BatchScreen/BatchDetailScreen/HelpScreen/GlossaryScreen).
+ * Only fynns core components: Dialog, Table, DropdownMenu, Field* inputs.
+ */
+import { useEffect, useState } from 'react'
+import {
+  Button,
+  CheckIcon,
+  CodeBlock,
+  Dialog,
+  DropdownMenu,
+  DropdownMenuItem,
+  EmptyState,
+  FieldBlock,
+  FieldStack,
+  Input,
+  List,
+  ListItem,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+} from '@fynns/ui'
+import type { TuiBatchRecord, TuiRun, TuiSettings, TuiVolume } from './tuiApi'
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return <FieldStack>{children}</FieldStack>
+}
+
+/* -- settings -------------------------------------------------------- */
+
+export function SettingsDialog({
+  open,
+  onOpenChange,
+  settings,
+  volumes,
+  onSave,
+  saving,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  settings: TuiSettings
+  volumes: TuiVolume[]
+  onSave: (next: TuiSettings) => void
+  saving: boolean
+}) {
+  const [draft, setDraft] = useState<TuiSettings>(settings)
+  useEffect(() => {
+    if (open) setDraft(settings)
+  }, [open, settings])
+  const set = <K extends keyof TuiSettings>(key: K, value: TuiSettings[K]) =>
+    setDraft((prev) => ({ ...prev, [key]: value }))
+  const volumeLabel =
+    volumes.find((v) => v.path === draft.volumePath)?.label ?? draft.volumePath ?? '(gate default)'
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Settings"
+      description="Saved to runtime/tui-settings.json — the same file the TUI writes. Applies to the next run."
+      size="md"
+    >
+      <Shell>
+        <FieldBlock label="Mode">
+          <DropdownMenu trigger={draft.mode} ariaLabel="Mode">
+            {['Local', 'H200'].map((mode) => (
+              <DropdownMenuItem
+                key={mode}
+                icon={draft.mode === mode ? <CheckIcon aria-hidden /> : undefined}
+                onClick={() => set('mode', mode)}
+              >
+                {mode}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenu>
+        </FieldBlock>
+        <FieldBlock label="Model" description="Ollama model on this machine (Tab completion lives in the TUI).">
+          <Input
+            value={draft.model}
+            onChange={(event) => set('model', event.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </FieldBlock>
+        <FieldBlock label="Volume">
+          <DropdownMenu trigger={volumeLabel} ariaLabel="Volume">
+            {volumes.map((volume) => (
+              <DropdownMenuItem
+                key={volume.path}
+                icon={draft.volumePath === volume.path ? <CheckIcon aria-hidden /> : undefined}
+                onClick={() => set('volumePath', volume.path)}
+              >
+                {volume.label}
+                {volume.dimensions ? `  [${volume.dimensions.join('x')}]` : '  [dims unknown]'}
+                {volume.default ? '  [default]' : ''}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenu>
+        </FieldBlock>
+        <FieldBlock label="Local endpoint">
+          <Input
+            value={draft.endpoint}
+            onChange={(event) => set('endpoint', event.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </FieldBlock>
+        <FieldBlock label="H200 endpoint">
+          <Input
+            value={draft.h200Endpoint}
+            onChange={(event) => set('h200Endpoint', event.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </FieldBlock>
+        <FieldBlock label="Renderer">
+          <Input
+            value={draft.rendererService}
+            onChange={(event) => set('rendererService', event.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </FieldBlock>
+        <FieldBlock label="Context size">
+          <Input
+            value={String(draft.contextSize)}
+            onChange={(event) => {
+              const v = Number.parseInt(event.target.value, 10)
+              if (Number.isFinite(v)) set('contextSize', v)
+            }}
+            inputMode="numeric"
+          />
+        </FieldBlock>
+        <FieldBlock label="Render budget">
+          <Input
+            value={String(draft.renderBudget)}
+            onChange={(event) => {
+              const v = Number.parseInt(event.target.value, 10)
+              if (Number.isFinite(v)) set('renderBudget', v)
+            }}
+            inputMode="numeric"
+          />
+        </FieldBlock>
+        <FieldBlock label="Temperature">
+          <Input
+            value={String(draft.temperature)}
+            onChange={(event) => {
+              const v = Number.parseFloat(event.target.value)
+              if (Number.isFinite(v)) set('temperature', v)
+            }}
+            inputMode="decimal"
+          />
+        </FieldBlock>
+        <FieldBlock label="Think">
+          <DropdownMenu trigger={draft.think ? 'on' : 'off'} ariaLabel="Think">
+            {(['on', 'off'] as const).map((mode) => (
+              <DropdownMenuItem
+                key={mode}
+                icon={(draft.think ? 'on' : 'off') === mode ? <CheckIcon aria-hidden /> : undefined}
+                onClick={() => set('think', mode === 'on')}
+              >
+                {mode}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenu>
+        </FieldBlock>
+        <FieldBlock label="Debug windows">
+          <DropdownMenu trigger={draft.debugWindows ? 'on (show popups)' : 'off (headless)'} ariaLabel="Debug windows">
+            {(['on', 'off'] as const).map((mode) => (
+              <DropdownMenuItem
+                key={mode}
+                icon={(draft.debugWindows ? 'on' : 'off') === mode ? <CheckIcon aria-hidden /> : undefined}
+                onClick={() => set('debugWindows', mode === 'on')}
+              >
+                {mode === 'on' ? 'on (show popups)' : 'off (headless)'}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenu>
+        </FieldBlock>
+        <div className="fynns-control-cluster fynns-control-cluster--end-align">
+          <Button variant="primary" disabled={saving} onClick={() => onSave(draft)}>
+            {saving ? 'Saving…' : 'Save settings'}
+          </Button>
+        </div>
+      </Shell>
+    </Dialog>
+  )
+}
+
+/* -- volumes --------------------------------------------------------- */
+
+export function VolumesDialog({
+  open,
+  onOpenChange,
+  volumes,
+  current,
+  onPick,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  volumes: TuiVolume[]
+  current: string
+  onPick: (volume: TuiVolume) => void
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Volumes"
+      description="The volumes on this machine; one becomes the next run's volume."
+      size="md"
+    >
+      {volumes.length === 0 ? (
+        <EmptyState size="sm" title="No volumes" description="Nothing discoverable under volumes/." />
+      ) : (
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableHeaderCell>Volume</TableHeaderCell>
+              <TableHeaderCell>Dimensions</TableHeaderCell>
+              <TableHeaderCell>Note</TableHeaderCell>
+              <TableHeaderCell>Pick</TableHeaderCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {volumes.map((volume) => (
+              <TableRow key={volume.path}>
+                <TableCell>{volume.label}</TableCell>
+                <TableCell>{volume.dimensions ? volume.dimensions.join('x') : 'dims unknown'}</TableCell>
+                <TableCell>
+                  {volume.path === current ? 'in use' : volume.default ? 'default' : ''}
+                </TableCell>
+                <TableCell>
+                  <Button variant="ghost" size="sm" onClick={() => onPick(volume)}>
+                    Switch
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </Dialog>
+  )
+}
+
+/* -- history --------------------------------------------------------- */
+
+function statusNote(status: string): string {
+  return status
+}
+
+export function HistoryDialog({
+  open,
+  onOpenChange,
+  runs,
+  activeRunId,
+  onOpen,
+  onArchiveAll,
+  archiving,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  runs: TuiRun[]
+  activeRunId: string | null
+  onOpen: (run: TuiRun) => void
+  onArchiveAll: () => void
+  archiving: boolean
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="History: runs on this machine"
+      description="Enter opens one in the conversation. Archived runs live under runtime/archive."
+      size="lg"
+    >
+      {runs.length === 0 ? (
+        <EmptyState size="sm" title="No runs yet" description="Send the first task from the composer." />
+      ) : (
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableHeaderCell>Run</TableHeaderCell>
+              <TableHeaderCell>Status</TableHeaderCell>
+              <TableHeaderCell>Model</TableHeaderCell>
+              <TableHeaderCell>Frames</TableHeaderCell>
+              <TableHeaderCell>Task</TableHeaderCell>
+              <TableHeaderCell>Open</TableHeaderCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {runs.map((run) => (
+              <TableRow key={run.runId}>
+                <TableCell>{run.runId}{run.runId === activeRunId ? '  ●' : ''}</TableCell>
+                <TableCell>{statusNote(run.status)}</TableCell>
+                <TableCell>{run.model}</TableCell>
+                <TableCell>{run.frames ?? '?'}</TableCell>
+                <TableCell>{run.task.slice(0, 60)}</TableCell>
+                <TableCell>
+                  <Button variant="ghost" size="sm" onClick={() => onOpen(run)}>
+                    Open
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      <div className="fynns-control-cluster fynns-control-cluster--end-align">
+        <Button variant="ghost" disabled={archiving} onClick={onArchiveAll}>
+          {archiving ? 'Archiving…' : 'Archive all (runs only)'}
+        </Button>
+      </div>
+    </Dialog>
+  )
+}
+
+/* -- batch ----------------------------------------------------------- */
+
+export function BatchDialog({
+  open,
+  onOpenChange,
+  taskPrefill,
+  onStart,
+  starting,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  taskPrefill: string
+  onStart: (count: number, task: string) => void
+  starting: boolean
+}) {
+  const [count, setCount] = useState('3')
+  const [task, setTask] = useState(taskPrefill)
+  useEffect(() => {
+    if (open) setTask(taskPrefill)
+  }, [open, taskPrefill])
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Batch: same frozen config runs N times"
+      description="Config is frozen at start; the settings file is untouched. Each member keeps its own run folder and chat."
+      size="md"
+    >
+      <Shell>
+        <FieldBlock label="Repeat count N">
+          <Input value={count} onChange={(event) => setCount(event.target.value)} inputMode="numeric" placeholder="positive integer, e.g. 3" />
+        </FieldBlock>
+        <FieldBlock label="Task">
+          <Input value={task} onChange={(event) => setTask(event.target.value)} placeholder="required task text" spellCheck={false} />
+        </FieldBlock>
+        <div className="fynns-control-cluster fynns-control-cluster--end-align">
+          <Button
+            variant="primary"
+            disabled={starting}
+            onClick={() => {
+              const n = Number.parseInt(count, 10)
+              if (Number.isFinite(n)) onStart(n, task)
+            }}
+          >
+            {starting ? 'Starting…' : 'Start batch'}
+          </Button>
+        </div>
+      </Shell>
+    </Dialog>
+  )
+}
+
+export function BatchDetailDialog({
+  open,
+  onOpenChange,
+  batch,
+  onOpenMember,
+  onCancel,
+  cancelling,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  batch: TuiBatchRecord | null
+  onOpenMember: (runId: string) => void
+  onCancel: () => void
+  cancelling: boolean
+}) {
+  const config = (batch?.config ?? {}) as Record<string, unknown>
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={batch ? `Batch ${batch.batchId}` : 'Batch'}
+      description={
+        batch
+          ? `status=${batch.status} planned=${batch.planned} model=${String(config.model ?? '?')} task=${String(config.task ?? '').slice(0, 120)}`
+          : undefined
+      }
+      size="lg"
+    >
+      {(batch?.items ?? []).length === 0 ? (
+        <EmptyState size="sm" title="No members yet" description="Members appear here as the batch runs." />
+      ) : (
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableHeaderCell>Seq</TableHeaderCell>
+              <TableHeaderCell>Status</TableHeaderCell>
+              <TableHeaderCell>Run</TableHeaderCell>
+              <TableHeaderCell>Seconds</TableHeaderCell>
+              <TableHeaderCell>Error</TableHeaderCell>
+              <TableHeaderCell>Open</TableHeaderCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {(batch?.items ?? []).map((item) => (
+              <TableRow key={item.seq}>
+                <TableCell>{item.seq}</TableCell>
+                <TableCell>{item.status}</TableCell>
+                <TableCell>{item.runId ?? '-'}</TableCell>
+                <TableCell>{item.seconds}</TableCell>
+                <TableCell>{(item.error ?? '').slice(0, 60)}</TableCell>
+                <TableCell>
+                  {item.runId ? (
+                    <Button variant="ghost" size="sm" onClick={() => onOpenMember(item.runId as string)}>
+                      Open
+                    </Button>
+                  ) : null}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      {batch && batch.status === 'running' ? (
+        <div className="fynns-control-cluster fynns-control-cluster--end-align">
+          <Button variant="ghost" disabled={cancelling} onClick={onCancel}>
+            {cancelling ? 'Cancelling…' : 'Cancel remaining'}
+          </Button>
+        </div>
+      ) : null}
+    </Dialog>
+  )
+}
+
+/* -- glossary / help ------------------------------------------------- */
+
+export function GlossaryDialog({
+  open,
+  onOpenChange,
+  entries,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  entries: Array<{ term: string; meaning: string }>
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Glossary: what the words of the screen mean"
+      size="md"
+    >
+      <List>
+        {entries.map((entry) => (
+          <ListItem key={entry.term} headline={entry.term} supportingText={entry.meaning} lines={3} />
+        ))}
+      </List>
+    </Dialog>
+  )
+}
+
+export function HelpDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange} title="Help: what every key does" size="md">
+      <CodeBlock
+        variant="plain"
+        code={[
+          'Enter          send the composer text: it starts a new run',
+          'Shift+Enter    add a line without sending',
+          'Up/Down        recall the previous/next input (like a shell)',
+          'Esc            stop the running agent (evidence already written stays)',
+          '/              slash commands with a menu (Up/Down moves, Tab completes, Enter runs, Esc closes)',
+          'F1             this help',
+          'F2             the glossary: what the words of the screen mean',
+          'Ctrl+H         the technical rows (the model calls, the HTTP status)',
+          'Ctrl+Q         stop what the GUI started, then clear the view',
+          '',
+          'WHAT THE TRANSCRIPT SHOWS',
+          '  ▌ <task>       what you asked for',
+          '  » <model>      the model\u2019s own words: its answer, its reason, its claim',
+          '  ✳ Thinking      the model reasoned; the row opens the chain',
+          '  ✓ Thought       the chain is closed; click it to read it',
+          '  ◈ Context checkpoint the model\u2019s summary when its context filled up',
+          '  ✳ Working       a model turn that did not reason (Think is off)',
+          '  ✓ Model answered the turn is over, there is nothing to open',
+          '  ● <step>       what the agent is doing, then what went in and out',
+          '  ▣ frame        a PNG the renderer wrote (click to zoom)',
+          '  ✓ Run finished what the agent picked and what it claims',
+          '  ⚠ / ✗          a notice and a failure',
+        ].join('\n')}
+      />
+    </Dialog>
+  )
+}

@@ -2,6 +2,7 @@
 import argparse
 import json
 import copy
+import sys
 import threading
 import time
 import uuid
@@ -231,6 +232,173 @@ sessions = {}
 external_tools = ExternalTools(Session, sessions)
 
 
+# ---- Volume TUI bridge -------------------------------------------------
+# The GUI chat is a second skin over the same coding-agent runs the Textual
+# TUI drives (scripts/volume_tui + scripts/run_local_agent.py). These routes
+# reuse the TUI's pure helpers statelessly: every transcript request rebuilds
+# the Transcript from disk (fresh EventTail/StreamTail/Transcript), so the
+# GUI and the TUI can never drift apart in wording or marks.
+TUI_DIR = ROOT / 'scripts' / 'volume_tui'
+for _tui_path in (str(ROOT / 'scripts'), str(TUI_DIR)):
+    if _tui_path not in sys.path:
+        sys.path.insert(0, _tui_path)
+try:
+    import transcript as tui_transcript
+    import trace_events as tui_trace
+    import stream as tui_stream
+    import runs as tui_runs
+    import chat_log as tui_chat_log
+    import export_images as tui_export_images
+    import config as tui_config
+    import volumes as tui_volumes
+    import services as tui_services
+    import runner as tui_runner
+    import flows as tui_flows
+    import evidence as tui_evidence
+    import env as tui_env
+    import batches as tui_batches
+    import event_text as tui_event_text
+    TUI_AVAILABLE = True
+    TUI_IMPORT_ERROR = ''
+except Exception as _tui_import_error:  # pragma: no cover - surfaced via /api/tui/status
+    TUI_AVAILABLE = False
+    TUI_IMPORT_ERROR = str(_tui_import_error)
+
+
+def _tui_require():
+    if not TUI_AVAILABLE:
+        raise ValueError('Volume TUI bridge unavailable: %s' % (TUI_IMPORT_ERROR or 'import failed'))
+
+
+def _tui_jsonable(value):
+    return json.loads(json.dumps(value, default=str))
+
+
+def _tui_run_status(run_dir):
+    try:
+        data = json.loads((Path(run_dir) / 'run.json').read_text(encoding='utf-8'))
+        return str((data or {}).get('status') or 'unknown').lower()
+    except (OSError, ValueError):
+        return 'unknown'
+
+
+def _tui_run_config(run_dir):
+    try:
+        data = json.loads((Path(run_dir) / 'config.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _tui_is_live(entry):
+    try:
+        return bool(tui_runs.is_live(entry))
+    except Exception:
+        return str(entry.get('status') or '').lower() == 'running'
+
+
+def _tui_transcript_payload(run_id):
+    """Full conversation of one run: task block + folded evidence blocks."""
+    _tui_require()
+    entry = tui_runs.find_run(run_id, _fresh=True)
+    if entry is None:
+        raise ValueError('Unknown run')
+    run_dir = Path(entry['directory'])
+    config = _tui_run_config(run_dir)
+    task = str(config.get('task') or '')
+    model = str(config.get('model') or '')
+    try:
+        budget = int(config.get('renderBudget', 4))
+    except (TypeError, ValueError):
+        budget = 4
+    transcript = tui_transcript.Transcript()
+    transcript.add(tui_transcript.USER, title=task, ts=tui_runs.run_started_at(run_dir))
+    tail = tui_trace.EventTail(run_dir, tui_trace.resolve_session_dir(run_dir))
+    try:
+        fresh = tail.poll()
+    except Exception:
+        fresh = []
+    try:
+        streamed = tui_stream.StreamTail(run_dir).poll()
+    except Exception:
+        streamed = []
+    # The stream is the model's own order of work (thinking, then the call):
+    # it folds in first, then the service/harness evidence. Same order as app.py.
+    for event in streamed:
+        transcript.ingest(event)
+    for event in fresh:
+        transcript.ingest(event)
+    state = _tui_run_status(run_dir)
+    stopping = (run_dir.parent / 'tui-control' / ('%s.stop' % entry.get('runId'))).is_file()
+    if state not in ('running',) or stopping:
+        for kind in (tui_transcript.THINKING, tui_transcript.COMPACTION):
+            block = transcript.find(kind)
+            if block is not None and block.get('status') == 'running':
+                block['status'] = 'done'
+                if kind == tui_transcript.THINKING:
+                    try:
+                        block['subtitle'] = tui_transcript._thinking_elapsed(block)
+                    except Exception:
+                        pass
+                if isinstance(block.get('data'), dict):
+                    block['data']['open'] = False
+        if stopping:
+            transcript.add(tui_transcript.NOTICE,
+                           title='Run stopping - the launcher was asked to stop; evidence already written stays.')
+        elif state in ('stopped', 'interrupted'):
+            transcript.add(tui_transcript.NOTICE,
+                           title='Run stopped - the harness and its children were terminated, the evidence stays on disk.')
+        elif state == 'failed':
+            transcript.add(tui_transcript.NOTICE,
+                           title='Run failed - see failure.json in the run folder.')
+    blocks = transcript.blocks
+    used = sum(1 for b in blocks if b.get('kind') == tui_transcript.TOOL)
+    return _tui_jsonable({
+        'runId': entry.get('runId'), 'directory': entry.get('directory'),
+        'status': state, 'task': task, 'model': model,
+        'budget': budget, 'used': used,
+        'startedAt': tui_runs.run_started_at(run_dir),
+        'sessionId': entry.get('sessionId'),
+        'volumePath': config.get('volumePath', ''),
+        'blocks': blocks,
+    })
+
+
+def _tui_sanitize_run(entry):
+    return _tui_jsonable({
+        'runId': entry.get('runId'), 'directory': entry.get('directory'),
+        'task': entry.get('task'), 'status': entry.get('status'),
+        'model': entry.get('model'), 'frames': entry.get('frames'),
+        'startedAt': entry.get('startedAt'), 'sessionId': entry.get('sessionId'),
+    })
+
+
+_tui_verify_jobs = {}
+_tui_verify_lock = threading.Lock()
+
+
+def _tui_verify_job_state(run_id):
+    with _tui_verify_lock:
+        job = _tui_verify_jobs.get(run_id)
+        if job is None:
+            return {'running': False, 'result': None}
+        return {'running': job.get('running', False), 'result': job.get('result')}
+
+
+def _tui_batch_cancel_flags():
+    if not hasattr(_tui_batch_cancel_flags, 'flags'):
+        _tui_batch_cancel_flags.flags = {}
+    return _tui_batch_cancel_flags.flags
+
+
+def _tui_launch_batch_member(config_path):
+    result = tui_runner.launch(Path(config_path))
+    return {'runId': result.run_id,
+            'directory': str(result.directory) if result.directory else None,
+            'exit_code': result.exit_code, 'error': None,
+            'output_tail': (result.output_tail or '')[-2000:]}
+
+
 class Handler(BaseHTTPRequestHandler):
     def send(self, status, data, typ='application/json'):
         raw = data if isinstance(data, bytes) else json.dumps(data).encode()
@@ -275,6 +443,109 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith('/api/session/'):
             s = sessions.get(route.split('/')[-1])
             return self.send(200, json.loads((s.directory/'session.json').read_text())) if s else self.send(404, {'error': 'Unknown session'})
+        if route == '/api/tui/status':
+            return self.send(200, {'available': TUI_AVAILABLE, 'error': TUI_IMPORT_ERROR or None})
+        if route == '/api/tui/glossary':
+            try:
+                _tui_require()
+                return self.send(200, {'glossary': [{'term': t, 'meaning': m} for t, m in tui_event_text.GLOSSARY]})
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route == '/api/tui/settings':
+            try:
+                _tui_require()
+                return self.send(200, tui_config.load_settings())
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route == '/api/tui/volumes':
+            try:
+                _tui_require()
+                try:
+                    selected = tui_config.selected_volume(tui_config.load_settings())
+                    selected = str(selected) if selected else None
+                except Exception:
+                    selected = None
+                return self.send(200, {'volumes': _tui_jsonable(tui_volumes.discover_volumes(selected))})
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route == '/api/tui/environment':
+            try:
+                _tui_require()
+                settings = tui_config.load_settings()
+                return self.send(200, _tui_jsonable({
+                    'settings': settings,
+                    'environment': tui_env.check_environment(settings),
+                    'modelProblems': tui_services.model_problems(settings),
+                }))
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route == '/api/tui/runs':
+            try:
+                _tui_require()
+                return self.send(200, {'runs': [_tui_sanitize_run(e) for e in tui_runs.discover_runs(_fresh=True)]})
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route == '/api/tui/batches':
+            try:
+                _tui_require()
+                return self.send(200, {'batches': _tui_jsonable(tui_batches.list_batches())})
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route.startswith('/api/tui/batches/'):
+            try:
+                _tui_require()
+                record = tui_batches.load_batch(route.rsplit('/', 1)[-1])
+                if record is None:
+                    return self.send(404, {'error': 'Unknown batch'})
+                return self.send(200, _tui_jsonable(record))
+            except Exception as error:
+                return self.send(501, {'error': str(error)})
+        if route.startswith('/api/tui/runs/'):
+            parts = route.split('/')
+            # /api/tui/runs/<id>, /transcript, /chat-log, /json-log, /images, /images.zip, /verify
+            if len(parts) >= 5:
+                run_id = unquote(parts[4])
+                action = unquote(parts[5]) if len(parts) > 5 else ''
+                try:
+                    _tui_require()
+                    entry = tui_runs.find_run(run_id, _fresh=True)
+                    if entry is None:
+                        return self.send(404, {'error': 'Unknown run'})
+                    run_dir = Path(entry['directory'])
+                    if action == '' or action == 'transcript':
+                        return self.send(200, _tui_transcript_payload(run_id))
+                    if action == 'chat-log':
+                        payload = _tui_transcript_payload(run_id)
+                        text = tui_chat_log.chat_log_text(
+                            payload['blocks'], run_id=payload['runId'],
+                            model=payload['model'], run_dir=payload['directory'])
+                        return self.send(200, text.encode('utf-8'), 'text/plain; charset=utf-8')
+                    if action == 'json-log':
+                        transcript_events = []  # folded view is the transcript; files carry the evidence
+                        doc = tui_runs.run_json_log(run_dir, transcript_events)
+                        return self.send(200, _tui_jsonable(doc))
+                    if action == 'verify':
+                        return self.send(200, _tui_jsonable(_tui_verify_job_state(run_id)))
+                    if action == 'images':
+                        images = tui_export_images.collect_run_images(run_dir)
+                        return self.send(200, {'images': _tui_jsonable(images)})
+                    if action == 'images.zip':
+                        images = tui_export_images.collect_run_images(run_dir)
+                        if not images:
+                            return self.send(404, {'error': 'No frame images in this run'})
+                        zip_path = tui_export_images.export_run_images_zip(images, run_id=entry.get('runId'))
+                        raw = Path(zip_path).read_bytes()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/zip')
+                        self.send_header('Content-Length', str(len(raw)))
+                        self.send_header('Content-Disposition',
+                                         'attachment; filename="%s"' % Path(zip_path).name)
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
+                except Exception as error:
+                    return self.send(501 if TUI_AVAILABLE else 404, {'error': str(error)})
+            return self.send(404, {'error': 'Unknown route'})
         if route.startswith('/api/'):
             return self.send(404, {'error': 'Unknown route'})
         if route.startswith('/artifact/'):
@@ -347,6 +618,231 @@ class Handler(BaseHTTPRequestHandler):
             if route == '/api/browse-file':
                 picked = pick_volume_file()
                 return self.send(200, {'cancelled': picked is None} if picked is None else {'cancelled': False, 'path': picked})
+            if route == '/api/tui/settings':
+                try:
+                    _tui_require()
+                    settings = body.get('settings', body)
+                    if not isinstance(settings, dict):
+                        raise ValueError('settings must be an object')
+                    problems = tui_config.validate_settings(settings)
+                    if problems:
+                        return self.send(400, {'error': '; '.join(problems[:8])})
+                    merged = dict(tui_config.load_settings())
+                    merged.update({k: settings[k] for k in tui_config.DEFAULTS if k in settings})
+                    tui_config.save_settings(merged)
+                    return self.send(200, merged)
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs':
+                # Start a new Codex launcher run (same semantics as the TUI composer).
+                try:
+                    _tui_require()
+                    for entry in tui_runs.discover_runs(_fresh=True):
+                        if _tui_is_live(entry):
+                            raise ValueError('A run is still live (%s) - stop it first' % entry.get('runId'))
+                    task_kind = str(body.get('taskKind') or 'custom').strip().lower()
+                    if task_kind in ('task-a', 'taska', 'a'):
+                        task_kind = 'task-a'
+                    elif task_kind in ('task-b', 'taskb', 'b'):
+                        task_kind = 'task-b'
+                    else:
+                        task_kind = 'custom'
+                    prompt = str(body.get('task') or '')
+                    settings = body.get('settings') or tui_config.load_settings()
+                    if not isinstance(settings, dict):
+                        raise ValueError('settings must be an object')
+                    effective, problems = tui_flows.build_new_run(task_kind, prompt, settings, tui_config)
+                    try:
+                        gate = tui_flows.service_gate(settings, tui_env, tui_services)
+                    except Exception:
+                        gate = []
+                    problems = list(problems or []) + [
+                        (p if isinstance(p, str) else str(p.get('name') or p.get('detail') or p)) for p in (gate or [])]
+                    if problems:
+                        return self.send(400, {'error': '; '.join(problems[:8])})
+                    config_path = tui_flows.write_config(dict(effective), task_kind, tui_config)
+
+                    def _launch(path):
+                        try:
+                            tui_runner.launch(Path(path))
+                        except Exception:
+                            pass
+                    threading.Thread(target=_launch, args=(str(config_path),), daemon=True).start()
+                    return self.send(202, {'started': True, 'configPath': str(config_path)})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/stop':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    if not run_id:
+                        raise ValueError('runId required')
+                    marker = tui_runner.request_stop(run_id)
+                    return self.send(202, {'state': 'stop_requested', 'marker': str(marker)})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/verify':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    if not run_id:
+                        raise ValueError('runId required')
+                    with _tui_verify_lock:
+                        job = _tui_verify_jobs.get(run_id)
+                        if job is not None and job.get('running'):
+                            return self.send(202, {'started': False, 'running': True})
+
+                        def _verify(rid):
+                            try:
+                                entry = tui_runs.find_run(rid, _fresh=True)
+                                if entry is None:
+                                    raise ValueError('Unknown run')
+                                result = tui_runs.run_verify(str(entry['directory']))
+                                summary = tui_runs.verify_summary(result.get('report'))
+                                with _tui_verify_lock:
+                                    _tui_verify_jobs[rid] = {'running': False,
+                                                             'result': _tui_jsonable({
+                                                                 'code': result.get('code'),
+                                                                 'summary': summary,
+                                                                 'report': result.get('report'),
+                                                                 'output': (result.get('output') or '')[-4000:]})}
+                            except Exception as error:
+                                with _tui_verify_lock:
+                                    _tui_verify_jobs[rid] = {'running': False,
+                                                             'result': {'code': None, 'summary': [str(error)],
+                                                                        'report': None, 'output': ''}}
+                        _tui_verify_jobs[run_id] = {'running': True, 'result': None}
+                    threading.Thread(target=_verify, args=(run_id,), daemon=True).start()
+                    return self.send(202, {'started': True, 'running': True})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/runs/export-chat':
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    payload = _tui_transcript_payload(run_id)
+                    path = tui_chat_log.export_chat_log(
+                        payload['blocks'], run_id=payload['runId'],
+                        model=payload['model'], run_dir=payload['directory'])
+                    tui_evidence.open_path(str(Path(path).parent))
+                    return self.send(200, {'path': str(path)})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/copy':
+                # Server-side clipboard (same machine as the browser here):
+                # kind json|chat, built server-side so huge logs never cross HTTP.
+                try:
+                    _tui_require()
+                    run_id = str(body.get('runId') or body.get('id') or '').strip()
+                    kind = str(body.get('kind') or 'chat').strip().lower()
+                    payload = _tui_transcript_payload(run_id)
+                    if kind == 'json':
+                        text = json.dumps(tui_runs.run_json_log(
+                            Path(payload['directory']), []), indent=2, default=str)
+                    else:
+                        text = tui_chat_log.chat_log_text(
+                            payload['blocks'], run_id=payload['runId'],
+                            model=payload['model'], run_dir=payload['directory'])
+                    return self.send(200, {'message': tui_evidence.copy_to_clipboard(text)})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/open-path':
+                try:
+                    _tui_require()
+                    path = str(body.get('path') or '').strip()
+                    if not path:
+                        raise ValueError('path required')
+                    return self.send(200, {'message': tui_evidence.open_path(path)})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/archive-all':
+                try:
+                    _tui_require()
+                    return self.send(200, _tui_jsonable(tui_runs.archive_all_runs()))
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/batches':
+                # One-shot batch: same frozen config N times (TUI /batch semantics).
+                try:
+                    _tui_require()
+                    for entry in tui_runs.discover_runs(_fresh=True):
+                        if _tui_is_live(entry):
+                            raise ValueError('A run is still live (%s) - stop it first' % entry.get('runId'))
+                    count_raw = body.get('count', body.get('n', 0))
+                    task = str(body.get('task') or '')
+                    settings = body.get('settings') or tui_config.load_settings()
+                    if not isinstance(settings, dict):
+                        raise ValueError('settings must be an object')
+                    problems = list(tui_batches.validate_batch(count_raw, task) or [])
+                    try:
+                        problems.extend(tui_config.validate_settings(settings))
+                    except Exception:
+                        pass
+                    if problems:
+                        return self.send(400, {'error': '; '.join(problems[:8])})
+                    import copy as _copy
+                    effective, build_problems = tui_flows.build_new_run('custom', task, dict(settings), tui_config)
+                    problems = list(build_problems or [])
+                    try:
+                        gate = tui_flows.service_gate(dict(settings), tui_env, tui_services)
+                        problems.extend([(p if isinstance(p, str) else str(p.get('name') or p.get('detail') or p)) for p in (gate or [])])
+                    except Exception:
+                        pass
+                    if problems:
+                        return self.send(400, {'error': '; '.join(problems[:8])})
+                    count = tui_batches.parse_count(count_raw)
+                    batch_id = tui_batches.new_batch_id()
+                    frozen = _copy.deepcopy(dict(effective))
+                    tui_batches.create_batch_record(batch_id, frozen, int(count))
+                    flags = _tui_batch_cancel_flags()
+                    cancel = threading.Event()
+                    flags[batch_id] = cancel
+
+                    def _launch_member(seq, frozen_config):
+                        import copy as _deepcopy
+                        config_path = tui_flows.write_config(_deepcopy.deepcopy(dict(frozen_config)), 'custom', tui_config)
+                        return _tui_launch_batch_member(config_path)
+
+                    def _run_batch():
+                        try:
+                            tui_batches.run_batch_sequential(
+                                batch_id, frozen, int(count), _launch_member,
+                                should_cancel=cancel.is_set)
+                        except Exception:
+                            pass
+                        finally:
+                            flags.pop(batch_id, None)
+
+                    threading.Thread(target=_run_batch, daemon=True).start()
+                    return self.send(202, {'started': True, 'batchId': batch_id})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
+            if route == '/api/tui/batches/cancel':
+                try:
+                    _tui_require()
+                    batch_id = str(body.get('batchId') or '').strip()
+                    flags = _tui_batch_cancel_flags()
+                    flag = flags.get(batch_id)
+                    if flag is None:
+                        # No live worker: mark remaining items skipped directly.
+                        try:
+                            record = tui_batches.load_batch(batch_id) or {}
+                            items = record.get('items') or []
+                            existing = {int(i.get('seq') or 0) for i in items}
+                            for rest in range(1, int(record.get('planned') or 0) + 1):
+                                if rest not in existing:
+                                    items.append({'seq': rest, 'runId': None, 'directory': None,
+                                                  'status': 'skipped', 'seconds': 0, 'error': 'cancelled'})
+                            record['items'] = items
+                            record['status'] = 'interrupted'
+                            tui_batches.save_batch(record)
+                            return self.send(200, {'cancelled': True})
+                        except Exception as error:
+                            return self.send(400, {'error': str(error)})
+                    flag.set()
+                    return self.send(202, {'cancelled': True})
+                except Exception as error:
+                    return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
             s = sessions[body['id']]
             if route == '/api/stop':
                 s.stop.set()

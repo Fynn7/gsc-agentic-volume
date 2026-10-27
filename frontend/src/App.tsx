@@ -1,29 +1,37 @@
+/**
+ * Volume-agent GUI chat: the coding-agent skin over the Codex launcher runs.
+ *
+ * Data model (single track, same as the Textual TUI): runs discovered by
+ * scripts/volume_tui, each rendered from its server-built transcript blocks
+ * (transcript.py + event_text.py wording, never reworded client-side).
+ * The old Session/OllamaDriver model (api.ts SessionData + ChatRows.tsx) is
+ * gone; the Live Preview Stage stays as the volume workbench and writes the
+ * shared settings volume.
+ */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
+  applyFynnsThemeMode,
   BotIcon,
   BrainIcon,
   Button,
   Card,
   Chat,
   ChatComposer,
-  ChatReveal,
   ChatScrollToBottom,
   ChatThread,
-  CheckIcon,
   ClippedNavShell,
-  CloseIcon,
   CodeBlock,
+  Collapsible,
+  ConfirmDialog,
   Dialog,
   DownloadIcon,
   EmptyState,
   EndAside,
   ExpandableCodeBlock,
-  FieldBlock,
-  FieldStack,
   FileIcon,
   FillColumn,
+  getFynnsThemeMode,
   IconButton,
-  Input,
   LinearProgress,
   List,
   ListItem,
@@ -35,6 +43,7 @@ import {
   PanelLeftIcon,
   PanelRightIcon,
   PlusIcon,
+  restoreFynnsThemeMode,
   SnackbarHost,
   SplitPane,
   Tabs,
@@ -42,74 +51,58 @@ import {
   Tooltip,
   snackbar,
 } from '@fynns/ui'
-import {
-  continueSession,
-  errorText,
-  fetchSession,
-  importVolumeFile,
-  pickVolumeFile,
-  startSession,
-  stopSession,
-  type SessionData,
-  type VolumeImport,
-} from './api'
-import {
-  ActionRow,
-  ErrorRow,
-  FinishRow,
-  FrameRow,
-  LiveStatusRow,
-  PauseControlRow,
-  PauseRow,
-  TaskMessage,
-  type ZoomPayload,
-} from './ChatRows'
+import { importVolumeFile, pickVolumeFile, type VolumeImport } from './api'
 import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
+import { TuiBlockRow, type ZoomPayload } from './TuiThread'
+import {
+  BatchDetailDialog,
+  BatchDialog,
+  GlossaryDialog,
+  HelpDialog,
+  HistoryDialog,
+  SettingsDialog,
+  VolumesDialog,
+} from './TuiDialogs'
+import { matchSlashCommands, parseSlashCommand, type SlashAction } from './slash'
+import {
+  errorText,
+  tuiArchiveAll,
+  tuiBatchDetail,
+  tuiCancelBatch,
+  tuiCopyRun,
+  tuiDownloadChatLog,
+  tuiGlossary,
+  tuiListRuns,
+  tuiLoadSettings,
+  tuiOpenPath,
+  tuiRunImages,
+  tuiSaveSettings,
+  tuiStartBatch,
+  tuiStartRun,
+  tuiStopRun,
+  tuiTranscript,
+  tuiVerifyRun,
+  tuiVerifyState,
+  tuiVolumes,
+  type TuiBatchRecord,
+  type TuiGlossaryEntry,
+  type TuiRun,
+  type TuiSettings,
+  type TuiTranscript,
+  type TuiVolume,
+} from './tuiApi'
 
-const DEFAULT_MODEL = 'qwen3.5:9b'
 const POLL_INTERVAL_MS = 1500
-const STAGE_WIDTH_KEY = 'gav-stage-width'
+const RUNS_POLL_MS = 3000
+const STAGE_WIDTH_KEY = 'gav-stage-width-v2'
 const STAGE_OPEN_KEY = 'gav-stage-open'
+const HISTORY_KEY = 'gav-composer-history'
 
-type Pending = null | 'starting' | 'stopping' | 'continuing'
-type TaskSnapshot = { goal: string; source: string; model: string }
+type Pending = null | 'starting' | 'stopping'
 
-function stateLabel(session: SessionData | null, pending: Pending): string {
-  if (pending === 'starting') return 'Starting'
-  if (pending === 'stopping') return 'Stop requested'
-  if (pending === 'continuing') return 'Resuming'
-  if (!session) return 'Idle'
-  switch (session.state) {
-    case 'created':
-      return 'Starting'
-    case 'running':
-      return 'Running'
-    case 'paused':
-      return 'Paused'
-    case 'budget_exhausted':
-      return 'Budget exhausted'
-    case 'finished':
-      return 'Finished — claim unverified'
-    case 'stopped':
-      return 'Stopped'
-    case 'failed':
-      return 'Failed'
-  }
-}
-
-/** Provable run state from the recorded event sequence. */
-function liveLabel(session: SessionData | null): string {
-  const last = session && session.events.length > 0 ? session.events[session.events.length - 1] : null
-  if (!last) return 'Preparing the session — importing the volume and capturing the initial frame'
-  if (last.kind === 'initial_render' || last.kind === 'render') {
-    return 'Model is choosing the next action from the latest frame'
-  }
-  if (last.kind === 'model_action') {
-    return last.action?.tool === 'render_scene'
-      ? 'Native renderer is executing the accepted decision'
-      : 'Closing the run'
-  }
-  return 'Waiting for the next recorded event'
+type VerifyState = {
+  running: boolean
+  result: { code: number | null; summary: string[]; report: unknown; output: string } | null
 }
 
 function readStageWidth(): number {
@@ -122,7 +115,7 @@ function readStageWidth(): number {
   } catch {
     /* ignore */
   }
-  return 60
+  return 50
 }
 
 function readStageOpen(): boolean {
@@ -135,29 +128,108 @@ function readStageOpen(): boolean {
   return true
 }
 
+function loadHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function runStateLabel(status: string, pending: Pending): string {
+  if (pending === 'starting') return 'Starting'
+  if (pending === 'stopping') return 'Stop requested'
+  switch (status) {
+    case 'running':
+      return 'Running'
+    case 'finished':
+      return 'Finished — claim unverified'
+    case 'failed':
+      return 'Failed'
+    case 'stopped':
+    case 'interrupted':
+      return 'Stopped'
+    default:
+      return status || 'Unknown'
+  }
+}
+
+function liveLabel(transcript: TuiTranscript | null, pending: Pending): string {
+  if (pending === 'starting') return 'Starting the run — reserving the directory and writing the config'
+  if (pending === 'stopping') return 'Stop requested — waiting for the launcher to notice the stop marker'
+  if (!transcript || transcript.blocks.length === 0) return 'Preparing the run'
+  const last = transcript.blocks[transcript.blocks.length - 1]
+  if (last.kind === 'thinking' && last.status === 'running') return 'Model is choosing the next action'
+  if (last.kind === 'tool') return 'Renderer is executing the accepted tool call'
+  if (last.kind === 'image') return 'Frame captured — model is reading the new picture'
+  return 'Waiting for the next recorded event'
+}
+
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000)
+  }
+}
+
 function App() {
   const [navOpen, setNavOpen] = useState(true)
   const [asideOpen, setAsideOpen] = useState(false)
 
+  const [settings, setSettings] = useState<TuiSettings | null>(null)
   const [source, setSource] = useState('')
-  const [model, setModel] = useState(DEFAULT_MODEL)
   const [draft, setDraft] = useState('')
   const [picking, setPicking] = useState(false)
   const [previewImport, setPreviewImport] = useState<VolumeImport | null>(null)
+  const [history, setHistory] = useState<string[]>(() => loadHistory())
+  const [histIdx, setHistIdx] = useState<number | null>(null)
 
-  const [modelOpen, setModelOpen] = useState(false)
-  const [modelDraft, setModelDraft] = useState('')
-
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [session, setSession] = useState<SessionData | null>(null)
-  const [task, setTask] = useState<TaskSnapshot | null>(null)
+  const [runs, setRuns] = useState<TuiRun[]>([])
+  const [activeRunId, setActiveRunId] = useState<string | null>(null)
+  const [transcript, setTranscript] = useState<TuiTranscript | null>(null)
   const [pending, setPending] = useState<Pending>(null)
+  const startStampRef = useRef(0)
+
+  const [showPlumbing, setShowPlumbing] = useState(false)
+  const [slashSel, setSlashSel] = useState(0)
+
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [volumesOpen, setVolumesOpen] = useState(false)
+  const [volumes, setVolumes] = useState<TuiVolume[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [archiving, setArchiving] = useState(false)
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchStarting, setBatchStarting] = useState(false)
+  const [batchDetail, setBatchDetail] = useState<TuiBatchRecord | null>(null)
+  const [batchCancelling, setBatchCancelling] = useState(false)
+  const [glossaryOpen, setGlossaryOpen] = useState(false)
+  const [glossary, setGlossary] = useState<TuiGlossaryEntry[]>([])
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [quitConfirm, setQuitConfirm] = useState(false)
+  const [archiveConfirm, setArchiveConfirm] = useState(false)
+
+  const [verify, setVerify] = useState<VerifyState>({ running: false, result: null })
 
   const [zoom, setZoom] = useState<ZoomPayload | null>(null)
   const [zoomOpen, setZoomOpen] = useState(false)
   const pollFailed = useRef(false)
+  const activeRef = useRef<string | null>(null)
+  useEffect(() => {
+    activeRef.current = activeRunId
+  }, [activeRunId])
+  const liveRef = useRef(false)
 
-  // Live Preview workbench: desktop Chat 40% / Stage 60% in a core SplitPane;
+  // Live Preview workbench: desktop Chat 50% / Stage 50% in a core SplitPane;
   // narrow viewports switch via the top-bar Tabs.
   const [stageOpen, setStageOpen] = useState<boolean>(() => readStageOpen())
   const [stageWidth, setStageWidth] = useState<number>(() => readStageWidth())
@@ -218,8 +290,6 @@ function App() {
     return () => observer.disconnect()
   }, [])
 
-  // Chat floor follows the shell's protected chat width (23rem); the stage
-  // keeps a 320px floor. SplitPane enforces both while dragging.
   const chatMinPx = Math.round(23 * remPx)
   const stageMinPx = 320
   const splitChatPx = (() => {
@@ -235,30 +305,72 @@ function App() {
     setStageWidth(Math.min(75, Math.max(30, Math.round(pct * 10) / 10)))
   }, [])
 
+  /* -- boot: theme, settings, glossary, volumes, runs -------------------- */
+
   useEffect(() => {
-    if (!sessionId) return
+    try {
+      restoreFynnsThemeMode()
+    } catch {
+      /* keep dark */
+    }
+    void tuiLoadSettings()
+      .then((loaded) => {
+        setSettings(loaded)
+        setSource(loaded.volumePath || '')
+      })
+      .catch((error: unknown) => {
+        snackbar(`Settings are unreadable: ${errorText(error)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      })
+    void tuiGlossary()
+      .then((data) => setGlossary(data.glossary))
+      .catch(() => undefined)
+    void tuiVolumes()
+      .then((data) => setVolumes(data.volumes))
+      .catch(() => undefined)
+  }, [])
+
+  const refreshRuns = useCallback(async () => {
+    try {
+      const data = await tuiListRuns()
+      setRuns(data.runs)
+      return data.runs
+    } catch {
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshRuns()
+    const timer = window.setInterval(() => void refreshRuns(), RUNS_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [refreshRuns])
+
+  /* -- transcript polling: the live view follows the recorded evidence ---- */
+
+  useEffect(() => {
+    if (!activeRunId) return
     let cancelled = false
     let inFlight = false
     const poll = async () => {
       if (inFlight) return
       inFlight = true
       try {
-        const data = await fetchSession(sessionId)
-        if (cancelled || data.id !== sessionId) return
+        const data = await tuiTranscript(activeRunId)
+        if (cancelled || activeRef.current !== activeRunId) return
         pollFailed.current = false
-        setSession(data)
-        setPending((current) => {
-          if (current === 'starting') return null
-          if (current === 'stopping' && data.state !== 'running') return null
-          if (current === 'continuing' && data.state !== 'paused') return null
-          return current
-        })
+        setTranscript(data)
+        liveRef.current = data.status === 'running'
+        if (pending === 'starting') setPending(null)
+        if (pending === 'stopping' && data.status !== 'running') setPending(null)
       } catch (error) {
         if (cancelled) return
-        // One snackbar per contiguous failure streak; prior results stay on screen.
         if (!pollFailed.current) {
           pollFailed.current = true
-          snackbar(`Could not refresh the session: ${errorText(error)}`, {
+          snackbar(`Could not refresh the run: ${errorText(error)}`, {
             severity: 'error',
             duration: 'long',
             dismissible: true,
@@ -269,17 +381,134 @@ function App() {
       }
     }
     void poll()
-    const timer = window.setInterval(() => void poll(), POLL_INTERVAL_MS)
+    const timer = window.setInterval(() => {
+      // Finished/failed/stopped freezes the view: no more polling.
+      if (!liveRef.current && pending === null) {
+        window.clearInterval(timer)
+        return
+      }
+      void poll()
+    }, POLL_INTERVAL_MS)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [sessionId])
+  }, [activeRunId, pending])
 
-  const openZoom = useCallback((payload: ZoomPayload) => {
-    setZoom(payload)
-    setZoomOpen(true)
+  /* -- run lifecycle ------------------------------------------------------ */
+
+  const openRun = useCallback((runId: string) => {
+    setActiveRunId(runId)
+    setTranscript(null)
+    setVerify({ running: false, result: null })
+    setPending(null)
+    liveRef.current = true
+    setHistoryOpen(false)
   }, [])
+
+  const handleNewTask = useCallback(() => {
+    setActiveRunId(null)
+    setTranscript(null)
+    setVerify({ running: false, result: null })
+    setPending(null)
+    setDraft('')
+  }, [])
+
+  const pushHistory = useCallback((value: string) => {
+    const text = value.trim()
+    if (!text) return
+    setHistory((prev) => {
+      const next = [text, ...prev.filter((item) => item !== text)].slice(0, 100)
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+    setHistIdx(null)
+  }, [])
+
+  const startCustomRun = useCallback(
+    async (task: string, taskKind: 'custom' | 'task-a' | 'task-b' = 'custom') => {
+      if (!settings) {
+        snackbar('Settings are still loading — retry in a second.', {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+        return
+      }
+      const live = runs.some((run) => run.status === 'Running')
+      if (live || pending !== null || liveRef.current) {
+        snackbar('A run is still live — stop it first (/new never stops a live run).', {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+        return
+      }
+      const goal = task.trim()
+      if (!goal && taskKind === 'custom') return
+      if (!source.trim()) {
+        snackbar('Choose the local volume file first.', {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+        void chooseSourceRef.current()
+        return
+      }
+      setPending('starting')
+      startStampRef.current = Date.now() / 1000
+      try {
+        await tuiStartRun({ taskKind, task: goal, settings: { ...settings, volumePath: source.trim() } })
+        pushHistory(taskKind === 'custom' ? goal : `/${taskKind}`)
+        setDraft('')
+        // The launcher mints the run id: adopt the newest run on next poll.
+        const stamp = startStampRef.current
+        const prevActive = activeRef.current
+        let adopted: string | null = null
+        for (let attempt = 0; attempt < 20; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          const latest = await refreshRuns()
+          const found = (latest ?? []).find((run) => (run.startedAt ?? 0) >= stamp - 1)
+          if (found) {
+            adopted = found.runId
+            openRun(found.runId)
+            break
+          }
+        }
+        if (adopted === null) {
+          // Fallback: open the newest run when it differs from the previously open one.
+          const latest = await refreshRuns()
+          if (latest && latest.length > 0 && latest[0].runId !== prevActive) openRun(latest[0].runId)
+        }
+      } catch (error: unknown) {
+        setPending(null)
+        snackbar(`Could not start the task: ${errorText(error)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      }
+    },
+    [settings, runs, pending, source, refreshRuns, openRun, pushHistory],
+  )
+
+  const handleStop = useCallback(() => {
+    if (!activeRunId) return
+    setPending('stopping')
+    liveRef.current = true // keep polling until the launcher records the end
+    void tuiStopRun(activeRunId).catch((error: unknown) => {
+      setPending(null)
+      snackbar(`Stop was not accepted: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    })
+  }, [activeRunId])
 
   const chooseSource = useCallback(async () => {
     setPicking(true)
@@ -287,7 +516,6 @@ function App() {
       const picked = await pickVolumeFile()
       if (!picked.cancelled && picked.path) {
         setSource(picked.path)
-        // Immediately import for Live Preview so the agent can reuse the snapshot.
         try {
           const record = await importVolumeFile(picked.path)
           setPreviewImport(record)
@@ -302,174 +530,563 @@ function App() {
     } catch (error: unknown) {
       snackbar(
         `Could not open the file browser: ${errorText(error)}. The picker runs in the local harness — start it with scripts/dev.ps1 and retry.`,
-        {
-          severity: 'error',
-          duration: 'long',
-          dismissible: true,
-        },
+        { severity: 'error', duration: 'long', dismissible: true },
       )
     } finally {
       setPicking(false)
     }
   }, [])
+  const chooseSourceRef = useRef(chooseSource)
+  chooseSourceRef.current = chooseSource
+
+  const toggleTheme = useCallback(() => {
+    // Core owns the mode (data-fynns-theme on <html>); read it back instead
+    // of keeping a parallel state that could drift.
+    const next = getFynnsThemeMode() === 'light' ? 'dark' : 'light'
+    try {
+      applyFynnsThemeMode(next)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  /* -- slash commands ----------------------------------------------------- */
+
+  const runSlash = useCallback(
+    async (action: SlashAction, args: string) => {
+      switch (action) {
+        case 'new':
+          handleNewTask()
+          if (args) await startCustomRun(args)
+          return
+        case 'task-a':
+          await startCustomRun('', 'task-a')
+          return
+        case 'task-b':
+          await startCustomRun('', 'task-b')
+          return
+        case 'verify': {
+          if (!activeRunId) {
+            snackbar('No open run to verify.', { severity: 'error', duration: 'long', dismissible: true })
+            return
+          }
+          setVerify({ running: true, result: null })
+          try {
+            await tuiVerifyRun(activeRunId)
+            for (let attempt = 0; attempt < 150; attempt++) {
+              await new Promise((resolve) => setTimeout(resolve, 2000))
+              const state = await tuiVerifyState(activeRunId)
+              if (!state.running && state.result) {
+                setVerify({ running: false, result: state.result })
+                return
+              }
+            }
+            setVerify((prev) => ({ ...prev, running: false }))
+            snackbar('Verify is still running — reopen /verify to read it.', {
+              severity: 'info',
+              duration: 'long',
+              dismissible: true,
+            })
+          } catch (error: unknown) {
+            setVerify({ running: false, result: null })
+            snackbar(`Verify failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          }
+          return
+        }
+        case 'copy-json':
+        case 'copy-chat': {
+          if (!activeRunId) {
+            snackbar('No open run to copy.', { severity: 'error', duration: 'long', dismissible: true })
+            return
+          }
+          try {
+            const data = await tuiCopyRun({ runId: activeRunId, kind: action === 'copy-json' ? 'json' : 'chat' })
+            snackbar(data.message, { severity: 'info', duration: 'long', dismissible: true })
+          } catch (error: unknown) {
+            snackbar(`Copy failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          }
+          return
+        }
+        case 'export-chat': {
+          if (!activeRunId) {
+            snackbar('No open run to export.', { severity: 'error', duration: 'long', dismissible: true })
+            return
+          }
+          try {
+            const file = await tuiDownloadChatLog(activeRunId)
+            downloadBlob(new Blob([file.text], { type: 'text/plain;charset=utf-8' }), file.name)
+            snackbar(`Saved ${file.name} to your downloads.`, {
+              severity: 'info',
+              duration: 'long',
+              dismissible: true,
+            })
+          } catch (error: unknown) {
+            snackbar(`Export failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          }
+          return
+        }
+        case 'export-images': {
+          if (!activeRunId) {
+            snackbar('No open run to export.', { severity: 'error', duration: 'long', dismissible: true })
+            return
+          }
+          try {
+            const response = await fetch(`/api/tui/runs/${encodeURIComponent(activeRunId)}/images.zip`)
+            if (!response.ok) throw new Error(`Export failed (${response.status})`)
+            downloadBlob(await response.blob(), `${activeRunId}-images.zip`)
+            snackbar('Saved the frame zip to your downloads.', {
+              severity: 'info',
+              duration: 'long',
+              dismissible: true,
+            })
+          } catch (error: unknown) {
+            snackbar(`Export failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          }
+          return
+        }
+        case 'open-image': {
+          if (!activeRunId) {
+            snackbar('No open run.', { severity: 'error', duration: 'long', dismissible: true })
+            return
+          }
+          try {
+            const data = await tuiRunImages(activeRunId)
+            const latest = data.images[data.images.length - 1]
+            if (!latest) {
+              snackbar('This run has no frames yet.', { severity: 'info', duration: 'long', dismissible: true })
+              return
+            }
+            const data2 = await tuiOpenPath(String(latest.image))
+            snackbar(data2.message, { severity: 'info', duration: 'long', dismissible: true })
+          } catch (error: unknown) {
+            snackbar(`Open failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          }
+          return
+        }
+        case 'open-folder': {
+          if (!transcript) {
+            snackbar('No open run.', { severity: 'error', duration: 'long', dismissible: true })
+            return
+          }
+          try {
+            const data = await tuiOpenPath(transcript.directory)
+            snackbar(data.message, { severity: 'info', duration: 'long', dismissible: true })
+          } catch (error: unknown) {
+            snackbar(`Open failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          }
+          return
+        }
+        case 'history':
+          void refreshRuns()
+          setHistoryOpen(true)
+          return
+        case 'batch':
+          setBatchOpen(true)
+          return
+        case 'archive-all':
+          setArchiveConfirm(true)
+          return
+        case 'change-volume':
+          void tuiVolumes()
+            .then((data) => setVolumes(data.volumes))
+            .catch(() => undefined)
+          setVolumesOpen(true)
+          return
+        case 'settings':
+          setSettingsOpen(true)
+          return
+        case 'theme':
+          toggleTheme()
+          return
+        case 'help':
+          setHelpOpen(true)
+          return
+        case 'glossary':
+          setGlossaryOpen(true)
+          return
+        case 'hard-stop': {
+          if (activeRunId) {
+            try {
+              await tuiStopRun(activeRunId)
+              snackbar('Stop marker written — the launcher kills the agent tree; services stay up.', {
+                severity: 'info',
+                duration: 'long',
+                dismissible: true,
+              })
+            } catch (error: unknown) {
+              snackbar(`Hard stop failed: ${errorText(error)}`, {
+                severity: 'error',
+                duration: 'long',
+                dismissible: true,
+              })
+            }
+          } else {
+            snackbar('Nothing live to stop.', { severity: 'info', duration: 'long', dismissible: true })
+          }
+          return
+        }
+        case 'quit':
+          setQuitConfirm(true)
+          return
+      }
+    },
+    [activeRunId, transcript, handleNewTask, startCustomRun, refreshRuns, toggleTheme],
+  )
 
   const handleSend = useCallback(
     (value: string) => {
-      const goal = value.trim()
-      if (!goal) return
-      const cleanSource = source.trim()
-      const cleanModel = model.trim()
-      if (!cleanSource) {
-        snackbar('Choose the local volume file first.', {
+      const parsed = parseSlashCommand(value)
+      pushHistory(value)
+      setDraft('')
+      setHistIdx(null)
+      if (parsed) {
+        void runSlash(parsed.action, parsed.args)
+        return
+      }
+      void startCustomRun(value)
+    },
+    [runSlash, startCustomRun, pushHistory],
+  )
+
+  /* -- settings / volumes / archive / batch writes -------------------------- */
+
+  const handleSaveSettings = useCallback(
+    async (next: TuiSettings) => {
+      setSettingsSaving(true)
+      try {
+        const saved = await tuiSaveSettings(next)
+        setSettings(saved)
+        setSource(saved.volumePath || '')
+        setSettingsOpen(false)
+        snackbar('Settings saved to runtime/tui-settings.json.', {
+          severity: 'info',
+          duration: 'long',
+          dismissible: true,
+        })
+      } catch (error: unknown) {
+        snackbar(`Settings not saved: ${errorText(error)}`, {
           severity: 'error',
           duration: 'long',
           dismissible: true,
         })
-        void chooseSource()
-        return
+      } finally {
+        setSettingsSaving(false)
       }
-      if (!cleanModel) {
-        setModelDraft(model)
-        setModelOpen(true)
-        snackbar('Set the installed vision model before starting.', {
+    },
+    [],
+  )
+
+  const handlePickVolume = useCallback(
+    async (volume: TuiVolume) => {
+      setSource(volume.path)
+      setVolumesOpen(false)
+      if (!settings) return
+      try {
+        const saved = await tuiSaveSettings({ ...settings, volumePath: volume.path })
+        setSettings(saved)
+        snackbar(`Next run works on ${volume.label}; preview it in the Stage.`, {
+          severity: 'info',
+          duration: 'long',
+          dismissible: true,
+        })
+      } catch (error: unknown) {
+        snackbar(`Volume selected locally; settings not saved: ${errorText(error)}`, {
           severity: 'error',
           duration: 'long',
           dismissible: true,
         })
-        return
       }
-      setPending('starting')
-      // Reuse the preview import snapshot when it matches the agent source,
-      // avoiding reconversion and keeping session bytes identical.
-      const importId =
-        previewImport && previewImport.source === cleanSource ? previewImport.importId : undefined
-      void startSession({ source: cleanSource, model: cleanModel, goal, ...(importId ? { importId } : {}) })
-        .then(({ id }) => {
-          setTask({ goal, source: cleanSource, model: cleanModel })
-          setDraft('')
-          setSession(null)
-          setSessionId(id)
-        })
-        .catch((error: unknown) => {
-          setPending(null)
-          snackbar(`Could not start the task: ${errorText(error)}`, {
+    },
+    [settings],
+  )
+
+  const handleStageSourceChange = useCallback(
+    (path: string) => {
+      setSource(path)
+      // The Stage stays the workbench: its volume becomes the next run's volume.
+      if (settings && path !== settings.volumePath) {
+        const next = { ...settings, volumePath: path }
+        setSettings(next)
+        void tuiSaveSettings(next).catch((error: unknown) => {
+          snackbar(`Stage volume kept locally; settings not saved: ${errorText(error)}`, {
             severity: 'error',
             duration: 'long',
             dismissible: true,
           })
         })
+      }
     },
-    [source, model, chooseSource, previewImport],
+    [settings],
   )
 
-  const handleStop = useCallback(() => {
-    if (!sessionId) return
-    setPending('stopping')
-    void stopSession(sessionId).catch((error: unknown) => {
-      setPending(null)
-      snackbar(`Stop was not accepted: ${errorText(error)}`, {
+  const handleArchiveAll = useCallback(async () => {
+    setArchiving(true)
+    try {
+      const result = await tuiArchiveAll()
+      setArchiveConfirm(false)
+      const latest = await refreshRuns()
+      if (activeRunId && !(latest ?? []).some((run) => run.runId === activeRunId)) handleNewTask()
+      snackbar(
+        `Archived ${result.moved.length} runs${result.skipped_live.length ? `; kept live: ${result.skipped_live.join(', ')}` : ''}.`,
+        { severity: 'info', duration: 'long', dismissible: true },
+      )
+    } catch (error: unknown) {
+      snackbar(`Archive failed: ${errorText(error)}`, {
         severity: 'error',
         duration: 'long',
         dismissible: true,
       })
-    })
-  }, [sessionId])
+    } finally {
+      setArchiving(false)
+    }
+  }, [activeRunId, handleNewTask, refreshRuns])
 
-  const handleContinue = useCallback(() => {
-    if (!sessionId) return
-    setPending('continuing')
-    void continueSession(sessionId).catch((error: unknown) => {
-      setPending(null)
-      snackbar(`Could not resume the session: ${errorText(error)}`, {
-        severity: 'error',
-        duration: 'long',
-        dismissible: true,
-      })
-    })
-  }, [sessionId])
+  const handleStartBatch = useCallback(
+    async (count: number, task: string) => {
+      if (!settings) return
+      setBatchStarting(true)
+      try {
+        const data = await tuiStartBatch({ count, task, settings: { ...settings, volumePath: source.trim() } })
+        setBatchOpen(false)
+        const detail = await tuiBatchDetail(data.batchId)
+        setBatchDetail(detail)
+        snackbar(`Batch ${data.batchId} running — members appear in History.`, {
+          severity: 'info',
+          duration: 'long',
+          dismissible: true,
+        })
+      } catch (error: unknown) {
+        snackbar(`Batch not started: ${errorText(error)}`, {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+      } finally {
+        setBatchStarting(false)
+      }
+    },
+    [settings, source],
+  )
 
-  const handleNewTask = useCallback(() => {
-    setSession(null)
-    setSessionId(null)
-    setPending(null)
-    setTask(null)
-    setDraft('')
+  /* -- global keys: F1/F2/Ctrl+H/Ctrl+T/Ctrl+Q/Esc ---------------------------- */
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const inField =
+        !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      if (event.key === 'F1') {
+        event.preventDefault()
+        setHelpOpen(true)
+        return
+      }
+      if (event.key === 'F2') {
+        event.preventDefault()
+        setGlossaryOpen(true)
+        return
+      }
+      if (event.ctrlKey && (event.key === 'h' || event.key === 'H')) {
+        event.preventDefault()
+        setShowPlumbing((v) => !v)
+        return
+      }
+      if (event.ctrlKey && (event.key === 't' || event.key === 'T')) {
+        event.preventDefault()
+        toggleTheme()
+        return
+      }
+      if (event.ctrlKey && (event.key === 'q' || event.key === 'Q')) {
+        event.preventDefault()
+        setQuitConfirm(true)
+        return
+      }
+      if (event.key === 'Escape' && !inField) {
+        if (activeRef.current) handleStop()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [handleStop, toggleTheme])
+
+  /* -- derived view ---------------------------------------------------------- */
+
+  const openZoom = useCallback((payload: ZoomPayload) => {
+    setZoom(payload)
+    setZoomOpen(true)
   }, [])
 
-  const editable = session === null && pending === null
-  const runningish = pending !== null || session?.state === 'created' || session?.state === 'running'
-  const stopAvailable = pending === null && (session?.state === 'created' || session?.state === 'running')
-  const newTaskDisabled = pending !== null || session?.state === 'created' || session?.state === 'running'
+  const live = pending !== null || (transcript != null && transcript.status === 'running')
+  const stopAvailable = pending === null && !!activeRunId && transcript?.status === 'running'
 
   const rows: ReactNode[] = []
-  if (task) {
-    rows.push(<TaskMessage key="task" goal={task.goal} source={task.source} model={task.model} />)
-  }
-  if (session) {
-    const decisionBySeq = new Map<number, number>()
-    let decisions = 0
-    for (const event of session.events) {
-      if (event.kind === 'model_action') {
-        decisions += 1
-        decisionBySeq.set(event.seq, decisions)
-      }
-    }
-    for (const event of session.events) {
-      const key = `event-${event.seq}`
-      switch (event.kind) {
-        case 'initial_render':
-        case 'render':
-          rows.push(
-            <ChatReveal key={key}>
-              <FrameRow event={event} onZoom={openZoom} />
-            </ChatReveal>,
-          )
-          break
-        case 'model_action':
-          rows.push(
-            <ChatReveal key={key}>
-              <ActionRow event={event} decision={decisionBySeq.get(event.seq) ?? 0} budget={session.budget} />
-            </ChatReveal>,
-          )
-          break
-        case 'pause':
-          rows.push(
-            <ChatReveal key={key}>
-              <PauseRow event={event} budget={session.budget} />
-            </ChatReveal>,
-          )
-          break
-        case 'finish':
-          rows.push(
-            <ChatReveal key={key}>
-              <FinishRow event={event} />
-            </ChatReveal>,
-          )
-          break
-        case 'error':
-          rows.push(
-            <ChatReveal key={key}>
-              <ErrorRow event={event} stopped={session.state === 'stopped'} />
-            </ChatReveal>,
-          )
-          break
-      }
-    }
+  if (transcript) {
+    transcript.blocks.forEach((block, index) => {
+      const row = (
+        <TuiBlockRow key={`${block.kind}-${index}`} block={block} showPlumbing={showPlumbing} onZoom={openZoom} />
+      )
+      if (row) rows.push(row)
+    })
   }
 
   const tail: ReactNode[] = []
-  if (pending === 'starting') {
-    tail.push(<LiveStatusRow key="live" label="Starting the session — importing the volume and capturing the initial frame" />)
-  } else if (pending === 'stopping') {
-    tail.push(<LiveStatusRow key="live" label="Stop requested — waiting for the current step to end" />)
-  } else if (pending === 'continuing') {
-    tail.push(<LiveStatusRow key="live" label="Resuming — the model continues from the latest frame" />)
-  } else if (session?.state === 'running' || session?.state === 'created') {
-    tail.push(<LiveStatusRow key="live" label={liveLabel(session)} />)
+  if (live && transcript) {
+    const last = transcript.blocks[transcript.blocks.length - 1]
+    const streaming = !last || last.kind === 'thinking' || last.kind === 'tool' || last.status === 'running'
+    if (streaming) {
+      tail.push(
+        <TuiBlockRow
+          key="live"
+          block={{
+            kind: 'thinking',
+            title: 'Thinking',
+            subtitle: liveLabel(transcript, pending),
+            body: '',
+            status: 'running',
+            ts: null,
+            data: { reasoning: true },
+          }}
+          showPlumbing={showPlumbing}
+          onZoom={openZoom}
+        />,
+      )
+    }
+  } else if (pending === 'starting') {
+    tail.push(
+      <TuiBlockRow
+        key="live"
+        block={{
+          kind: 'thinking',
+          title: 'Thinking',
+          subtitle: liveLabel(transcript, pending),
+          body: '',
+          status: 'running',
+          ts: null,
+          data: { reasoning: true },
+        }}
+        showPlumbing={showPlumbing}
+        onZoom={openZoom}
+      />,
+    )
   }
-  if (session?.state === 'paused' && session.used < session.budget) {
-    tail.push(<PauseControlRow key="pause-control" busy={pending === 'continuing'} onContinue={handleContinue} />)
-  }
+
+  const slashOpen = draft.trimStart().startsWith('/')
+  const slashMatches = slashOpen ? matchSlashCommands(draft.trim()) : []
+  const slashList = slashOpen ? (
+    <div className="gav-slash-menu" role="listbox" aria-label="Slash commands">
+      {slashMatches.length === 0 ? (
+        <div className="gav-slash-empty">No match — Enter sends the text as a task.</div>
+      ) : (
+        slashMatches.slice(0, 12).map((item, index) => (
+          <button
+            key={item.slash}
+            type="button"
+            role="option"
+            aria-selected={index === slashSel}
+            className={index === slashSel ? 'gav-slash-item gav-slash-item--active' : 'gav-slash-item'}
+            onClick={() => {
+              pushHistory(draft)
+              setDraft('')
+              void runSlash(item.action, draft.trim().split(/\s+/).slice(1).join(' '))
+            }}
+          >
+            <span className="gav-slash-name">{item.slash}</span>
+            <span className="gav-slash-tip">{item.tooltip}</span>
+          </button>
+        ))
+      )}
+    </div>
+  ) : null
+
+  const composerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (slashOpen) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault()
+          setSlashSel((sel) => {
+            const n = Math.min(slashMatches.length, 12)
+            if (n === 0) return 0
+            return event.key === 'ArrowDown' ? (sel + 1) % n : (sel - 1 + n) % n
+          })
+          return
+        }
+        if (event.key === 'Tab' && slashMatches.length > 0) {
+          event.preventDefault()
+          const pick = slashMatches[Math.min(slashSel, 11)]
+          if (pick) setDraft(`${pick.slash} `)
+          setSlashSel(0)
+          return
+        }
+        if (event.key === 'Enter' && slashMatches.length > 0 && !event.shiftKey) {
+          // Run the highlighted command instead of submitting raw text.
+          const token = draft.trim().split(/\s+/)[0].toLowerCase()
+          const exact = slashMatches.some((item) => item.slash === token)
+          if (!exact) {
+            event.preventDefault()
+            const pick = slashMatches[Math.min(slashSel, 11)]
+            if (pick) {
+              const args = draft.trim().split(/\s+/).slice(1).join(' ')
+              pushHistory(draft)
+              setDraft('')
+              setSlashSel(0)
+              void runSlash(pick.action, args)
+            }
+            return
+          }
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          setDraft('')
+          setSlashSel(0)
+          return
+        }
+      } else if (!draft.includes('\n')) {
+        // Shell-like history recall on single-line drafts (TUI Up/Down).
+        if (event.key === 'ArrowUp' && history.length > 0) {
+          event.preventDefault()
+          const next = histIdx === null ? 0 : Math.min(histIdx + 1, history.length - 1)
+          setHistIdx(next)
+          setDraft(history[next])
+          return
+        }
+        if (event.key === 'ArrowDown' && histIdx !== null) {
+          event.preventDefault()
+          if (histIdx === 0) {
+            setHistIdx(null)
+            setDraft('')
+          } else {
+            const next = histIdx - 1
+            setHistIdx(next)
+            setDraft(history[next])
+          }
+        }
+      }
+    },
+    [slashOpen, slashMatches, slashSel, draft, history, histIdx, pushHistory, runSlash],
+  )
 
   const navToggleLabel = navOpen ? 'Close navigation' : 'Open navigation'
   const asideToggleLabel = asideOpen ? 'Hide inspector' : 'Show inspector'
@@ -483,8 +1100,8 @@ function App() {
             empty={
               <EmptyState
                 icon={<BrainIcon size={28} aria-hidden />}
-                title="Start an exploration task"
-                description="Choose the local volume file and the installed vision model with the buttons under the composer, describe what to look for, then send. Every screenshot in this conversation is a real capture from the native renderer; model claims stay unverified."
+                title="Start a run"
+                description="Describe the task, or type / for presets (/task-a, /task-b), history, batches, verify and exports. Every row is read from the recorded run evidence; model claims stay unverified."
               />
             }
           >
@@ -494,48 +1111,47 @@ function App() {
           <ChatScrollToBottom />
           <ChatComposer
             value={draft}
-            onChange={setDraft}
+            onChange={(value) => {
+              setDraft(value)
+              setSlashSel(0)
+              if (value.trim() === '') setHistIdx(null)
+            }}
             onSubmit={handleSend}
-            ariaLabel="Describe the visualization task"
-            placeholder="Describe what you want to see in the local volume"
-            sendLabel="Start exploration"
+            ariaLabel="Describe the task, or type / for commands"
+            placeholder="Describe the task, or type / for commands"
+            sendLabel="Start run"
             stopLabel="Stop"
-            disabled={!editable}
-            busy={runningish}
-            onStop={stopAvailable ? handleStop : undefined}
+            disabled={!settings}
+            busy={live}
+            onStop={stopAvailable || pending !== null ? handleStop : undefined}
+            attachments={slashList}
             leading={
-              editable ? (
-                <Tooltip content="Choose the local volume file">
-                  <IconButton
-                    variant="ghost"
-                    size="sm"
-                    aria-label="Choose the local volume file"
-                    disabled={picking}
-                    aria-busy={picking || undefined}
-                    onClick={() => void chooseSource()}
-                  >
-                    <PlusIcon aria-hidden />
-                  </IconButton>
-                </Tooltip>
-              ) : undefined
+              <Tooltip content="Choose the local volume file">
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Choose the local volume file"
+                  disabled={picking}
+                  aria-busy={picking || undefined}
+                  onClick={() => void chooseSource()}
+                >
+                  <PlusIcon aria-hidden />
+                </IconButton>
+              </Tooltip>
             }
             endActions={
-              editable ? (
-                <Tooltip content="Change the installed vision model">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setModelDraft(model)
-                      setModelOpen(true)
-                    }}
-                  >
-                    <BotIcon aria-hidden />
-                    {model}
-                  </Button>
-                </Tooltip>
-              ) : undefined
+              <Tooltip content="Settings: model, volume, endpoints, budget">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  <BotIcon aria-hidden />
+                  {settings?.model ?? '…'}
+                </Button>
+              </Tooltip>
             }
+            textareaProps={{ onKeyDown: composerKeyDown }}
           />
         </Chat>
       </FillColumn>
@@ -543,18 +1159,21 @@ function App() {
   )
 
   // Always mounted: collapsing the stage only hides it via CSS so the
-  // preview iframe + Wasm raycaster stay alive but dormant. Unmounting here
-  // would dispose the engine and force a slow full reboot on expand.
+  // preview iframe + Wasm raycaster stay alive but dormant.
   const stagePane = (
     <div className="gav-stage-pane" data-pane="stage">
       <LiveStage
         source={source}
         previewImport={previewImport}
         onPreviewImport={setPreviewImport}
-        onSourceChange={setSource}
+        onSourceChange={handleStageSourceChange}
       />
     </div>
   )
+
+  const latestImage = transcript
+    ? [...transcript.blocks].reverse().find((block) => block.kind === 'image')
+    : undefined
 
   return (
     <>
@@ -564,7 +1183,7 @@ function App() {
         onNavCrowded={() => setNavOpen(false)}
         topBar={
           <TopAppBar
-            title="Agentic Volume Visualization"
+            title="Agentic Volume"
             leading={
               <Tooltip content={navToggleLabel}>
                 <IconButton
@@ -627,16 +1246,24 @@ function App() {
         }
         nav={
           navOpen ? (
-            <NavigationDrawer variant="standard" ariaLabel="Tasks">
-              <NavigationDrawerNewChat label="New task" disabled={newTaskDisabled} onClick={handleNewTask} />
-              {task ? (
-                <NavigationDrawerItem icon={<FileIcon aria-hidden />} label={task.goal} active />
-              ) : (
+            <NavigationDrawer variant="standard" ariaLabel="Runs">
+              <NavigationDrawerNewChat label="New task" disabled={live} onClick={handleNewTask} />
+              {runs.length === 0 ? (
                 <EmptyState
                   size="sm"
-                  title="No task yet"
-                  description="Choose the volume file and send the first task from the composer."
+                  title="No runs yet"
+                  description="Send the first task from the composer, or /task-a for the audited preset."
                 />
+              ) : (
+                runs.slice(0, 12).map((run) => (
+                  <NavigationDrawerItem
+                    key={run.runId}
+                    icon={<FileIcon aria-hidden />}
+                    label={`${run.runId} — ${run.task.slice(0, 40)}`}
+                    active={run.runId === activeRunId}
+                    onClick={() => openRun(run.runId)}
+                  />
+                ))
               )}
             </NavigationDrawer>
           ) : null
@@ -658,66 +1285,113 @@ function App() {
                 minEnd={stageMinPx}
                 disableResize={!stageOpen}
                 className={stageOpen ? undefined : 'gav-split--stage-closed'}
-                label="Resize Chat and Live Preview (40/60 default)"
+                label="Resize Chat and Live Preview (50/50 default)"
               />
             )}
           </div>
           <EndAside open={asideOpen}>
             <PageScroll>
-              {session ? (
+              {transcript ? (
                 <div className="fynns-unit-stack">
-                  <Card title="Session">
+                  <Card title="Run">
                     <List>
-                      <ListItem headline="State" trailingSupportingText={stateLabel(session, pending)} />
-                      <ListItem headline="Decisions" trailingSupportingText={`${session.used} / ${session.budget}`} />
+                      <ListItem headline="State" trailingSupportingText={runStateLabel(transcript.status, pending)} />
                       <ListItem
-                        headline="Scene revision"
-                        trailingSupportingText={String(session.scene?.revision ?? 0)}
+                        headline="Observations"
+                        trailingSupportingText={`${transcript.used} / ${transcript.budget}`}
                       />
-                      <ListItem headline="Volume source" supportingText={session.source} lines={2} />
-                      <ListItem headline="Model" supportingText={session.model} />
-                      <ListItem headline="Task" supportingText={session.goal} lines={3} />
+                      <ListItem headline="Model" supportingText={transcript.model} />
+                      <ListItem headline="Volume" supportingText={transcript.volumePath || source} lines={2} />
+                      <ListItem headline="Task" supportingText={transcript.task} lines={3} />
                     </List>
                     <LinearProgress
-                      value={session.budget > 0 ? session.used / session.budget : 0}
-                      label={`Decision budget used: ${session.used} of ${session.budget}`}
+                      value={transcript.budget > 0 ? transcript.used / transcript.budget : 0}
+                      label={`Observation budget used: ${transcript.used} of ${transcript.budget}`}
                     />
                   </Card>
-                  <Card title="Scene">
-                    {session.scene ? (
-                      <CodeBlock
-                        label={`scene.json — revision ${session.scene.revision}`}
-                        code={JSON.stringify(session.scene, null, 2)}
-                      />
+                  <Card title="Verification">
+                    {verify.result ? (
+                      <div className="fynns-unit-stack">
+                        <CodeBlock label="verify summary" code={verify.result.summary.join('\n')} />
+                        {verify.result.output ? (
+                          <Collapsible title="Verifier output" chrome="plain">
+                            <CodeBlock variant="plain" code={verify.result.output} />
+                          </Collapsible>
+                        ) : null}
+                      </div>
                     ) : (
                       <EmptyState
                         size="sm"
-                        title="No scene yet"
-                        description="The SceneSpec is recorded with the first render."
+                        title={verify.running ? 'Verifying…' : 'Not verified yet'}
+                        description="Read-only check: execution / image transport / visual-quality UNVERIFIED."
                       />
                     )}
+                    <div className="fynns-control-cluster fynns-control-cluster--start-align">
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={verify.running || !activeRunId}
+                        onClick={() => void runSlash('verify', '')}
+                      >
+                        {verify.running ? 'Verifying…' : 'Verify evidence'}
+                      </Button>
+                    </div>
                   </Card>
-                  <Card title="Volume facts">
-                    {session.volume ? (
-                      <ExpandableCodeBlock
-                        label="volume.json"
-                        code={JSON.stringify(session.volume, null, 2)}
-                        previewLines={14}
-                      />
-                    ) : (
-                      <EmptyState
+                  <Card title="Evidence">
+                    <div className="fynns-control-cluster fynns-control-cluster--start-align">
+                      <Button variant="ghost" size="sm" disabled={!activeRunId} onClick={() => void runSlash('copy-chat', '')}>
+                        Copy chat
+                      </Button>
+                      <Button variant="ghost" size="sm" disabled={!activeRunId} onClick={() => void runSlash('copy-json', '')}>
+                        Copy JSON
+                      </Button>
+                      <Button variant="ghost" size="sm" disabled={!activeRunId} onClick={() => void runSlash('export-chat', '')}>
+                        Download .log
+                      </Button>
+                      <Button
+                        variant="ghost"
                         size="sm"
-                        title="Volume not imported yet"
-                        description="Numeric facts appear after the import step."
-                      />
-                    )}
+                        disabled={!activeRunId}
+                        onClick={() => void runSlash('export-images', '')}
+                      >
+                        Frames .zip
+                      </Button>
+                      <Button variant="ghost" size="sm" disabled={!activeRunId} onClick={() => void runSlash('open-folder', '')}>
+                        Open folder
+                      </Button>
+                    </div>
+                    {latestImage ? (
+                      <List>
+                        <ListItem
+                          headline="Latest frame"
+                          supportingText={String((latestImage.data as { image?: unknown })?.image ?? '')}
+                          lines={2}
+                        />
+                      </List>
+                    ) : null}
+                  </Card>
+                  <Card title="Run files">
+                    <ExpandableCodeBlock
+                      label="transcript blocks (JSON)"
+                      code={JSON.stringify(
+                        transcript.blocks.map((block) => ({
+                          kind: block.kind,
+                          title: block.title,
+                          subtitle: block.subtitle,
+                          status: block.status,
+                        })),
+                        null,
+                        2,
+                      )}
+                      previewLines={14}
+                    />
                   </Card>
                 </div>
               ) : (
                 <EmptyState
                   size="sm"
-                  title="No active task"
-                  description="Session state, budget, the full SceneSpec and numeric volume facts appear here while a task runs."
+                  title="No open run"
+                  description="Run state, budget, verification and evidence appear here while a run is open."
                 />
               )}
             </PageScroll>
@@ -725,54 +1399,91 @@ function App() {
         </div>
       </ClippedNavShell>
 
-      <Dialog
-        open={modelOpen}
-        onOpenChange={setModelOpen}
-        title="Vision model"
-        description="Ollama model installed on this machine that reports vision capability. The app only talks to the local Ollama endpoint at 127.0.0.1:11434."
-        size="md"
-        feet={
-          <div className="fynns-control-cluster fynns-control-cluster--end-align">
-            <Button variant="ghost" onClick={() => setModelOpen(false)}>
-              <CloseIcon aria-hidden />
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              disabled={!modelDraft.trim()}
-              onClick={() => {
-                setModel(modelDraft.trim())
-                setModelOpen(false)
-              }}
-            >
-              <CheckIcon aria-hidden />
-              Apply
-            </Button>
-          </div>
-        }
-      >
-        <FieldStack>
-          <FieldBlock
-            label="Ollama model"
-            htmlFor="gav-vision-model"
-            description="The model is checked against the local Ollama inventory before the first decision."
-          >
-            <Input
-              id="gav-vision-model"
-              value={modelDraft}
-              onChange={(event) => setModelDraft(event.target.value)}
-              placeholder={DEFAULT_MODEL}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </FieldBlock>
-        </FieldStack>
-      </Dialog>
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        settings={settings ?? ({} as TuiSettings)}
+        volumes={volumes}
+        onSave={handleSaveSettings}
+        saving={settingsSaving}
+      />
+      <VolumesDialog
+        open={volumesOpen}
+        onOpenChange={setVolumesOpen}
+        volumes={volumes}
+        current={source}
+        onPick={handlePickVolume}
+      />
+      <HistoryDialog
+        open={historyOpen}
+        onOpenChange={setHistoryOpen}
+        runs={runs}
+        activeRunId={activeRunId}
+        onOpen={(run) => openRun(run.runId)}
+        onArchiveAll={() => setArchiveConfirm(true)}
+        archiving={archiving}
+      />
+      <BatchDialog
+        open={batchOpen}
+        onOpenChange={setBatchOpen}
+        taskPrefill={transcript?.task ?? ''}
+        onStart={handleStartBatch}
+        starting={batchStarting}
+      />
+      <BatchDetailDialog
+        open={batchDetail !== null}
+        onOpenChange={(open) => {
+          if (!open) setBatchDetail(null)
+        }}
+        batch={batchDetail}
+        onOpenMember={(runId) => {
+          setBatchDetail(null)
+          openRun(runId)
+        }}
+        onCancel={async () => {
+          if (!batchDetail) return
+          setBatchCancelling(true)
+          try {
+            await tuiCancelBatch(batchDetail.batchId)
+            const detail = await tuiBatchDetail(batchDetail.batchId)
+            setBatchDetail(detail)
+          } finally {
+            setBatchCancelling(false)
+          }
+        }}
+        cancelling={batchCancelling}
+      />
+      <GlossaryDialog open={glossaryOpen} onOpenChange={setGlossaryOpen} entries={glossary} />
+      <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
+
+      <ConfirmDialog
+        open={archiveConfirm}
+        onOpenChange={setArchiveConfirm}
+        title="Archive all runs?"
+        description="Every history run moves to runtime/archive (live runs are kept). No unarchive: move the folders back manually."
+        confirmLabel="Archive all"
+        danger
+        loading={archiving}
+        onConfirm={() => void handleArchiveAll()}
+      />
+      <ConfirmDialog
+        open={quitConfirm}
+        onOpenChange={setQuitConfirm}
+        title="Stop and clear?"
+        description="Stops the live run (evidence stays on disk) and clears the view. The backend keeps serving; the TUI hard-stop semantics for Ollama do not apply in the browser."
+        confirmLabel="Stop and clear"
+        danger
+        onConfirm={() => {
+          if (activeRunId) void tuiStopRun(activeRunId).catch(() => undefined)
+          setQuitConfirm(false)
+          handleNewTask()
+        }}
+      />
 
       <Dialog
         open={zoomOpen}
         onOpenChange={setZoomOpen}
-        title="Actual renderer frame"
+        title="Renderer frame"
         description={zoom?.caption}
         size="lg"
         showCloseButton

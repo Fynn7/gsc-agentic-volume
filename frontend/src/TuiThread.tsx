@@ -49,11 +49,10 @@ function ThinkingRow({ block }: { block: TuiBlock }) {
           variant={body ? 'disclosure' : 'status'}
           streaming={running}
           streamingLabel={streamingLabel}
-          label={`${tuiMark(block.kind)} ${label}`}
+          label={label}
           summary={block.subtitle || undefined}
-        >
-          {body || undefined}
-        </ChatThinking>
+          details={body ? [{ id: 'thought', text: body }] : []}
+        />
       }
     />
   )
@@ -71,11 +70,10 @@ function CompactionRow({ block }: { block: TuiBlock }) {
           variant={body ? 'disclosure' : 'status'}
           streaming={running}
           streamingLabel="Context checkpoint"
-          label="◈ Context checkpoint"
+          label="Context checkpoint"
           summary={block.subtitle || undefined}
-        >
-          {body || undefined}
-        </ChatThinking>
+          details={body ? [{ id: 'checkpoint', text: body }] : []}
+        />
       }
     />
   )
@@ -84,19 +82,18 @@ function CompactionRow({ block }: { block: TuiBlock }) {
 /** One renderer tool call with the numbers it changed and what came back. */
 function ToolRow({ block }: { block: TuiBlock }) {
   const running = block.status === 'running'
-  const subtitle = block.subtitle ? `  ${block.subtitle}` : ''
-  const timeSuffix =
-    !running && typeof (block.data as { seconds?: unknown } | null)?.seconds === 'number'
-      ? `  ✓ ${Math.round(Number((block.data as { seconds: number }).seconds) + 0.5)}s`
-      : ''
-  const statusSuffix = running ? '  …' : block.status === 'failed' ? '  ✗' : timeSuffix
+  // Core owns status chrome (step dot, streaming shimmer, chevron): the label
+  // stays plain action text. Facts + measured body go to the step description.
+  const facts = block.subtitle.trim()
+  const body = block.body.trim()
+  const description = [facts, body].filter(Boolean).join('\n\n') || undefined
   return (
     <ChatActivity
-      label={`${tuiMark(block.kind)} ${block.title}${subtitle}${statusSuffix}`}
+      label={block.title}
       streaming={running}
       defaultOpen={running}
     >
-      <ChatActivityStep status={ToolStepStatus(block.status)} label={block.title} description={block.body || undefined} />
+      <ChatActivityStep status={ToolStepStatus(block.status)} label={block.title} description={description} />
     </ChatActivity>
   )
 }
@@ -197,7 +194,7 @@ export function TuiBlockRow({
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={`${tuiMark(block.kind)} ${block.title || 'harness notices'}`} />}
+          thinking={<ChatThinking variant="status" label={block.title || 'harness notices'} details={[]} />}
         >
           {block.body || undefined}
         </ChatMessage>
@@ -208,7 +205,7 @@ export function TuiBlockRow({
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={`${tuiMark(block.kind)} ${block.title}`} />}
+          thinking={<ChatThinking variant="status" label={block.title} details={[]} />}
         />
       )
     case 'error': {
@@ -233,7 +230,7 @@ export function TuiBlockRow({
       return (
         <ChatMessage
           role="assistant"
-          thinking={<ChatThinking variant="status" label={`${tuiMark(block.kind)} ${block.title}`} />}
+          thinking={<ChatThinking variant="status" label={block.title} details={[]} />}
         />
       )
     default:

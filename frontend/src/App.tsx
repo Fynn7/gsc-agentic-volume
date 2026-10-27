@@ -604,7 +604,7 @@ function App() {
   )
 
   const handleStop = useCallback(() => {
-    if (!activeRunId) return
+    if (!activeRunId || pending === 'stopping') return
     setPending('stopping')
     liveRef.current = true // keep polling until the launcher records the end
     void tuiStopRun(activeRunId).catch((error: unknown) => {
@@ -615,7 +615,7 @@ function App() {
         dismissible: true,
       })
     })
-  }, [activeRunId])
+  }, [activeRunId, pending])
 
   const chooseSource = useCallback(async () => {
     setPicking(true)
@@ -878,6 +878,9 @@ function App() {
         case 'hard-stop': {
           if (activeRunId) {
             try {
+              // Same immediate feedback as the Stop button:淡灰 + 忙态 until the launcher settles.
+              setPending('stopping')
+              liveRef.current = true
               await tuiStopRun(activeRunId)
               snackbar('Stop marker written — the launcher kills the agent tree; services stay up.', {
                 severity: 'info',
@@ -885,6 +888,7 @@ function App() {
                 dismissible: true,
               })
             } catch (error: unknown) {
+              setPending(null)
               snackbar(`Hard stop failed: ${errorText(error)}`, {
                 severity: 'error',
                 duration: 'long',
@@ -1503,6 +1507,7 @@ function App() {
             sendLabel="Start run"
             stopLabel="Stop"
             busy={live}
+            stopping={pending === 'stopping'}
             onStop={stopAvailable || pending !== null ? handleStop : undefined}
             attachments={slashList}
             leading={

@@ -542,7 +542,10 @@ function App() {
     </div>
   )
 
-  const stagePane = stageOpen ? (
+  // Always mounted: collapsing the stage only hides it via CSS so the
+  // preview iframe + Wasm raycaster stay alive but dormant. Unmounting here
+  // would dispose the engine and force a slow full reboot on expand.
+  const stagePane = (
     <div className="gav-stage-pane" data-pane="stage">
       <LiveStage
         source={source}
@@ -551,7 +554,7 @@ function App() {
         onSourceChange={setSource}
       />
     </div>
-  ) : null
+  )
 
   return (
     <>
@@ -643,22 +646,20 @@ function App() {
           <div className="fynns-destination-app-shell-canvas fynns-scroll" ref={canvasRef}>
             {isNarrow ? (
               <div className="gav-workbench gav-workbench--narrow">
-                {narrowView === 'chat' ? chatPane : stagePane ?? chatPane}
+                {!stageOpen || narrowView === 'chat' ? chatPane : stagePane}
               </div>
-            ) : stageOpen && stagePane ? (
+            ) : (
               <SplitPane
                 start={chatPane}
                 end={stagePane}
-                size={splitChatPx}
+                size={stageOpen ? splitChatPx : rowWidth}
                 onSizeChange={handleSplitSizeChange}
                 minStart={chatMinPx}
                 minEnd={stageMinPx}
+                disableResize={!stageOpen}
+                className={stageOpen ? undefined : 'gav-split--stage-closed'}
                 label="Resize Chat and Live Preview (40/60 default)"
               />
-            ) : (
-              <div className="gav-workbench">
-                {chatPane}
-              </div>
             )}
           </div>
           <EndAside open={asideOpen}>

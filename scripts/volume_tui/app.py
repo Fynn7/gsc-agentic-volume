@@ -2144,7 +2144,6 @@ if _TEXTUAL:
                 return
             live = {id(block) for block in self.transcript.blocks}
             added = False
-            for block in self.transcript.blocks:
             for block, widget in list(self._widgets):
                 if id(block) not in live:
                     # The block was reclassified (the words before a tool call

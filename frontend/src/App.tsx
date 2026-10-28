@@ -267,7 +267,8 @@ function App() {
   const [slashSel, setSlashSel] = useState(0)
 
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsSaving, setSettingsSaving] = useState(false)
+  const settingsSaveTimer = useRef<number | null>(null)
+  const pendingSettings = useRef<TuiSettings | null>(null)
   const [volumesOpen, setVolumesOpen] = useState(false)
   const [volumes, setVolumes] = useState<TuiVolume[]>([])
   const [volumesLoading, setVolumesLoading] = useState(false)
@@ -1242,30 +1243,47 @@ function App() {
 
   /* -- settings / volumes / archive / batch writes -------------------------- */
 
-  const handleSaveSettings = useCallback(
-    async (next: TuiSettings) => {
-      setSettingsSaving(true)
-      try {
-        const saved = await tuiSaveSettings(next)
-        setSettings(saved)
-        setSource(saved.volumePath || '')
-        setSettingsOpen(false)
-        snackbar('Settings saved to runtime/tui-settings.json.', {
-          severity: 'info',
-          duration: 'long',
-          dismissible: true,
-        })
-      } catch (error: unknown) {
-        snackbar(`Settings not saved: ${errorText(error)}`, {
-          severity: 'error',
-          duration: 'long',
-          dismissible: true,
-        })
-      } finally {
-        setSettingsSaving(false)
-      }
+  const persistSettings = useCallback(async (next: TuiSettings) => {
+    try {
+      await tuiSaveSettings(next)
+    } catch (error: unknown) {
+      snackbar(`Settings not saved: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    }
+  }, [])
+
+  const flushPendingSettings = useCallback(() => {
+    if (settingsSaveTimer.current !== null) {
+      window.clearTimeout(settingsSaveTimer.current)
+      settingsSaveTimer.current = null
+    }
+    const pending = pendingSettings.current
+    pendingSettings.current = null
+    if (pending) void persistSettings(pending)
+  }, [persistSettings])
+
+  // No Save button: each valid edit applies right away and is written to the same
+  // file the TUI uses; the debounce only collapses rapid keystrokes into one write.
+  const handleSettingsChange = useCallback(
+    (next: TuiSettings) => {
+      setSettings(next)
+      setSource(next.volumePath || '')
+      pendingSettings.current = next
+      if (settingsSaveTimer.current !== null) window.clearTimeout(settingsSaveTimer.current)
+      settingsSaveTimer.current = window.setTimeout(flushPendingSettings, 400)
     },
-    [],
+    [flushPendingSettings],
+  )
+
+  const handleSettingsOpenChange = useCallback(
+    (open: boolean) => {
+      setSettingsOpen(open)
+      if (!open) flushPendingSettings()
+    },
+    [flushPendingSettings],
   )
 
   const handlePickVolume = useCallback(
@@ -2385,14 +2403,15 @@ function App() {
         </div>
       </ClippedNavShell>
 
-      <SettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        settings={settings ?? ({} as TuiSettings)}
-        volumes={volumes}
-        onSave={handleSaveSettings}
-        saving={settingsSaving}
-      />
+      {settings ? (
+        <SettingsDialog
+          open={settingsOpen}
+          onOpenChange={handleSettingsOpenChange}
+          settings={settings}
+          volumes={volumes}
+          onChange={handleSettingsChange}
+        />
+      ) : null}
       <VolumesDialog
         open={volumesOpen}
         onOpenChange={setVolumesOpen}

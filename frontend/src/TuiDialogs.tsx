@@ -4,7 +4,7 @@
  * HistoryScreen/BatchScreen/BatchDetailScreen/HelpScreen/GlossaryScreen).
  * Only fynns core components: Dialog, Table, DropdownMenu, Field* inputs.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Autocomplete,
   Button,
@@ -16,6 +16,7 @@ import {
   DropdownMenuItem,
   EmptyState,
   FieldBlock,
+  FieldHint,
   FieldStack,
   IconButton,
   Input,
@@ -40,24 +41,78 @@ function Shell({ children }: { children: React.ReactNode }) {
 
 /* -- settings -------------------------------------------------------- */
 
+/** The server rejects any other shape; invalid drafts stay local instead of being applied. */
+function settingsProblems(next: TuiSettings): string[] {
+  const problems: string[] = []
+  for (const key of ['endpoint', 'h200Endpoint', 'rendererService'] as const) {
+    const value = String(next[key] ?? '').trim()
+    if (!value.startsWith('http://127.0.0.1:') && !value.startsWith('http://localhost:')) {
+      problems.push(`${key} must be a loopback URL (http://127.0.0.1:<port>)`)
+    }
+  }
+  if (!String(next.model ?? '').trim()) problems.push('model must not be empty')
+  if (!(next.renderBudget >= 1 && next.renderBudget <= 30)) problems.push('render budget must be 1..30')
+  if (!(next.contextSize >= 1)) problems.push('context size must be >= 1')
+  if (!(next.temperature >= 0 && next.temperature <= 2)) problems.push('temperature must be 0..2')
+  return problems
+}
+
+function sameSettings(a: TuiSettings, b: TuiSettings): boolean {
+  return (Object.keys(a) as Array<keyof TuiSettings>).every((key) => a[key] === b[key])
+}
+
+/** Keeps the typed text so a half-typed number is not rewritten mid-edit. */
+function NumberField({
+  value,
+  integer,
+  inputMode,
+  onCommit,
+}: {
+  value: number
+  integer?: boolean
+  inputMode: 'numeric' | 'decimal'
+  onCommit: (value: number) => void
+}) {
+  const parse = (raw: string) => (integer ? Number.parseInt(raw, 10) : Number.parseFloat(raw))
+  const [buffer, setBuffer] = useState<{ text: string; value: number } | null>(null)
+  // The buffer wins only while it belongs to the current value; an external change
+  // (auto-save round trip, reopen) falls back to the prop.
+  const text = buffer && buffer.value === value ? buffer.text : String(value)
+  return (
+    <Input
+      value={text}
+      onChange={(event) => {
+        const raw = event.target.value
+        const parsed = parse(raw)
+        const finite = Number.isFinite(parsed)
+        setBuffer({ text: raw, value: finite ? parsed : value })
+        if (finite) onCommit(parsed)
+      }}
+      inputMode={inputMode}
+      spellCheck={false}
+      autoComplete="off"
+    />
+  )
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
   settings,
   volumes,
-  onSave,
-  saving,
+  onChange,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   settings: TuiSettings
   volumes: TuiVolume[]
-  onSave: (next: TuiSettings) => void
-  saving: boolean
+  onChange: (next: TuiSettings) => void
 }) {
   const [draft, setDraft] = useState<TuiSettings>(settings)
   const [models, setModels] = useState<string[]>([])
   const [modelsLoading, setModelsLoading] = useState(false)
+  const edited = useRef(false)
+  const wasOpen = useRef(false)
   const loadModels = useCallback(async (endpoints: string[]) => {
     setModelsLoading(true)
     try {
@@ -67,14 +122,28 @@ export function SettingsDialog({
       setModelsLoading(false)
     }
   }, [])
+  // Reset the draft only on the closed→open edge; the auto-save round trip must not
+  // overwrite what the user is typing.
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpen.current) {
       setDraft(settings)
+      edited.current = false
       void loadModels([settings.endpoint, settings.h200Endpoint])
     }
-  }, [open, settings, loadModels])
-  const set = <K extends keyof TuiSettings>(key: K, value: TuiSettings[K]) =>
+    wasOpen.current = open
+  }, [loadModels, open, settings])
+  const problems = settingsProblems(draft)
+  // No Save button: every runnable edit is applied immediately (the App debounces
+  // the write); an invalid draft stays in the form with its reason underneath.
+  useEffect(() => {
+    if (open && edited.current && problems.length === 0 && !sameSettings(draft, settings)) {
+      onChange(draft)
+    }
+  }, [draft, onChange, open, problems.length, settings])
+  const set = <K extends keyof TuiSettings>(key: K, value: TuiSettings[K]) => {
+    edited.current = true
     setDraft((prev) => ({ ...prev, [key]: value }))
+  }
   const volumeLabel =
     volumes.find((v) => v.path === draft.volumePath)?.label ?? draft.volumePath ?? '(gate default)'
   return (
@@ -82,7 +151,7 @@ export function SettingsDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Settings"
-      description="Saved to runtime/tui-settings.json — the same file the TUI writes. Applies to the next run."
+      description="Changes save automatically to runtime/tui-settings.json — the same file the TUI writes. Applies to the next run."
       size="md"
     >
       <Shell>
@@ -168,33 +237,26 @@ export function SettingsDialog({
           />
         </FieldBlock>
         <FieldBlock label="Context size">
-          <Input
-            value={String(draft.contextSize)}
-            onChange={(event) => {
-              const v = Number.parseInt(event.target.value, 10)
-              if (Number.isFinite(v)) set('contextSize', v)
-            }}
+          <NumberField
+            value={draft.contextSize}
+            integer
             inputMode="numeric"
+            onCommit={(value) => set('contextSize', value)}
           />
         </FieldBlock>
         <FieldBlock label="Render budget">
-          <Input
-            value={String(draft.renderBudget)}
-            onChange={(event) => {
-              const v = Number.parseInt(event.target.value, 10)
-              if (Number.isFinite(v)) set('renderBudget', v)
-            }}
+          <NumberField
+            value={draft.renderBudget}
+            integer
             inputMode="numeric"
+            onCommit={(value) => set('renderBudget', value)}
           />
         </FieldBlock>
         <FieldBlock label="Temperature">
-          <Input
-            value={String(draft.temperature)}
-            onChange={(event) => {
-              const v = Number.parseFloat(event.target.value)
-              if (Number.isFinite(v)) set('temperature', v)
-            }}
+          <NumberField
+            value={draft.temperature}
             inputMode="decimal"
+            onCommit={(value) => set('temperature', value)}
           />
         </FieldBlock>
         <FieldBlock label="Think">
@@ -223,11 +285,7 @@ export function SettingsDialog({
             ))}
           </DropdownMenu>
         </FieldBlock>
-        <div className="fynns-control-cluster fynns-control-cluster--end-align">
-          <Button variant="primary" disabled={saving} onClick={() => onSave(draft)}>
-            {saving ? 'Saving…' : 'Save settings'}
-          </Button>
-        </div>
+        {problems.length > 0 ? <FieldHint error>{problems[0]}</FieldHint> : null}
       </Shell>
     </Dialog>
   )

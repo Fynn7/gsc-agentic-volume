@@ -318,7 +318,7 @@ export function TuiBlockRow({
       )
     case 'finish': {
       const claim = block.body.trim()
-      const markdown = `${tuiMark(block.kind)} ${block.title}${claim ? `\n\n${tuiMark('assistant')} ${claim}` : ''}`
+      const markdown = `${block.title}${claim ? `\n\n${tuiMark('assistant')} ${claim}` : ''}`
       return <ChatMessage role="assistant" markdown={markdown} />
     }
     case 'notices':

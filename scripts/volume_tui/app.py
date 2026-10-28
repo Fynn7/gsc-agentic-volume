@@ -282,7 +282,6 @@ def render_block(block: dict):
             text.append("\n  %s" % body.replace("\n", "\n  "), style="dim")
         return text
     if kind == transcript_mod.FINISH:
-        text.append("%s " % transcript_mod.block_mark(kind), style="green")
         text.append(title, style="green")
         if body:
             text.append("\n  %s %s" % (MODEL_MARK, body), style="dim")
@@ -427,7 +426,7 @@ class HelpScreen(DismissibleModal):
                     "                 out and what changed; ✓ when it returned,\n"
                     "                 ✗ when the renderer refused it\n"
                     "  ▣ frame        a PNG the renderer wrote (the picture is inline)\n"
-                    "  ✓ Run finished what the agent picked and what it claims\n"
+                    "  Run finished what the agent picked and what it claims\n"
                     "  ⚠ / ✗          a notice and a failure\n"
                     "\n"
                     "  The model calls and the HTTP status are technical detail:\n"

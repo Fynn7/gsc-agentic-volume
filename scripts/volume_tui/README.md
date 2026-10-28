@@ -40,7 +40,7 @@ Evidence is read-only except new runs, `verification.json`,
    D:/…/runtime/<session>/frame-1/image.png
    [the picture, inline]
  » The camera is now rotated to [25,-35,10] …
- ✓ Run finished · picked frame revision 1 · task check: unverified
+ Run finished · picked frame revision 1 · task check: unverified
    » The camera is rotated.
 ```
 

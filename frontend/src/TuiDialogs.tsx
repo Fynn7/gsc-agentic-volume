@@ -611,7 +611,7 @@ export function HelpDialog({ open, onOpenChange }: { open: boolean; onOpenChange
           '  ✓ Model answered the turn is over, there is nothing to open',
           '  ● <step>       what the agent is doing, then what went in and out',
           '  ▣ frame        a PNG the renderer wrote (click to zoom)',
-          '  ✓ Run finished what the agent picked and what it claims',
+          '  Run finished what the agent picked and what it claims',
           '  ⚠ / ✗          a notice and a failure',
         ].join('\n')}
       />

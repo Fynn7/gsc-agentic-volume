@@ -49,10 +49,8 @@ function ThinkingRow({ block }: { block: TuiBlock }) {
   const label = reasoned ? 'Thought' : 'Model answered'
   const streamingLabel = reasoned ? 'Thinking' : 'Working'
   const body = block.body.trim()
-  // Thought stays label-only (no star); Model answered owns BotIcon. Neither
-  // falls back to the core Sparkles default.
-  const reasonedIcon = null
-  const answeredIcon = <BotIcon aria-hidden />
+  // Thought stays label-only (no star); Working stays icon-free while streaming.
+  const statusIcon = !running && !reasoned ? <BotIcon aria-hidden /> : null
   return (
     <ChatMessage
       role="assistant"
@@ -64,7 +62,7 @@ function ThinkingRow({ block }: { block: TuiBlock }) {
           label={label}
           summary={block.subtitle || undefined}
           details={body ? [{ id: 'thought', text: body }] : []}
-          icon={reasoned ? reasonedIcon : answeredIcon}
+          icon={statusIcon}
           marker={reasoned ? 'none' : undefined}
         />
       }

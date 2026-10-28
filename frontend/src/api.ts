@@ -131,8 +131,18 @@ export function importVolumeFile(path: string) {
   return postJson<VolumeImport>('/api/volume/import', { path })
 }
 
+/** Import the runnable file behind a built-in preview dataset (by file stem). */
+export function importBuiltinVolume(stem: string) {
+  return postJson<VolumeImport>('/api/volume/builtin', { stem })
+}
+
 export function fetchVolumeImport(importId: string) {
   return request<VolumeImport>(`/api/volume/import/${encodeURIComponent(importId)}`)
+}
+
+/** Stems of built-in datasets that also have a runnable volume on this machine. */
+export function listRunnableBuiltins() {
+  return request<{ stems: string[] }>('/api/volume/builtins')
 }
 
 export function listVolumeImports() {

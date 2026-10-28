@@ -25,7 +25,14 @@ import {
   snackbar,
 } from '@fynns/ui'
 import { Code, Rocket } from 'lucide-react'
-import { importVolumeFile, pickVolumeFile, type VolumeImport } from '../api'
+import {
+  errorText,
+  importBuiltinVolume,
+  importVolumeFile,
+  listRunnableBuiltins,
+  pickVolumeFile,
+  type VolumeImport,
+} from '../api'
 import { GscReferenceDialog } from './gscReference'
 import { GscEditor } from './GscEditor'
 import { GSC_LANGUAGE } from './gscHighlight'
@@ -128,6 +135,10 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [externalIndex, setExternalIndex] = useState<number | null>(null)
   const [referenceOpen, setReferenceOpen] = useState(false)
+  // Built-in datasets that also exist as runnable volumes on this machine; the
+  // others can only ever drive the preview. `null` until the probe answered —
+  // an unknown state must not claim "run + preview".
+  const [runnableStems, setRunnableStems] = useState<string[] | null>(null)
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const hostRef = useRef<WasmHost | null>(null)
@@ -178,6 +189,19 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   useEffect(() => {
     storeDraft(gscText)
   }, [gscText])
+
+  // Which built-ins can also be run volumes here (materialized files exist).
+  useEffect(() => {
+    let cancelled = false
+    void listRunnableBuiltins()
+      .then((data) => {
+        if (!cancelled) setRunnableStems(data.stems ?? [])
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Preview push policy: every committed params change is pushed to Wasm
   // immediately — the original live behavior: the canvas follows the hand
@@ -669,38 +693,89 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     }
   }, [ensureExternalLoaded, onPreviewImport, onSourceChange])
 
+  // Select the external slot that belongs to `record`: load it when this
+  // import was never loaded into the current engine, otherwise just point at
+  // the slot the C++ side reported. Never guesses the index.
+  const selectExternal = useCallback(
+    (record: VolumeImport) => {
+      const host = hostRef.current
+      const known = externalIndex != null && externalIndex >= BUILTIN_DATASETS.length ? externalIndex : null
+      if (host && (syncedImportId !== record.importId || known == null)) {
+        void ensureExternalLoaded(host, record)
+          .then((slot) => {
+            if (slot != null) setParams((prev) => ({ ...prev, dataset: slot }))
+            setSyncedImportId(record.importId)
+          })
+          .catch((err: unknown) => {
+            snackbar(`External preview failed: ${errorText(err)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
+          })
+        return
+      }
+      if (known != null) setParams((prev) => (prev.dataset === known ? prev : { ...prev, dataset: known }))
+      // No engine yet: boot loads the import before its first push and the
+      // follow effect selects the reported slot afterwards.
+    },
+    [ensureExternalLoaded, errorText, externalIndex, syncedImportId],
+  )
+
   const handleDatasetChange = useCallback(
     (index: number) => {
-      const host = hostRef.current
       if (index >= BUILTIN_DATASETS.length) {
         const record = previewImportRef.current
         if (!record) {
           void handleImportPick()
           return
         }
-        // Already loaded: just select it. Never guess a slot index — an extra
-        // load would append another copy and shift the index.
-        if (host && syncedImportId !== record.importId) {
-          void ensureExternalLoaded(host, record)
-            .then((slot) => {
-              if (slot != null) setParams((prev) => ({ ...prev, dataset: slot }))
-              setSyncedImportId(record.importId)
-            })
-            .catch((err) => {
-              snackbar(`External preview failed: ${err instanceof Error ? err.message : String(err)}`, {
-                severity: 'error',
-                duration: 'long',
-                dismissible: true,
-              })
-            })
-          return
-        }
-        setParams((prev) => ({ ...prev, dataset: externalIndex ?? prev.dataset }))
+        selectExternal(record)
         return
       }
+      const builtin = BUILTIN_DATASETS[index]
+      // Attempt the import when the probe has not answered yet too: a missing
+      // runnable file surfaces as a clear error instead of a silent preview.
+      if (builtin?.sourceStem && (runnableStems == null || runnableStems.includes(builtin.sourceStem))) {
+        // This built-in also exists as a real file: pick it as the run volume
+        // (the next run reads it) and let the follow path render it, instead of
+        // showing a Wasm copy while the agent keeps the previous file.
+        void importBuiltinVolume(builtin.sourceStem)
+          .then((record) => {
+            onPreviewImport(record)
+            onSourceChange(record.source)
+            // The follow effect treats this import as already applied (same
+            // id), so re-selecting it after browsing a preview-only built-in
+            // has to happen here.
+            selectExternal(record)
+            snackbar(`${builtin.name} is now the run volume.`, {
+              severity: 'info',
+              duration: 'long',
+              dismissible: true,
+            })
+          })
+          .catch((err: unknown) => {
+            // No materialized file: keep the built-in preview, and say plainly
+            // that the run volume did not change.
+            setParams((prev) => ({ ...prev, dataset: index }))
+            snackbar(
+              `${builtin.name} is preview-only here: ${errorText(err)} The run still uses ${
+                previewImportRef.current?.source ?? 'the selected file'
+              }.`,
+              { severity: 'error', duration: 'long', dismissible: true },
+            )
+          })
+        return
+      }
+      // Procedural dataset: no file can feed the native renderer.
       setParams((prev) => ({ ...prev, dataset: index }))
+      snackbar(`${builtin?.name ?? 'This dataset'} is preview-only — the run keeps the selected volume file.`, {
+        severity: 'info',
+        duration: 'long',
+        dismissible: true,
+      })
     },
-    [ensureExternalLoaded, externalIndex, handleImportPick, syncedImportId],
+    [ensureExternalLoaded, errorText, handleImportPick, onPreviewImport, onSourceChange, runnableStems, selectExternal],
   )
 
   const updateParams = useCallback(
@@ -852,6 +927,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
   const showingExternal = params.dataset >= BUILTIN_DATASETS.length
   const inSync =
     previewImport != null && showingExternal && syncedImportId === previewImport.importId
+  const previewingBuiltin = params.dataset < BUILTIN_DATASETS.length
   const currentDataset = params.dataset
   const datasetTriggerLabel = currentDataset < BUILTIN_DATASETS.length ? datasetLabel(currentDataset) : externalLabel
   const virtualDisabled = !isVirtualMethod(params.method)
@@ -904,20 +980,25 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
             <FieldStack>
               <FieldBlock label="Dataset">
                 <DropdownMenu trigger={datasetTriggerLabel} ariaLabel="Dataset">
-                  {BUILTIN_DATASETS.map((_, i) => (
+                  {BUILTIN_DATASETS.map((item, i) => (
                     <DropdownMenuItem
                       key={i}
                       icon={currentDataset === i ? <CheckIcon aria-hidden /> : undefined}
                       onClick={() => handleDatasetChange(i)}
                     >
                       {datasetLabel(i)}
+                      {runnableStems == null
+                        ? ''
+                        : item.sourceStem && runnableStems.includes(item.sourceStem)
+                          ? ' — run + preview'
+                          : ' — preview only'}
                     </DropdownMenuItem>
                   ))}
                   <DropdownMenuItem
                     icon={currentDataset >= BUILTIN_DATASETS.length ? <CheckIcon aria-hidden /> : undefined}
                     onClick={() => handleDatasetChange(BUILTIN_DATASETS.length)}
                   >
-                    {externalLabel}
+                    {externalLabel} — run + preview
                   </DropdownMenuItem>
                 </DropdownMenu>
               </FieldBlock>
@@ -925,12 +1006,16 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
               <ControlBlock
                 description={
                   inSync
-                    ? `Previewing the selected volume: ${source}`
-                    : previewImport
-                      ? `Selected volume: ${previewImport.source} — not shown yet (still on a built-in dataset)`
-                      : source
-                        ? `Selected volume: ${source} — no preview import yet`
-                        : 'Pick a header; conversion reuses volume.py render.dat/raw.'
+                    ? `Run volume = preview: ${source}`
+                    : previewingBuiltin
+                      ? `Preview only: ${datasetLabel(params.dataset)} — the run still uses ${
+                          previewImport?.source ?? source ?? 'the file you import'
+                        }`
+                      : previewImport
+                        ? `Selected volume: ${previewImport.source} — not shown yet (still on a built-in dataset)`
+                        : source
+                          ? `Selected volume: ${source} — no preview import yet`
+                          : 'Pick a header; conversion reuses volume.py render.dat/raw.'
                 }
               >
                 <ControlRow label="Volume file (.dat/.nhdr/.nrrd)">

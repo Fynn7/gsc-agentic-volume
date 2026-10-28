@@ -68,5 +68,31 @@ class VolumeImportSnapshot(unittest.TestCase):
             shutil.rmtree(session.directory, ignore_errors=True)
 
 
+class MaterializedBuiltinVolume(unittest.TestCase):
+    """The Stage may only offer "run + preview" for a built-in that has a file."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.previous = app.ROOT
+        app.ROOT = Path(self.temp.name)
+        (app.ROOT / 'volumes').mkdir()
+
+    def tearDown(self):
+        app.ROOT = self.previous
+        self.temp.cleanup()
+
+    def test_absent_file_means_preview_only(self):
+        self.assertIsNone(app.materialized_builtin('head512'))
+
+    def test_materialized_file_is_found(self):
+        target = app.ROOT / 'volumes' / 'head512_8x8x8_uint8.dat'
+        target.write_text('ObjectFileName: x.raw\nResolution: 8 8 8\n', encoding='utf-8')
+        self.assertEqual(app.materialized_builtin('head512'), target)
+
+    def test_stem_is_not_a_path(self):
+        for stem in ('../secrets', '..\\secrets', 'head/512', '', None, 7):
+            self.assertIsNone(app.materialized_builtin(stem), stem)
+
+
 if __name__ == '__main__':
     unittest.main()

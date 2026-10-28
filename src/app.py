@@ -2,6 +2,7 @@
 import argparse
 import json
 import copy
+import re
 import sys
 import threading
 import time
@@ -86,6 +87,46 @@ def get_volume_import(import_id):
         except Exception as error:
             raise ValueError(f'Volume import is unreadable: {error}')
     raise ValueError('Unknown volume import')
+
+
+def find_import_by_source(source):
+    """Reuse an existing import for the same source file instead of converting twice."""
+    target = str(Path(source).resolve())
+    with VOLUME_IMPORTS_LOCK:
+        for record in VOLUME_IMPORTS.values():
+            if record.get('source') == target:
+                return record
+    try:
+        children = sorted(imports_root().iterdir())
+    except OSError:
+        return None
+    for child in children:
+        meta = child / 'import.json'
+        if not meta.is_file():
+            continue
+        try:
+            data = json.loads(meta.read_text())
+        except (OSError, ValueError):
+            continue
+        if str(data.get('source') or '') == target:
+            try:
+                return get_volume_import(str(data.get('importId') or child.name))
+            except ValueError:
+                return None
+    return None
+
+
+def materialized_builtin(stem):
+    """Path of the runnable file for a built-in preview dataset, or None.
+
+    Built-in datasets ship as QVis **lz4** payloads that the import chain cannot
+    read, so ``scripts/materialize_dataset.py`` writes one plain uint8 volume per
+    stem into ``volumes/``. Only that materialized file can feed the renderer.
+    """
+    if not isinstance(stem, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', stem.strip()):
+        return None
+    matches = sorted((ROOT / 'volumes').glob('%s_*_uint8.dat' % stem.strip()))
+    return matches[0] if matches else None
 
 
 def pick_volume_file():
@@ -418,6 +459,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {'service': 'gav-native-renderer', 'toolContractVersion': 1})
         if route == '/api/sessions':
             return self.send(200, [{'id': s.id, 'state': s.state} for s in sessions.values()])
+        if route == '/api/volume/builtins':
+            # Which built-in preview datasets also exist as runnable volumes on
+            # this machine; anything else is preview-only in the Stage menu.
+            stems = []
+            try:
+                for path in sorted((ROOT / 'volumes').glob('*_*x*x*_uint8.dat')):
+                    stem = path.name.split('_')[0]
+                    if stem and stem not in stems:
+                        stems.append(stem)
+            except OSError:
+                stems = []
+            return self.send(200, {'stems': stems})
         if route == '/api/volume/imports':
             items = []
             try:
@@ -650,6 +703,21 @@ class Handler(BaseHTTPRequestHandler):
                 sessions[s.id] = s
                 threading.Thread(target=s.run, daemon=True).start()
                 return self.send(202, {'id': s.id})
+            if route == '/api/volume/builtin':
+                # Built-in preview dataset -> runnable volume. The Stage's
+                # Dataset selector drives the run volume through this route, so
+                # "selected head" can never silently keep running foot.
+                stem = str(body.get('stem') or '').strip()
+                path = materialized_builtin(stem)
+                if path is None:
+                    return self.send(404, {'error': (
+                        '%s has no runnable volume on this machine. Materialize it once with '
+                        'python scripts/materialize_dataset.py VirtualSampling/Raycaster/Datasets/%s.dat'
+                        % (stem or '(no stem)', stem or '<name>'))})
+                record = find_import_by_source(path) or create_volume_import(str(path))
+                return self.send(200, {'importId': record['importId'], 'source': record['source'],
+                                       'volume': record['volume'], 'datUrl': record['datUrl'],
+                                       'rawUrl': record['rawUrl']})
             if route == '/api/volume/import':
                 source = body.get('path', body.get('source', ''))
                 record = create_volume_import(source)

@@ -547,8 +547,13 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
             if (disposed) return
             // Adopt the real slot index and only then record the import as
             // applied: without a confirmed slot the follow effect must retry.
+            // Commit through the ref as well: the first control push below
+            // reads paramsRef, and a stale stored dataset (e.g. a built-in
+            // from the previous session) would otherwise win over this slot.
             if (slot != null) {
-              queueParamsPatch({ dataset: slot })
+              const adopted = { ...paramsRef.current, dataset: slot }
+              paramsRef.current = adopted
+              setParams(adopted)
               setSyncedImportId(known.importId)
             }
           } catch {
@@ -929,7 +934,25 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
     previewImport != null && showingExternal && syncedImportId === previewImport.importId
   const previewingBuiltin = params.dataset < BUILTIN_DATASETS.length
   const currentDataset = params.dataset
-  const datasetTriggerLabel = currentDataset < BUILTIN_DATASETS.length ? datasetLabel(currentDataset) : externalLabel
+  // A built-in that was chosen as the run volume is stored as the external
+  // import of its materialized file. Present it as the built-in again, so a
+  // reopened app does not show "External — head512_…" for a choice the user
+  // made in the Dataset list.
+  const builtinMatchIndex = (() => {
+    if (!previewImport) return -1
+    const base = (previewImport.source.split(/[\\/]/).pop() ?? '').toLowerCase()
+    if (!base) return -1
+    return BUILTIN_DATASETS.findIndex(
+      (item) => item.sourceStem != null && base.startsWith(`${item.sourceStem.toLowerCase()}_`),
+    )
+  })()
+  const selectedBuiltinIndex = builtinMatchIndex >= 0 ? builtinMatchIndex : currentDataset < BUILTIN_DATASETS.length ? currentDataset : -1
+  const datasetTriggerLabel =
+    builtinMatchIndex >= 0
+      ? datasetLabel(builtinMatchIndex)
+      : currentDataset < BUILTIN_DATASETS.length
+        ? datasetLabel(currentDataset)
+        : externalLabel
   const virtualDisabled = !isVirtualMethod(params.method)
 
   return (
@@ -983,7 +1006,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
                   {BUILTIN_DATASETS.map((item, i) => (
                     <DropdownMenuItem
                       key={i}
-                      icon={currentDataset === i ? <CheckIcon aria-hidden /> : undefined}
+                      icon={selectedBuiltinIndex === i ? <CheckIcon aria-hidden /> : undefined}
                       onClick={() => handleDatasetChange(i)}
                     >
                       {datasetLabel(i)}
@@ -995,7 +1018,7 @@ export function LiveStage({ source, previewImport, onPreviewImport, onSourceChan
                     </DropdownMenuItem>
                   ))}
                   <DropdownMenuItem
-                    icon={currentDataset >= BUILTIN_DATASETS.length ? <CheckIcon aria-hidden /> : undefined}
+                    icon={selectedBuiltinIndex < 0 ? <CheckIcon aria-hidden /> : undefined}
                     onClick={() => handleDatasetChange(BUILTIN_DATASETS.length)}
                   >
                     {externalLabel} — run + preview

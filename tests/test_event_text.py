@@ -52,8 +52,8 @@ class ToolActions(unittest.TestCase):
         self.assertEqual(event_text.effect_lines(None), [])
 
     def test_the_notices_are_one_line(self):
-        self.assertIn("1 harness notice", event_text.notice_headline(1))
-        self.assertIn("2 harness notices", event_text.notice_headline(2))
+        self.assertEqual("1 harness warning", event_text.notice_headline(1))
+        self.assertEqual("2 harness warnings", event_text.notice_headline(2))
 
     def test_the_glossary_explains_the_words_of_the_screen(self):
         terms = [term for term, _meaning in event_text.GLOSSARY]

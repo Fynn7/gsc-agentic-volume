@@ -295,8 +295,8 @@
 }
 
 /*
- * Harness notices: one collapsed row (info icon + label); the warning text
- * lives inside the disclosure as quiet gray small copy.
+ * Harness warnings stay independent from the terminal work summary while
+ * retaining the quiet gray detail treatment.
  */
 .gav-harness-notice .fynns-chat-thinking-text {
   color: var(--fynns-color-text-muted);

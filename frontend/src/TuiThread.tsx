@@ -7,8 +7,8 @@
  * - model turns -> ChatMessage.thinking + ChatThinking (disclosure while the
  *   chain exists, status strip otherwise; streaming while running)
  * - tool calls -> one ChatThinking row (active = *-ing, done = past)
- * - frames/answers/errors/notices -> ChatMessage rows (errors are one plain
- *   red line with hover retry) or InlineAlert quiet rows
+ * - frames/answers/errors/warnings -> ChatMessage rows (errors are one plain
+ *   red line with hover retry) or independent ChatThinking rows
  * - transport (meta) -> hidden unless the caller passes showPlumbing (Ctrl+H)
  */
 import { useEffect, useRef, useState } from 'react'
@@ -146,11 +146,6 @@ export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalS
         if (!claim) return { id, label: block.title, icon: <CheckCircleIcon aria-hidden /> }
         return { id, label: block.title, icon: <CheckCircleIcon aria-hidden />, details: [{ id: `${id}-body`, text: claim }] }
       }
-      case 'notices': {
-        const body = block.body.trim()
-        if (!body) return { id, label: block.title, icon: <InfoIcon aria-hidden /> }
-        return { id, label: block.title, icon: <InfoIcon aria-hidden />, details: [{ id: `${id}-body`, text: body }] }
-      }
       case 'notice':
       case 'meta':
       default:
@@ -161,6 +156,24 @@ export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalS
     <ChatMessage
       role="assistant"
       thinking={<ChatThinking label={label} details={details} icon={null} marker="none" />}
+    />
+  )
+}
+
+/** Harness warnings stay visible as independent gray detail rows. */
+function HarnessWarningRow({ block }: { block: TuiBlock }) {
+  const title = block.title.trim() || 'Harness warning'
+  const body = block.body.trim()
+  if (!body) {
+    return <ChatThinking variant="status" label={title} details={[]} icon={<InfoIcon aria-hidden />} className="gav-harness-notice" />
+  }
+  return (
+    <ChatThinking
+      variant="disclosure"
+      label={title}
+      details={[{ id: 'warning-body', text: body }]}
+      icon={<InfoIcon aria-hidden />}
+      className="gav-harness-notice"
     />
   )
 }
@@ -303,60 +316,10 @@ export function TuiBlockRow({
       const markdown = `${tuiMark(block.kind)} ${block.title}${claim ? `\n\n${tuiMark('assistant')} ${claim}` : ''}`
       return <ChatMessage role="assistant" markdown={markdown} />
     }
-    case 'notices': {
-      const lines = block.body
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
-      const details = lines.map((text, index) => ({ id: `notice-${index}`, text }))
-      if (details.length === 0) {
-        return (
-          <ChatMessage
-            role="assistant"
-            thinking={<ChatThinking variant="status" label={block.title || 'harness notices'} details={[]} icon={<InfoIcon aria-hidden />} />}
-          />
-        )
-      }
-      return (
-        <ChatMessage
-          role="assistant"
-          thinking={
-            <ChatThinking
-              variant="disclosure"
-              label={block.title || 'harness notices'}
-              details={details}
-              icon={<InfoIcon aria-hidden />}
-              className="gav-harness-notice"
-            />
-          }
-        />
-      )
-    }
+    case 'notices':
+      return <HarnessWarningRow block={block} />
     case 'warn': {
-      const body = block.body.trim()
-      const label = block.title || 'harness notice'
-      if (!body) {
-        return (
-          <ChatMessage
-            role="assistant"
-            thinking={<ChatThinking variant="status" label={label} details={[]} icon={<InfoIcon aria-hidden />} className="gav-harness-notice" />}
-          />
-        )
-      }
-      return (
-        <ChatMessage
-          role="assistant"
-          thinking={
-            <ChatThinking
-              variant="disclosure"
-              label={label}
-              details={[{ id: 'warn-body', text: body }]}
-              icon={<InfoIcon aria-hidden />}
-              className="gav-harness-notice"
-            />
-          }
-        />
-      )
+      return <HarnessWarningRow block={block} />
     }
     case 'notice':
       return (

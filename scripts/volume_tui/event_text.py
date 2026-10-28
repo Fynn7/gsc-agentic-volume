@@ -232,18 +232,16 @@ def effect_lines(parameters):
 
 
 def notices_label(count):
-    """How many harness notices there are (without the key hint)."""
+    """How many harness warnings there are."""
     count = int(count or 0)
     if count <= 1:
-        return "1 harness notice"
-    return "%d harness notices" % count
+        return "1 harness warning"
+    return "%d harness warnings" % count
 
 
 def notice_headline(count):
-    """One line for the harness notices (they do not stop the run)."""
-    count = int(count or 0)
-    hint = "Ctrl+H reads it" if count <= 1 else "Ctrl+H reads them"
-    return "%s · %s" % (notices_label(count), hint)
+    """One line for the harness warnings (they do not stop the run)."""
+    return notices_label(count)
 
 
 def compaction_headline(left) -> str:

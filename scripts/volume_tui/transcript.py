@@ -329,7 +329,7 @@ class Transcript:
         self._thinking_call = None  # the model call the open block reasons about
         self._tools: dict[str, dict] = {}   # tool name -> open tool block
         self._answer_text = ""    # the answer as the model stream delivers it
-        self._notices: list[str] = []   # the harness notices, one row for all
+        self._notices: list[str] = []   # the harness warnings, one row for all
 
     # -- block helpers ---------------------------------------------------
     def clear(self) -> None:
@@ -797,7 +797,7 @@ class Transcript:
                          ts=event.get("ts"))]
 
     def _ingest_warn(self, event: dict) -> list[dict]:
-        """The harness notices: one row for all of them.
+        """The harness warnings: one row for all of them.
 
         The harness reports its own housekeeping (an under-development
         feature, a missing model description). Those are not errors and they

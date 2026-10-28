@@ -292,7 +292,7 @@ the window.
   (`transcript.MARKS`, `transcript.thinking_row_parts`,
   `transcript.tool_row_parts`): the screen paints the roles, the log writes
   them. The log opens what the screen folds away: the reasoning chain and
-  the harness notices (a file has no keys). The transport (the model calls,
+  the harness warnings (a file has no keys). The transport (the model calls,
   the HTTP status) stays out: it belongs to the JSON log. Every row carries a
   time — the time of the step when the evidence knows it (the task, the tool
   calls, the frames), the moment the TUI read it otherwise (the model's own

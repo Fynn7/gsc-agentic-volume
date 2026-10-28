@@ -1606,7 +1606,7 @@ function App() {
   // outside). Figures and alerts cannot nest inside thinking, so they stay
   // rows too.
   const terminal = transcript != null && transcript.status !== 'running' && pending === null
-  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'notices', 'notice', 'meta'])
+  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'notice', 'meta'])
   // The run's final answer: last assistant block in transcript order.
   const finalAnswerIndex = transcript
     ? transcript.blocks.map((block) => block.kind).lastIndexOf('assistant')

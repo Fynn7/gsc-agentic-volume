@@ -265,7 +265,7 @@ def render_block(block: dict):
             text.append("  %s" % subtitle, style="dim")
         return text
     if kind == transcript_mod.NOTICES:
-        # The harness notices: one row, quiet, with the text behind Ctrl+H.
+        # Harness warnings stay as one quiet row.
         text.append("%s " % transcript_mod.block_mark(kind), style="yellow")
         text.append(title, style="yellow")
         if body and data.get("plumbing_visible"):

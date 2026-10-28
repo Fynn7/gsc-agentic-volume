@@ -284,7 +284,7 @@ class TranscriptBlocks(unittest.TestCase):
         notices = [block for block in self.transcript.blocks
                    if block["kind"] == tui_transcript.NOTICES]
         self.assertEqual(len(notices), 1)
-        self.assertIn("2 harness notices", notices[0]["title"])
+        self.assertIn("2 harness warnings", notices[0]["title"])
         self.assertIn("Model metadata not found", notices[0]["body"])
 
     def test_the_transport_rows_are_marked_as_plumbing(self):

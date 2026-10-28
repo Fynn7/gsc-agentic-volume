@@ -599,7 +599,6 @@ export function HelpDialog({ open, onOpenChange }: { open: boolean; onOpenChange
           '/              slash commands with a menu (Up/Down moves, Tab completes, Enter runs, Esc closes)',
           'F1             this help',
           'F2             the glossary: what the words of the screen mean',
-          'Ctrl+H         the technical rows (the model calls, the HTTP status)',
           'Ctrl+Q         stop what the GUI started, then clear the view',
           '',
           'WHAT THE TRANSCRIPT SHOWS',

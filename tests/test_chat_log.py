@@ -137,7 +137,7 @@ class ChatLogText(unittest.TestCase):
         transcript.ingest({"kind": "warn",
                            "message": "Under-development features enabled"})
         text = tui_chat_log.chat_log_text(transcript.blocks)
-        # The log opens what the screen folds behind Ctrl+H.
+        # The log remains the complete record even when the UI hides transport.
         self.assertIn("Under-development features enabled", text)
         self.assertNotIn("Ctrl+H", text)
 

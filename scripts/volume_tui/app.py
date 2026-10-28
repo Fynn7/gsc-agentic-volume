@@ -401,7 +401,6 @@ class HelpScreen(DismissibleModal):
                     "                 / to list them, Enter runs the match)\n"
                     "  F1             this help\n"
                     "  F2             the glossary: what the words of the screen mean\n"
-                    "  Ctrl+H         the technical rows (model calls, HTTP status)\n"
                     "  Ctrl+T         light / dark\n"
                     "  Ctrl+Q         quit (asks first while a run is live)\n"
                     "  Ctrl+C         copy the selected text (shows 拷贝成功);\n"
@@ -432,7 +431,7 @@ class HelpScreen(DismissibleModal):
                     "  ⚠ / ✗          a notice and a failure\n"
                     "\n"
                     "  The model calls and the HTTP status are technical detail:\n"
-                    "  Ctrl+H shows them, the evidence always has them.\n"
+                    "  they stay in the evidence and are not shown in the conversation.\n"
                     "\n"
                     "EVIDENCE\n"
                     "  Evidence is read-only except new runs, verification.json and\n"
@@ -1873,7 +1872,6 @@ if _TEXTUAL:
         BINDINGS = [
             Binding("f1", "help", "Help"),
             Binding("f2", "glossary", "Glossary"),
-            Binding("ctrl+h", "toggle_plumbing", "Technical"),
             Binding("ctrl+t", "toggle_dark", "Theme"),
             Binding("ctrl+q", "quit", "Quit"),
             Binding("escape", "interrupt_run", "Stop"),
@@ -1924,9 +1922,6 @@ if _TEXTUAL:
             self._poll_running = False
             self._poll_lock = threading.Lock()
             self._read_lock = threading.Lock()
-            # The technical rows (model calls, HTTP status) stay hidden until
-            # Ctrl+H asks for them: the steps of the run are the story.
-            self.show_plumbing = False
             # Slash menu (opencode-style): typed in the composer, not a modal.
             self._slash_open = False
             self._slash_selected = 0
@@ -2136,7 +2131,7 @@ if _TEXTUAL:
                 "Volume Agent - you write a task, the model asks the renderer for\n"
                 "pictures and picks one as the result.\n"
                 "Each picture costs one observation (the top line shows the budget).\n"
-                "F2 the words - / the commands - Ctrl+H the technical rows"))
+                "F2 the words - / the commands"))
             self._sync_transcript()
 
         # -- the conversation ----------------------------------------------
@@ -2151,10 +2146,6 @@ if _TEXTUAL:
             live = {id(block) for block in self.transcript.blocks}
             added = False
             for block in self.transcript.blocks:
-                # The technical view is a screen setting: every block follows it.
-                data = block.get("data")
-                if isinstance(data, dict):
-                    data["plumbing_visible"] = self.show_plumbing
             for block, widget in list(self._widgets):
                 if id(block) not in live:
                     # The block was reclassified (the words before a tool call
@@ -2201,18 +2192,11 @@ if _TEXTUAL:
             return TranscriptBlock(block)
 
         def _block_visible(self, block: dict) -> bool:
-            """Is this row part of the story?
-
-            The transport (the model calls, the HTTP status) is plumbing: it
-            is written to the evidence, but it only appears on screen when
-            Ctrl+H asks for the technical view.
-            """
-            if not transcript_mod.is_plumbing(str(block.get("kind"))):
-                return True
-            return bool(self.show_plumbing)
+            """Is this row part of the user-facing story?"""
+            return not transcript_mod.is_plumbing(str(block.get("kind")))
 
         def _set_visible(self, widget, visible: bool) -> None:
-            """Show or hide one row (the plumbing rows are hidden by default)."""
+            """Show or hide one row."""
             try:
                 widget.display = bool(visible)
             except Exception:
@@ -3113,17 +3097,6 @@ if _TEXTUAL:
         def action_glossary(self) -> None:
             """F2: the words the screen uses, explained."""
             self.push_screen(GlossaryScreen(), callback=self._modal_closed)
-
-        def action_toggle_plumbing(self) -> None:
-            """Ctrl+H: the technical rows (model calls, HTTP status).
-
-            The steps of the run are the default view. The transport is one
-            key press away, for whoever needs it.
-            """
-            self.show_plumbing = not self.show_plumbing
-            self._sync_transcript()
-            self.notify("Technical rows: %s" % ("on" if self.show_plumbing else "off"),
-                        timeout=3, markup=False)
 
         def action_toggle_dark(self) -> None:
             """Ctrl+T switches between the light and the dark theme."""

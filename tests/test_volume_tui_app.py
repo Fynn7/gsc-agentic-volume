@@ -544,7 +544,7 @@ class CodingAgentScreen(unittest.TestCase):
                     self.assertIn("present246x246x221.dat", status)
         asyncio.run(_run())
 
-    def test_the_transport_rows_stay_hidden_until_ctrl_h(self):
+    def test_the_transport_rows_stay_hidden_in_the_ui(self):
         import asyncio
 
         async def _run():
@@ -558,7 +558,7 @@ class CodingAgentScreen(unittest.TestCase):
                 ])
                 await pilot.pause()
                 text = _conversation_text(app)
-                # The step is the story; the transport is behind a key press.
+                # The step is the story; transport stays in the evidence only.
                 self.assertIn("Rendering the frame", text)
                 # The raw tool name is not on the row: the row is facts.
                 self.assertNotIn("render_scene", text)
@@ -566,9 +566,10 @@ class CodingAgentScreen(unittest.TestCase):
                         if "model call #1" in str(widget.render())]
                 self.assertTrue(rows)
                 self.assertFalse(rows[0].display)
-                app.action_toggle_plumbing()
-                await pilot.pause()
-                self.assertTrue(rows[0].display)
+                self.assertTrue(any(
+                    block.get("title") == "model call #1"
+                    for block in app.transcript.blocks
+                ))
         asyncio.run(_run())
 
     def test_f2_opens_the_glossary(self):

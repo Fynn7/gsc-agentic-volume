@@ -115,8 +115,7 @@ def block_lines(block: dict) -> list[str]:
     if kind == transcript_mod.ERROR:
         return _row_lines(mark, title) + _lines(body, indent_first=True)
     if kind == transcript_mod.NOTICES:
-        # The screen folds the notices behind Ctrl+H; the log opens them
-        # (a file has no keys). The label itself is the screen's.
+        # The log opens the notices; a file has no screen controls.
         count = len(data.get("notices") or [])
         headline = text_mod.notices_label(count) if count else title
         return ["%s %s" % (mark, headline)] + _lines(body, indent_first=True)
@@ -162,7 +161,7 @@ def chat_log_text(blocks, *, run_id=None, model=None, run_dir=None,
         if not isinstance(block, dict):
             continue
         # The transport (the model calls, the HTTP status) is not part of
-        # the conversation: the screen hides it until Ctrl+H asks for it.
+        # the conversation: it belongs to the evidence record only.
         if transcript_mod.is_plumbing(str(block.get("kind") or "")):
             continue
         stamp = _stamp(block.get("ts"))

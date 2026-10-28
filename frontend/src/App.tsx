@@ -238,7 +238,6 @@ function App() {
   const [pending, setPending] = useState<Pending>(null)
   const startStampRef = useRef(0)
 
-  const [showPlumbing, setShowPlumbing] = useState(false)
   const [slashSel, setSlashSel] = useState(0)
 
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -1523,7 +1522,7 @@ function App() {
     }
   }, [])
 
-  /* -- global keys: F1/F2/Ctrl+H/Ctrl+T/Ctrl+Q/Esc ---------------------------- */
+  /* -- global keys: F1/F2/Ctrl+T/Ctrl+Q/Esc ----------------------------------- */
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1538,11 +1537,6 @@ function App() {
       if (event.key === 'F2') {
         event.preventDefault()
         setGlossaryOpen(true)
-        return
-      }
-      if (event.ctrlKey && (event.key === 'h' || event.key === 'H')) {
-        event.preventDefault()
-        setShowPlumbing((v) => !v)
         return
       }
       if (event.ctrlKey && (event.key === 't' || event.key === 'T')) {
@@ -1606,20 +1600,19 @@ function App() {
   // outside). Figures, alerts, and run notices cannot nest inside thinking,
   // so they stay rows too.
   const terminal = transcript != null && transcript.status !== 'running' && pending === null
-  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'meta'])
+  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish'])
+  const visibleBlocks = transcript?.blocks.filter((block) => block.kind !== 'meta') ?? []
   // The run's final answer: last assistant block in transcript order.
-  const finalAnswerIndex = transcript
-    ? transcript.blocks.map((block) => block.kind).lastIndexOf('assistant')
-    : -1
+  const finalAnswerIndex = visibleBlocks.map((block) => block.kind).lastIndexOf('assistant')
   if (transcript && transcript.runId !== 'local-start-failed') {
-    const initialThinkingIndex = transcript.blocks.findIndex((block) => block.kind === 'thinking')
+    const initialThinkingIndex = visibleBlocks.findIndex((block) => block.kind === 'thinking')
     const workedBlocks = terminal
-      ? transcript.blocks.filter(
+      ? visibleBlocks.filter(
           (block, index) => collapsibleKinds.has(block.kind) && index !== finalAnswerIndex,
         )
       : []
     let workedInserted = workedBlocks.length === 0
-    transcript.blocks.forEach((block, index) => {
+    visibleBlocks.forEach((block, index) => {
       if (terminal && collapsibleKinds.has(block.kind) && index !== finalAnswerIndex) {
         if (!workedInserted) {
           workedInserted = true
@@ -1634,7 +1627,6 @@ function App() {
           key={`${block.kind}-${index}`}
           block={block}
           initialThinking={index === initialThinkingIndex}
-          showPlumbing={showPlumbing}
           onZoom={openZoom}
           onRetryError={() => void startCustomRun(transcript.task || '', 'custom')}
         />

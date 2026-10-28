@@ -283,8 +283,6 @@ GLOSSARY = (
     ("context checkpoint", "the model's summary of what the run knew when its "
                           "context filled up. Housekeeping, not an answer: it "
                           "gets its own row (◈), never a » line."),
-    ("model call", "one request to the model. Technical detail (Ctrl+H)."),
-    ("HTTP 200", "the model answered without an error. Technical detail (Ctrl+H)."),
     ("harness", "the program that runs the model and hands it the renderer tools."),
     ("renderer", "the program that draws a picture from the volume."),
     ("loopback", "a service on this computer only (127.0.0.1), not the internet."),

@@ -9,7 +9,7 @@
  * - tool calls -> one ChatThinking row (active = *-ing, done = past)
  * - frames/answers/errors/warnings -> ChatMessage rows (errors are one plain
  *   red line with hover retry) or independent ChatThinking rows
- * - transport (meta) -> hidden unless the caller passes showPlumbing (Ctrl+H)
+ * - transport (meta) -> retained in evidence, never rendered in the conversation
  */
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -281,17 +281,15 @@ function FrameFigure({
   )
 }
 
-/** One transcript block as core chat rows. Returns null for hidden plumbing. */
+/** One transcript block as core chat rows. */
 export function TuiBlockRow({
   block,
   initialThinking = false,
-  showPlumbing,
   onZoom,
   onRetryError,
 }: {
   block: TuiBlock
   initialThinking?: boolean
-  showPlumbing: boolean
   onZoom: (payload: ZoomPayload) => void
   onRetryError?: (block: TuiBlock) => void
 }) {
@@ -352,13 +350,7 @@ export function TuiBlockRow({
       return <ErrorRow message={block.title} onRetry={onRetryError ? () => onRetryError(block) : undefined} />
     }
     case 'meta':
-      if (!showPlumbing) return null
-      return (
-        <ChatMessage
-          role="assistant"
-          thinking={<ChatThinking variant="status" label={block.title} details={[]} icon={null} marker="none" />}
-        />
-      )
+      return null
     default:
       return null
   }

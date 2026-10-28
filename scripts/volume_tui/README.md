@@ -71,9 +71,9 @@ Evidence is read-only except new runs, `verification.json`,
   does:" in front of the numbers — the numbers say themselves. The raw tool
   names are not on the rows either; the glossary (F2) names them.
 - The **transport is hidden**: the model calls and the HTTP status are written
-  to the evidence, but they only appear on screen with **Ctrl+H**. The harness
-  notices (an under-development feature, a missing model description) are one
-  quiet row instead of a wall of jargon.
+  to the evidence but are not shown in the conversation. The harness notices
+  (an under-development feature, a missing model description) are one quiet
+  row instead of a wall of jargon.
 - The **model turn** line says **Thinking** / **Thought** when the model
   really reasoned, and **Working** / **Model answered** when it did not —
   the Think setting is off, and the screen never claims reasoning that the
@@ -101,7 +101,6 @@ Evidence is read-only except new runs, `verification.json`,
 | / + Up/Down/Tab/Enter/Esc | the slash menu: filter, move, complete, run, close |
 | F1 | help |
 | F2 | the glossary: what the words of the screen mean |
-| Ctrl+H | the technical rows (the model calls, the HTTP status) |
 | Ctrl+T | light / dark |
 | Ctrl+Q | quit (asks first while a run is live) |
 | Ctrl+C | copy the selected text (the terminal default — not a hard stop) |

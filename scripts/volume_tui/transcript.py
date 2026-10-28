@@ -68,8 +68,7 @@ def block_mark(kind: str) -> str:
 def is_plumbing(kind: str) -> bool:
     """Is this the transport (the model calls, the HTTP status)?
 
-    The screen hides it until Ctrl+H asks for it, and the chat log leaves
-    it out for the same reason: it belongs to the JSON log.
+    It belongs to the JSON log, not the user-facing conversation.
     """
     return str(kind) == META
 

@@ -28,6 +28,7 @@ import {
   TableHead,
   TableHeaderCell,
   TableRow,
+  Tabs,
   Tooltip,
 } from '@fynns/ui'
 import type { TuiBatchRecord, TuiRun, TuiSettings, TuiVolume } from './tuiApi'
@@ -302,64 +303,128 @@ function statusNote(status: string): string {
 export function HistoryDialog({
   open,
   onOpenChange,
+  batches,
+  batchesLoading,
   runs,
   activeRunId,
   loading,
   onOpen,
+  onOpenBatch,
   onArchiveAll,
   archiving,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  batches: TuiBatchRecord[]
+  batchesLoading: boolean
   runs: TuiRun[]
   activeRunId: string | null
   loading: boolean
   onOpen: (run: TuiRun) => void
+  onOpenBatch: (batch: TuiBatchRecord) => void
   onArchiveAll: () => void
   archiving: boolean
 }) {
+  const [tab, setTab] = useState<'batches' | 'runs'>('batches')
+  useEffect(() => {
+    if (open) setTab('batches')
+  }, [open])
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title="History: runs on this machine"
-      description="Enter opens one in the conversation. Archived runs live under runtime/archive."
+      title="History: batches and runs"
+      description="A batch opens its detail first, then a member opens its own chat. Archived runs live under runtime/archive."
       size="lg"
     >
-      <BusyRegion busy={loading} label="Loading runs">
-        {runs.length === 0 ? (
-          <EmptyState size="sm" title="No runs yet" description="Send the first task from the composer." />
-        ) : (
-          <Table>
-          <TableHead>
-            <TableRow>
-              <TableHeaderCell>Run</TableHeaderCell>
-              <TableHeaderCell>Status</TableHeaderCell>
-              <TableHeaderCell>Model</TableHeaderCell>
-              <TableHeaderCell>Frames</TableHeaderCell>
-              <TableHeaderCell>Task</TableHeaderCell>
-              <TableHeaderCell>Open</TableHeaderCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {runs.map((run) => (
-              <TableRow key={run.runId}>
-                <TableCell>{run.runId}{run.runId === activeRunId ? '  ●' : ''}</TableCell>
-                <TableCell>{statusNote(run.status)}</TableCell>
-                <TableCell>{run.model}</TableCell>
-                <TableCell>{run.frames ?? '?'}</TableCell>
-                <TableCell>{run.task.slice(0, 60)}</TableCell>
-                <TableCell>
-                  <Button variant="ghost" size="sm" onClick={() => onOpen(run)}>
-                    Open
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-        )}
-      </BusyRegion>
+      <Tabs
+        tabs={[
+          { id: 'batches', label: 'Batches' },
+          { id: 'runs', label: 'Runs' },
+        ]}
+        activeId={tab}
+        onChange={(id) => setTab(id === 'runs' ? 'runs' : 'batches')}
+        size="sm"
+        ariaLabel="History view"
+      />
+      {tab === 'batches' ? (
+        <BusyRegion busy={batchesLoading} label="Loading batches">
+          {batches.length === 0 ? (
+            <EmptyState
+              size="sm"
+              title="No batches yet"
+              description="Use /batch to repeat one task N times with the same frozen config."
+            />
+          ) : (
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableHeaderCell>Batch</TableHeaderCell>
+                  <TableHeaderCell>Status</TableHeaderCell>
+                  <TableHeaderCell>Planned</TableHeaderCell>
+                  <TableHeaderCell>Members</TableHeaderCell>
+                  <TableHeaderCell>Task</TableHeaderCell>
+                  <TableHeaderCell>Open</TableHeaderCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {batches.map((batch) => {
+                  const config = (batch.config ?? {}) as Record<string, unknown>
+                  return (
+                    <TableRow key={batch.batchId}>
+                      <TableCell>{batch.batchId}</TableCell>
+                      <TableCell>{statusNote(batch.status)}</TableCell>
+                      <TableCell>{batch.planned}</TableCell>
+                      <TableCell>{(batch.items ?? []).length}</TableCell>
+                      <TableCell>{String(config.task ?? '').slice(0, 60)}</TableCell>
+                      <TableCell>
+                        <Button variant="ghost" size="sm" onClick={() => onOpenBatch(batch)}>
+                          Open
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </BusyRegion>
+      ) : (
+        <BusyRegion busy={loading} label="Loading runs">
+          {runs.length === 0 ? (
+            <EmptyState size="sm" title="No runs yet" description="Send the first task from the composer." />
+          ) : (
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableHeaderCell>Run</TableHeaderCell>
+                  <TableHeaderCell>Status</TableHeaderCell>
+                  <TableHeaderCell>Model</TableHeaderCell>
+                  <TableHeaderCell>Frames</TableHeaderCell>
+                  <TableHeaderCell>Task</TableHeaderCell>
+                  <TableHeaderCell>Open</TableHeaderCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {runs.map((run) => (
+                  <TableRow key={run.runId}>
+                    <TableCell>{run.runId}{run.runId === activeRunId ? '  ●' : ''}</TableCell>
+                    <TableCell>{statusNote(run.status)}</TableCell>
+                    <TableCell>{run.model}</TableCell>
+                    <TableCell>{run.frames ?? '?'}</TableCell>
+                    <TableCell>{run.task.slice(0, 60)}</TableCell>
+                    <TableCell>
+                      <Button variant="ghost" size="sm" onClick={() => onOpen(run)}>
+                        Open
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </BusyRegion>
+      )}
       <div className="fynns-control-cluster fynns-control-cluster--end-align">
         <Button variant="ghost" disabled={archiving} onClick={onArchiveAll}>
           {archiving ? 'Archiving…' : 'Archive all (runs only)'}

@@ -128,6 +128,8 @@ export type TuiBatchRecord = {
   status: string
   planned: number
   config?: Record<string, unknown>
+  createdAt?: number
+  updatedAt?: number
   items?: Array<{
     seq: number
     runId: string | null

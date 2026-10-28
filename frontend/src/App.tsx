@@ -8,7 +8,7 @@
  * gone; the Live Preview Stage stays as the volume workbench and writes the
  * shared settings volume.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   applyFynnsThemeMode,
   ArchivedChatsSettingsDialog,
@@ -43,6 +43,9 @@ import {
   ListItem,
   LoadingSkeleton,
   MenuIcon,
+  NavigationDrawer,
+  NavigationDrawerItem,
+  NavigationDrawerNewChat,
   PageScroll,
   PanelLeftIcon,
   PanelRightIcon,
@@ -80,11 +83,11 @@ import {
   tuiBatchDetail,
   tuiCancelBatch,
   tuiCopyRun,
-  tuiDeleteAllRuns,
   tuiDeleteRun,
   tuiDownloadChatLog,
   tuiGlossary,
   tuiListArchived,
+  tuiListBatches,
   tuiListRuns,
   tuiLoadSettings,
   tuiOpenPath,
@@ -114,6 +117,29 @@ const STAGE_OPEN_KEY = 'gav-stage-open'
 const HISTORY_KEY = 'gav-composer-history'
 
 type Pending = null | 'starting' | 'stopping'
+
+/**
+ * One batch the chat is following. TUI parity: while a batch runs the chat
+ * shows only the current member; the sidebar batch item's right-edge ring is
+ * the only running status, and the batch record stays the source of truth.
+ */
+type BatchProgress = {
+  batchId: string
+  status: string
+  startedAt: number
+  latestRunId: string | null
+}
+
+/** Project a persisted batch record onto the chat's follow state. */
+function batchProgressFromRecord(record: TuiBatchRecord, prev?: BatchProgress | null): BatchProgress {
+  const items = record.items ?? []
+  return {
+    batchId: record.batchId,
+    status: String(record.status || 'running'),
+    startedAt: Number(record.createdAt) || prev?.startedAt || Date.now() / 1000,
+    latestRunId: [...items].reverse().find((item) => item.runId)?.runId ?? prev?.latestRunId ?? null,
+  }
+}
 
 type VerifyState = {
   running: boolean
@@ -203,6 +229,7 @@ function sameVolumePath(a: string, b: string): boolean {
 
 function App() {
   const [navOpen, setNavOpen] = useState(true)
+  const [navMode, setNavMode] = useState<'batches' | 'chats'>('chats')
   const [asideOpen, setAsideOpen] = useState(false)
 
   const [settings, setSettings] = useState<TuiSettings | null>(null)
@@ -215,6 +242,8 @@ function App() {
 
   const [runs, setRuns] = useState<TuiRun[]>([])
   const [runsLoaded, setRunsLoaded] = useState(false)
+  const [batches, setBatches] = useState<TuiBatchRecord[]>([])
+  const [batchesLoading, setBatchesLoading] = useState(false)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [transcript, setTranscript] = useState<TuiTranscript | null>(null)
   const [pending, setPending] = useState<Pending>(null)
@@ -237,6 +266,8 @@ function App() {
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchStarting, setBatchStarting] = useState(false)
   const [batchDetail, setBatchDetail] = useState<TuiBatchRecord | null>(null)
+  const [batchDetailOpen, setBatchDetailOpen] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
   const [batchCancelling, setBatchCancelling] = useState(false)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
   const [glossary, setGlossary] = useState<TuiGlossaryEntry[]>([])
@@ -252,6 +283,10 @@ function App() {
   const [deletingAll, setDeletingAll] = useState(false)
 
   const [verify, setVerify] = useState<VerifyState>({ running: false, result: null })
+  const batchRunning = batchProgress?.status === 'running'
+  useEffect(() => {
+    if (batchRunning) setNavMode('batches')
+  }, [batchRunning])
 
   const [zoom, setZoom] = useState<ZoomPayload | null>(null)
   const [zoomOpen, setZoomOpen] = useState(false)
@@ -399,12 +434,110 @@ function App() {
     }
   }, [])
 
+  const refreshBatches = useCallback(async (quiet = false) => {
+    if (!quiet) setBatchesLoading(true)
+    try {
+      const data = await tuiListBatches()
+      setBatches(data.batches)
+      const running = data.batches.find((batch) => String(batch.status) === 'running')
+      if (running) {
+        setBatchProgress((prev) => {
+          if (prev?.batchId === running.batchId || prev?.status === 'running') return prev
+          return batchProgressFromRecord(running, prev)
+        })
+      }
+      return data.batches
+    } catch {
+      return null
+    } finally {
+      if (!quiet) setBatchesLoading(false)
+    }
+  }, [])
+
+  // A page reload (or a batch started by the TUI skin) must not hide a batch
+  // that is still running: adopt it only when a live member run proves the
+  // queue is active, so stale batch.json records cannot pin a fake banner.
+  useEffect(() => {
+    let cancelled = false
+    void Promise.all([tuiListBatches(), tuiListRuns()])
+      .then(([batchData, runData]) => {
+        if (cancelled) return
+        setBatches(batchData.batches)
+        const running = batchData.batches.find((batch) => {
+          if (String(batch.status) !== 'running') return false
+          const created = Number(batch.createdAt) || 0
+          return runData.runs.some(
+            (run) => run.status === 'Running' && (run.startedAt ?? 0) >= created - 10,
+          )
+        })
+        if (running) setBatchProgress((prev) => prev ?? batchProgressFromRecord(running, null))
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     void refreshRuns()
     void refreshArchived()
-    const timer = window.setInterval(() => void refreshRuns(), RUNS_POLL_MS)
+    void refreshBatches(true)
+    // TUI parity: while a batch runs the chat has to adopt each member run
+    // promptly, so poll the run list faster than the idle 3s cadence.
+    const timer = window.setInterval(() => {
+      void refreshRuns()
+      void refreshBatches(true)
+    }, batchRunning ? 1000 : RUNS_POLL_MS)
     return () => window.clearInterval(timer)
-  }, [refreshRuns, refreshArchived])
+  }, [refreshRuns, refreshArchived, refreshBatches, batchRunning])
+
+  /* -- batch progress: batch.json is the source of truth ------------------ */
+
+  useEffect(() => {
+    const batchId = batchProgress?.batchId
+    if (!batchId || batchProgress?.status !== 'running') return
+    let cancelled = false
+    let inFlight = false
+    const poll = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const detail = await tuiBatchDetail(batchId)
+        if (cancelled) return
+        // Keep an open detail dialog live; never open it on its own.
+        setBatchDetail((prev) => (prev && prev.batchId === batchId ? detail : prev))
+        const items = detail.items ?? []
+        const status = String(detail.status || 'running')
+        const running = status === 'running'
+        setBatchProgress((prev) =>
+          prev && prev.batchId === batchId ? batchProgressFromRecord(detail, prev) : prev,
+        )
+        if (!running) {
+          setBatchCancelling(false)
+          void refreshRuns()
+          void refreshBatches()
+          const ok = items.filter((item) => item.status === 'success').length
+          const failed = items.filter((item) => item.status === 'failed').length
+          const skipped = items.filter((item) => item.status === 'skipped').length
+          snackbar(
+            `Batch ${batchId} finished: ${status} — ${ok} ok, ${failed} failed${skipped ? `, ${skipped} skipped` : ''}.`,
+            { severity: failed ? 'warning' : 'info', duration: 'long', dismissible: true },
+          )
+        }
+      } catch {
+        // The record may be between writes; the next tick retries.
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [batchProgress?.batchId, batchProgress?.status, refreshRuns, refreshBatches])
+
 
   /* -- transcript polling: the live view follows the recorded evidence ---- */
 
@@ -469,6 +602,9 @@ function App() {
     setVerify({ running: false, result: null })
     setPending(null)
     setDraft('')
+    // A finished batch banner belongs to the previous view; a running batch
+    // stays visible until it ends (the TUI can never silently lose it).
+    setBatchProgress((prev) => (prev && prev.status !== 'running' ? null : prev))
   }, [])
 
   // Guard: the open run can vanish outside this view (archived or deleted
@@ -479,6 +615,67 @@ function App() {
     if (!runsLoaded || pending !== null) return
     if (activeRunId && !runs.some((run) => run.runId === activeRunId)) handleNewTask()
   }, [runs, runsLoaded, pending, activeRunId, handleNewTask])
+
+  // TUI parity: a running batch owns the chat. As soon as the current member
+  // mints its run (status Running), open it here so its live evidence streams
+  // in; when it ends, the next member is adopted the same way.
+  useEffect(() => {
+    if (!batchRunning || !batchProgress) return
+    const active = runs.find((run) => run.runId === activeRunId)
+    const since = batchProgress.startedAt - 10
+    const candidate = runs
+      .filter((run) => run.status === 'Running' && (run.startedAt ?? 0) >= since)
+      .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0]
+    if (candidate) {
+      // Keep the current member identity in the follow state so the single-chat
+      // list can exclude it before batch.json records the finished member.
+      if (batchProgress.latestRunId !== candidate.runId) {
+        setBatchProgress((prev) =>
+          prev && prev.batchId === batchProgress.batchId
+            ? { ...prev, latestRunId: candidate.runId }
+            : prev,
+        )
+      }
+      if (active?.status === 'Running') return
+      if (candidate.runId !== activeRunId) openRun(candidate.runId)
+      return
+    }
+    if (active?.status === 'Running') return
+    // A very short member can finish before the run poll sees it as Running:
+    // show its recorded transcript rather than leaving the previous member up.
+    if (
+      batchProgress.latestRunId &&
+      batchProgress.latestRunId !== activeRunId &&
+      runs.some((run) => run.runId === batchProgress.latestRunId)
+    ) {
+      openRun(batchProgress.latestRunId)
+    }
+  }, [runs, batchRunning, batchProgress, activeRunId, openRun])
+
+  // Batch members live in the batch history, never in the single-chat list.
+  // `latestRunId` covers the live member before batch.json appends its item.
+  const batchRunIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const batch of batches) {
+      for (const item of batch.items ?? []) {
+        if (item.runId) ids.add(item.runId)
+      }
+    }
+    if (batchProgress?.latestRunId) ids.add(batchProgress.latestRunId)
+    return ids
+  }, [batches, batchProgress])
+  const chatRuns = useMemo(
+    () => runs.filter((run) => !batchRunIds.has(run.runId)),
+    [runs, batchRunIds],
+  )
+  const activeBatchId = useMemo(() => {
+    if (batchProgress?.status === 'running') return batchProgress.batchId
+    if (!activeRunId) return null
+    for (const batch of batches) {
+      if ((batch.items ?? []).some((item) => item.runId === activeRunId)) return batch.batchId
+    }
+    return null
+  }, [batches, activeRunId, batchProgress])
 
   const pushHistory = useCallback((value: string) => {
     const text = value.trim()
@@ -506,6 +703,14 @@ function App() {
         return
       }
       const live = runs.some((run) => run.status === 'Running')
+      if (batchRunning) {
+        snackbar('A batch is running — stop it first.', {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+        return
+      }
       if (live || pending !== null || liveRef.current) {
         snackbar('A run is still live — stop it first (/new never stops a live run).', {
           severity: 'error',
@@ -514,6 +719,9 @@ function App() {
         })
         return
       }
+      // A finished batch banner must not shadow the next single run.
+      setBatchProgress((prev) => (prev && prev.status !== 'running' ? null : prev))
+      setNavMode('chats')
       const goal = task.trim()
       if (!goal && taskKind === 'custom') return
       if (!source.trim()) {
@@ -600,11 +808,32 @@ function App() {
         }
       }
     },
-    [settings, runs, pending, source, refreshRuns, openRun, pushHistory],
+    [settings, runs, pending, source, refreshRuns, openRun, pushHistory, batchRunning],
   )
 
   const handleStop = useCallback(() => {
-    if (!activeRunId || pending === 'stopping') return
+    // TUI parity: stopping while a batch runs cancels the queue as well as the
+    // current member (remaining members become skipped, batch interrupted).
+    if (batchRunning && batchProgress && !batchCancelling) {
+      setBatchCancelling(true)
+      void tuiCancelBatch(batchProgress.batchId)
+        .then(() => {
+          snackbar('Batch stop requested — the current member stops and the remaining members are skipped.', {
+            severity: 'info',
+            duration: 'long',
+            dismissible: true,
+          })
+        })
+        .catch((error: unknown) => {
+          setBatchCancelling(false)
+          snackbar(`Batch cancel failed: ${errorText(error)}`, {
+            severity: 'error',
+            duration: 'long',
+            dismissible: true,
+          })
+        })
+    }
+    if (!activeRunId || pending === 'stopping' || transcript?.status !== 'running') return
     setPending('stopping')
     liveRef.current = true // keep polling until the launcher records the end
     void tuiStopRun(activeRunId).catch((error: unknown) => {
@@ -615,7 +844,7 @@ function App() {
         dismissible: true,
       })
     })
-  }, [activeRunId, pending])
+  }, [activeRunId, pending, transcript, batchRunning, batchProgress, batchCancelling])
 
   const chooseSource = useCallback(async () => {
     setPicking(true)
@@ -850,6 +1079,7 @@ function App() {
         }
         case 'history':
           void refreshRuns()
+          void refreshBatches()
           setHistoryOpen(true)
           return
         case 'batch':
@@ -905,7 +1135,7 @@ function App() {
           return
       }
     },
-    [activeRunId, transcript, handleNewTask, startCustomRun, refreshRuns, toggleTheme, ensureVolumes],
+    [activeRunId, transcript, handleNewTask, startCustomRun, refreshRuns, refreshBatches, toggleTheme, ensureVolumes],
   )
 
   const handleSend = useCallback(
@@ -1080,7 +1310,7 @@ function App() {
             <DropdownMenuItem
               icon={<PencilIcon aria-hidden />}
               onClick={() => {
-                const run = runs.find((item) => item.runId === id)
+                const run = chatRuns.find((item) => item.runId === id)
                 if (!run) return
                 setRenameTarget(run)
                 setRenameDraft(run.task)
@@ -1096,7 +1326,7 @@ function App() {
               icon={<TrashIcon aria-hidden />}
               tone="danger"
               onClick={() => {
-                const run = runs.find((item) => item.runId === id)
+                const run = chatRuns.find((item) => item.runId === id)
                 if (run) setDeleteTarget(run)
               }}
             >
@@ -1114,7 +1344,7 @@ function App() {
           <DropdownMenuSeparator />
           <DropdownMenuItem
             icon={<ArchiveIcon aria-hidden />}
-            disabled={archiving || runs.length === 0}
+            disabled={archiving || chatRuns.length === 0}
             onClick={() => setArchiveConfirm(true)}
           >
             Archive all
@@ -1122,7 +1352,7 @@ function App() {
           <DropdownMenuItem
             icon={<TrashIcon aria-hidden />}
             tone="danger"
-            disabled={runs.length === 0}
+            disabled={chatRuns.length === 0}
             onClick={() => setDeleteAllConfirm(true)}
           >
             Delete all
@@ -1130,7 +1360,7 @@ function App() {
         </>
       )
     },
-    [runs, handleNewTask, handleArchiveRun, archiving],
+    [chatRuns, handleNewTask, handleArchiveRun, archiving],
   )
 
   const handleRenameRun = useCallback(async () => {
@@ -1184,12 +1414,22 @@ function App() {
     if (deletingAll) return
     setDeletingAll(true)
     try {
-      const result = await tuiDeleteAllRuns()
+      // Batch members are not chat history; delete only the single-run list.
+      const targets = chatRuns.filter((run) => run.status !== 'Running')
+      const failed: string[] = []
+      for (const run of targets) {
+        try {
+          await tuiDeleteRun(run.runId)
+        } catch {
+          failed.push(run.runId)
+        }
+      }
       setDeleteAllConfirm(false)
       const latest = await refreshRuns()
+      await refreshBatches(true)
       if (activeRunId && !(latest ?? []).some((run) => run.runId === activeRunId)) handleNewTask()
       snackbar(
-        `Deleted ${result.deleted.length} runs${result.skipped_live.length ? `; kept live: ${result.skipped_live.join(', ')}` : ''}.`,
+        `Deleted ${targets.length - failed.length} chats${failed.length ? `; kept: ${failed.join(', ')}` : ''}.`,
         { severity: 'info', duration: 'long', dismissible: true },
       )
     } catch (error: unknown) {
@@ -1201,22 +1441,64 @@ function App() {
     } finally {
       setDeletingAll(false)
     }
-  }, [deletingAll, refreshRuns, activeRunId, handleNewTask])
+  }, [deletingAll, chatRuns, refreshRuns, refreshBatches, activeRunId, handleNewTask])
 
   const handleStartBatch = useCallback(
     async (count: number, task: string) => {
       if (!settings) return
+      if (batchRunning) {
+        snackbar('A batch is already running — stop it first.', {
+          severity: 'warning',
+          duration: 'long',
+          dismissible: true,
+        })
+        return
+      }
+      if (pending !== null || liveRef.current || runs.some((run) => run.status === 'Running')) {
+        snackbar('A run is still live — stop it first.', {
+          severity: 'warning',
+          duration: 'long',
+          dismissible: true,
+        })
+        return
+      }
+      const goal = task.trim()
+      if (!goal) {
+        snackbar('Batch task must not be empty.', {
+          severity: 'error',
+          duration: 'long',
+          dismissible: true,
+        })
+        return
+      }
       setBatchStarting(true)
       try {
-        const data = await tuiStartBatch({ count, task, settings: { ...settings, volumePath: source.trim() } })
+        const data = await tuiStartBatch({
+          count,
+          task: goal,
+          settings: { ...settings, volumePath: source.trim() },
+        })
         setBatchOpen(false)
-        const detail = await tuiBatchDetail(data.batchId)
-        setBatchDetail(detail)
-        snackbar(`Batch ${data.batchId} running — members appear in History.`, {
+        // TUI parity: do not park the user in a modal. Clear to the new-task
+        // view, then follow each member run in the chat as it launches.
+        handleNewTask()
+        setBatchDetail(null)
+        setBatchDetailOpen(false)
+        setBatchCancelling(false)
+        setBatchProgress({
+          batchId: data.batchId,
+          status: 'running',
+          startedAt: Date.now() / 1000,
+          latestRunId: null,
+        })
+        setNavMode('batches')
+        snackbar(`Batch ${data.batchId} started — the current member opens here as it launches.`, {
           severity: 'info',
           duration: 'long',
           dismissible: true,
         })
+        void refreshRuns()
+        void refreshBatches(true)
       } catch (error: unknown) {
         snackbar(`Batch not started: ${errorText(error)}`, {
           severity: 'error',
@@ -1227,8 +1509,30 @@ function App() {
         setBatchStarting(false)
       }
     },
-    [settings, source],
+    [settings, source, batchRunning, pending, runs, handleNewTask, refreshRuns, refreshBatches],
   )
+
+  const handleOpenBatch = useCallback(async (batchId: string) => {
+    try {
+      const detail = await tuiBatchDetail(batchId)
+      setBatchDetail(detail)
+      setBatchDetailOpen(true)
+      if (String(detail.status) === 'running') {
+        setBatchProgress((prev) =>
+          prev && prev.batchId === batchId
+            ? batchProgressFromRecord(detail, prev)
+            : batchProgressFromRecord(detail, null),
+        )
+        setNavMode('batches')
+      }
+    } catch (error: unknown) {
+      snackbar(`Batch detail failed: ${errorText(error)}`, {
+        severity: 'error',
+        duration: 'long',
+        dismissible: true,
+      })
+    }
+  }, [])
 
   /* -- global keys: F1/F2/Ctrl+H/Ctrl+T/Ctrl+Q/Esc ---------------------------- */
 
@@ -1263,12 +1567,15 @@ function App() {
         return
       }
       if (event.key === 'Escape' && !inField) {
-        if (activeRef.current) handleStop()
+        // TUI parity: Esc closes a modal and stops nothing. Only when no
+        // dialog is open does it stop the live run / cancel the batch queue.
+        const modalOpen = !!document.querySelector('[role="dialog"], [aria-modal="true"]')
+        if (!modalOpen && (activeRef.current || batchRunning)) handleStop()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [handleStop, toggleTheme])
+  }, [handleStop, toggleTheme, batchRunning])
 
   /* -- derived view ---------------------------------------------------------- */
 
@@ -1574,6 +1881,123 @@ function App() {
     ? [...transcript.blocks].reverse().find((block) => block.kind === 'image')
     : undefined
 
+  const navModeTabs = (
+    <Tabs
+      tabs={[
+        { id: 'batches', label: 'Batches' },
+        { id: 'chats', label: 'Chats' },
+      ]}
+      activeId={navMode}
+      onChange={(id) => setNavMode(id === 'batches' ? 'batches' : 'chats')}
+      size="sm"
+      ariaLabel="Sidebar view"
+    />
+  )
+  const navFooter = (
+    <div className="fynns-nav-drawer-footer-account">
+      <div className="fynns-nav-drawer-footer-account-start">
+        <Avatar size="sm" name="Local work" alt="Local work" />
+        <span className="fynns-nav-drawer-footer-account-label">Local work</span>
+      </div>
+      <Tooltip content="Settings">
+        <IconButton
+          size="sm"
+          aria-label="Settings"
+          onClick={() => {
+            void refreshArchived()
+            setArchivedOpen(true)
+          }}
+        >
+          <SettingsIcon size={16} aria-hidden />
+        </IconButton>
+      </Tooltip>
+    </div>
+  )
+
+  const batchNav = (
+    <NavigationDrawer
+      variant="standard"
+      ariaLabel="Batches"
+      headline={navModeTabs}
+      footer={navFooter}
+    >
+      <NavigationDrawerNewChat label="New batch" onClick={() => setBatchOpen(true)} />
+      {batches.length === 0 ? (
+        <EmptyState
+          size="sm"
+          title="No batches yet"
+          description="New batch repeats one task with the same frozen config."
+        />
+      ) : (
+        batches.map((batch) => {
+          const config = (batch.config ?? {}) as Record<string, unknown>
+          const task = String(config.task ?? '').trim() || batch.batchId
+          return (
+            <NavigationDrawerItem
+              key={batch.batchId}
+              label={task}
+              active={batch.batchId === activeBatchId}
+              running={batch.status === 'running'}
+              runningLabel="Running"
+              onClick={() => void handleOpenBatch(batch.batchId)}
+            />
+          )
+        })
+      )}
+    </NavigationDrawer>
+  )
+
+  const chatNav = (
+    <ChatSessionsDrawer
+      ariaLabel="Chats"
+      headline={navModeTabs}
+      sessions={chatRuns.map((run) => ({
+        id: run.runId,
+        label: `${run.runId} — ${run.task.slice(0, 40)}`,
+        running: run.status === 'Running',
+      }))}
+      activeSessionId={activeRunId}
+      labels={{
+        newChat: 'New task',
+        more: 'Chat options',
+        rename: 'Rename',
+        archive: 'Archive',
+        delete: 'Delete',
+        deleteAll: 'Delete all chats',
+        sessionMenu: 'Chat options',
+        listMenu: 'Chats',
+        emptyTitle: 'No chats yet',
+        emptyDescription: 'Send the first task from the composer, or /task-a for the audited preset.',
+        loading: 'Loading chats',
+        runningLabel: 'Running',
+        revealMore: 'Show more chats',
+      }}
+      reveal={{ initial: 12, step: 12 }}
+      renderMenu={renderRunMenu}
+      footer={navFooter}
+      onNewChat={() => {
+        setNavMode('chats')
+        handleNewTask()
+      }}
+      onSelect={(runId) => {
+        setNavMode('chats')
+        openRun(runId)
+      }}
+      onRename={(runId) => {
+        const run = chatRuns.find((item) => item.runId === runId)
+        if (!run) return
+        setRenameTarget(run)
+        setRenameDraft(run.task)
+      }}
+      onArchive={(runId) => void handleArchiveRun(runId)}
+      onDelete={(runId) => {
+        const run = chatRuns.find((item) => item.runId === runId)
+        if (run) setDeleteTarget(run)
+      }}
+      onDeleteAll={() => setDeleteAllConfirm(true)}
+    />
+  )
+
   return (
     <>
       <ClippedNavShell
@@ -1644,66 +2068,7 @@ function App() {
           />
         }
         nav={
-          navOpen ? (
-            <ChatSessionsDrawer
-              ariaLabel="Runs"
-              sessions={runs.map((run) => ({
-                id: run.runId,
-                label: `${run.runId} — ${run.task.slice(0, 40)}`,
-              }))}
-              activeSessionId={activeRunId}
-              labels={{
-                newChat: 'New task',
-                more: 'Run options',
-                rename: 'Rename',
-                archive: 'Archive',
-                delete: 'Delete',
-                deleteAll: 'Delete all',
-                sessionMenu: 'Run options',
-                listMenu: 'Runs',
-                emptyTitle: 'No runs yet',
-                emptyDescription: 'Send the first task from the composer, or /task-a for the audited preset.',
-                loading: 'Loading runs',
-                revealMore: 'Show more runs',
-              }}
-              reveal={{ initial: 12, step: 12 }}
-              renderMenu={renderRunMenu}
-              footer={
-                <div className="fynns-nav-drawer-footer-account">
-                  <div className="fynns-nav-drawer-footer-account-start">
-                    <Avatar size="sm" name="Local runs" alt="Local runs" />
-                    <span className="fynns-nav-drawer-footer-account-label">Local runs</span>
-                  </div>
-                  <Tooltip content="Settings">
-                    <IconButton
-                      size="sm"
-                      aria-label="Settings"
-                      onClick={() => {
-                        void refreshArchived()
-                        setArchivedOpen(true)
-                      }}
-                    >
-                      <SettingsIcon size={16} aria-hidden />
-                    </IconButton>
-                  </Tooltip>
-                </div>
-              }
-              onNewChat={handleNewTask}
-              onSelect={(runId) => openRun(runId)}
-              onRename={(runId) => {
-                const run = runs.find((item) => item.runId === runId)
-                if (!run) return
-                setRenameTarget(run)
-                setRenameDraft(run.task)
-              }}
-              onArchive={(runId) => void handleArchiveRun(runId)}
-              onDelete={(runId) => {
-                const run = runs.find((item) => item.runId === runId)
-                if (run) setDeleteTarget(run)
-              }}
-              onDeleteAll={() => setDeleteAllConfirm(true)}
-            />
-          ) : null
+          navOpen ? (navMode === 'batches' ? batchNav : chatNav) : null
         }
       >
         <div className="fynns-destination-app-shell-body">
@@ -1857,10 +2222,20 @@ function App() {
       <HistoryDialog
         open={historyOpen}
         onOpenChange={setHistoryOpen}
-        runs={runs}
+        batches={batches}
+        batchesLoading={batchesLoading}
+        runs={chatRuns}
         activeRunId={activeRunId}
         loading={!runsLoaded}
-        onOpen={(run) => openRun(run.runId)}
+        onOpen={(run) => {
+          setNavMode('chats')
+          openRun(run.runId)
+        }}
+        onOpenBatch={(batch) => {
+          setHistoryOpen(false)
+          setNavMode('batches')
+          void handleOpenBatch(batch.batchId)
+        }}
         onArchiveAll={() => setArchiveConfirm(true)}
         archiving={archiving}
       />
@@ -1872,12 +2247,14 @@ function App() {
         starting={batchStarting}
       />
       <BatchDetailDialog
-        open={batchDetail !== null}
+        open={batchDetailOpen && batchDetail !== null}
         onOpenChange={(open) => {
+          setBatchDetailOpen(open)
           if (!open) setBatchDetail(null)
         }}
         batch={batchDetail}
         onOpenMember={(runId) => {
+          setBatchDetailOpen(false)
           setBatchDetail(null)
           openRun(runId)
         }}
@@ -1886,8 +2263,21 @@ function App() {
           setBatchCancelling(true)
           try {
             await tuiCancelBatch(batchDetail.batchId)
-            const detail = await tuiBatchDetail(batchDetail.batchId)
-            setBatchDetail(detail)
+            const activeRun = runs.find((run) => run.runId === activeRunId)
+            if (activeRunId && (transcript?.status === 'running' || activeRun?.status === 'Running')) {
+              try {
+                await tuiStopRun(activeRunId)
+              } catch {
+                // The member may already be recording its end.
+              }
+            }
+            setBatchDetail(await tuiBatchDetail(batchDetail.batchId))
+          } catch (error: unknown) {
+            snackbar(`Batch cancel failed: ${errorText(error)}`, {
+              severity: 'error',
+              duration: 'long',
+              dismissible: true,
+            })
           } finally {
             setBatchCancelling(false)
           }

@@ -197,17 +197,6 @@ function runStateLabel(status: string, pending: Pending): string {
   }
 }
 
-function liveLabel(transcript: TuiTranscript | null, pending: Pending): string {
-  if (pending === 'starting') return 'Starting the run — reserving the directory and writing the config'
-  if (pending === 'stopping') return 'Stop requested — waiting for the launcher to notice the stop marker'
-  if (!transcript || transcript.blocks.length === 0) return 'Preparing the run'
-  const last = transcript.blocks[transcript.blocks.length - 1]
-  if (last.kind === 'thinking' && last.status === 'running') return 'Model is choosing the next action'
-  if (last.kind === 'tool') return 'Renderer is executing the accepted tool call'
-  if (last.kind === 'image') return 'Frame captured — model is reading the new picture'
-  return 'Waiting for the next recorded event'
-}
-
 function downloadBlob(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob)
   try {
@@ -1623,6 +1612,7 @@ function App() {
     ? transcript.blocks.map((block) => block.kind).lastIndexOf('assistant')
     : -1
   if (transcript && transcript.runId !== 'local-start-failed') {
+    const initialThinkingIndex = transcript.blocks.findIndex((block) => block.kind === 'thinking')
     const workedBlocks = terminal
       ? transcript.blocks.filter(
           (block, index) => collapsibleKinds.has(block.kind) && index !== finalAnswerIndex,
@@ -1643,6 +1633,7 @@ function App() {
         <TuiBlockRow
           key={`${block.kind}-${index}`}
           block={block}
+          initialThinking={index === initialThinkingIndex}
           showPlumbing={showPlumbing}
           onZoom={openZoom}
           onRetryError={() => void startCustomRun(transcript.task || '', 'custom')}
@@ -1653,45 +1644,6 @@ function App() {
   }
 
   const tail: ReactNode[] = []
-  if (live && transcript) {
-    const last = transcript.blocks[transcript.blocks.length - 1]
-    const streaming = !last || last.kind === 'thinking' || last.kind === 'tool' || last.status === 'running'
-    if (streaming) {
-      tail.push(
-        <TuiBlockRow
-          key="live"
-          block={{
-            kind: 'notice',
-            title: liveLabel(transcript, pending),
-            subtitle: '',
-            body: '',
-            status: 'running',
-            ts: null,
-            data: {},
-          }}
-          showPlumbing={showPlumbing}
-          onZoom={openZoom}
-        />,
-      )
-    }
-  } else if (pending === 'starting') {
-    tail.push(
-      <TuiBlockRow
-        key="live"
-        block={{
-          kind: 'notice',
-          title: liveLabel(transcript, pending),
-          subtitle: '',
-          body: '',
-          status: 'running',
-          ts: null,
-          data: {},
-        }}
-        showPlumbing={showPlumbing}
-        onZoom={openZoom}
-      />,
-    )
-  }
 
   const slashOpen = draft.trimStart().startsWith('/')
   const slashMatches = slashOpen ? matchSlashCommands(draft.trim()) : []

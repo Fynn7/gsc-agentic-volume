@@ -6,7 +6,7 @@
  * ● ▣ ⚠ ✓ ✗ are measured facts. Component mapping follows core contracts:
  * - model turns -> ChatMessage.thinking + ChatThinking (disclosure while the
  *   chain exists, status strip otherwise; streaming while running)
- * - tool calls -> ChatActivity + ChatActivityStep (active = *-ing, done = past)
+ * - tool calls -> one ChatThinking row (active = *-ing, done = past)
  * - frames/answers/errors/notices -> ChatMessage rows (errors are one plain
  *   red line with hover retry) or InlineAlert quiet rows
  * - transport (meta) -> hidden unless the caller passes showPlumbing (Ctrl+H)
@@ -14,8 +14,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   BusyRegion,
-  ChatActivity,
-  ChatActivityStep,
   ChatMessage,
   ChatReveal,
   ChatThinking,
@@ -35,21 +33,14 @@ import { tuiArtifactUrl, formatRunDuration, tuiMark, type TuiBlock } from './tui
 
 export type ZoomPayload = { url: string; alt: string; caption: string }
 
-function ToolStepStatus(status: string | null): 'active' | 'done' {
-  // Core step states are pending/active/done; a refused call is done work —
-  // the ✗ stays in the label copy, exactly like the TUI row suffix.
-  if (status === 'running') return 'active'
-  return 'done'
-}
-
-/** One model turn: Thinking/Thought when it reasoned, Working/Model answered when not. */
-function ThinkingRow({ block }: { block: TuiBlock }) {
+/** One model turn: an active choice, then Thought or Model answered. */
+function ThinkingRow({ block, initial }: { block: TuiBlock; initial: boolean }) {
   const running = block.status === 'running'
   const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
   const label = reasoned ? 'Thought' : 'Model answered'
-  const streamingLabel = reasoned ? 'Thinking' : 'Working'
+  const streamingLabel = initial ? 'Working' : 'Model is choosing the next action'
   const body = block.body.trim()
-  // Thought stays label-only (no star); Working stays icon-free while streaming.
+  // Thought stays label-only (no star); the active choice has no icon.
   const statusIcon = !running && !reasoned ? <BotIcon aria-hidden /> : null
   return (
     <ChatMessage
@@ -199,19 +190,20 @@ export function ErrorRow({ message, onRetry }: { message: string; onRetry?: () =
 /** One renderer tool call with the numbers it changed and what came back. */
 function ToolRow({ block }: { block: TuiBlock }) {
   const running = block.status === 'running'
-  // Core owns status chrome (step dot, streaming shimmer, chevron): the label
-  // stays plain action text. Facts + measured body go to the step description.
   const facts = block.subtitle.trim()
   const body = block.body.trim()
   const description = [facts, body].filter(Boolean).join('\n\n') || undefined
   return (
-    <ChatActivity
+    <ChatThinking
+      variant="status"
       label={block.title}
+      summary={description}
+      details={[]}
       streaming={running}
-      defaultOpen={running}
-    >
-      <ChatActivityStep status={ToolStepStatus(block.status)} label={block.title} description={description} />
-    </ChatActivity>
+      streamingLabel={block.title}
+      icon={null}
+      marker="none"
+    />
   )
 }
 
@@ -272,11 +264,13 @@ function FrameFigure({
 /** One transcript block as core chat rows. Returns null for hidden plumbing. */
 export function TuiBlockRow({
   block,
+  initialThinking = false,
   showPlumbing,
   onZoom,
   onRetryError,
 }: {
   block: TuiBlock
+  initialThinking?: boolean
   showPlumbing: boolean
   onZoom: (payload: ZoomPayload) => void
   onRetryError?: (block: TuiBlock) => void
@@ -285,7 +279,7 @@ export function TuiBlockRow({
     case 'user':
       return <ChatMessage role="user" markdown={block.title} />
     case 'thinking':
-      return <ThinkingRow block={block} />
+      return <ThinkingRow block={block} initial={initialThinking} />
     case 'compaction':
       return <CompactionRow block={block} />
     case 'assistant': {

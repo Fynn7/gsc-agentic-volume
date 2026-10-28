@@ -1901,6 +1901,9 @@ function App() {
         running: run.status === 'Running',
       }))}
       activeSessionId={activeRunId}
+      // Cold start: the run list is still being read. BusyRegion paints text
+      // skeleton rows in place of the (wrong) "No chats yet" empty state.
+      busy={!runsLoaded}
       labels={{
         newChat: 'New task',
         more: 'Chat options',

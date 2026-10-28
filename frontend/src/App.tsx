@@ -1603,10 +1603,10 @@ function App() {
   // stay as rows: the answer is the point of the run and reads as primary
   // text. Intermediate model words fold into the disclosure as quiet reasoning
   // text (core treaty: thinking holds only muted small text, answers live
-  // outside). Figures and alerts cannot nest inside thinking, so they stay
-  // rows too.
+  // outside). Figures, alerts, and run notices cannot nest inside thinking,
+  // so they stay rows too.
   const terminal = transcript != null && transcript.status !== 'running' && pending === null
-  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'notice', 'meta'])
+  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish', 'meta'])
   // The run's final answer: last assistant block in transcript order.
   const finalAnswerIndex = transcript
     ? transcript.blocks.map((block) => block.kind).lastIndexOf('assistant')

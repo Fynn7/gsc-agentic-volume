@@ -193,7 +193,14 @@ export function ErrorRow({ message, onRetry }: { message: string; onRetry?: () =
         ) : undefined
       }
     >
-      <p role="alert" style={{ color: 'var(--fynns-color-danger)', margin: 0 }}>
+      <p
+        role="alert"
+        style={{
+          color: 'var(--fynns-color-danger)',
+          fontSize: 'var(--fynns-font-size-md)',
+          margin: 0,
+        }}
+      >
         {message}
       </p>
     </ChatMessage>
@@ -322,6 +329,9 @@ export function TuiBlockRow({
       return <HarnessWarningRow block={block} />
     }
     case 'notice':
+      if (block.title.startsWith('Run failed')) {
+        return <ErrorRow message={block.title} onRetry={onRetryError ? () => onRetryError(block) : undefined} />
+      }
       return (
         <ChatMessage
           role="assistant"

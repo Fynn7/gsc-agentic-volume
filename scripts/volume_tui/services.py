@@ -582,7 +582,12 @@ def model_problems(settings: dict) -> list[dict]:
         seen = _http_get(endpoint.rstrip("/") + "/api/ps", 5.0)
     except Exception:
         return []
-    want = config_mod.example_config().get("contextSize")
+    want = settings.get("contextSize")
+    if isinstance(want, bool) or not isinstance(want, int):
+        try:
+            want = int(want)
+        except (TypeError, ValueError):
+            want = config_mod.example_config().get("contextSize")
     problems = []
     for entry in seen.get("models", []):
         if entry.get("name") == model and entry.get("context_length") not in (None, want):

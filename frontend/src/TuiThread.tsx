@@ -22,14 +22,11 @@ import {
   LoadingSkeleton,
   ArchiveIcon,
   BotIcon,
-  CheckCircleIcon,
   InfoIcon,
   RefreshIcon,
   Tooltip,
-  WrenchIcon,
 } from '@fynns/ui'
-import type { ChatThinkingDetail } from '@fynns/ui'
-import { tuiArtifactUrl, formatRunDuration, tuiMark, type TuiBlock } from './tuiApi'
+import { tuiArtifactUrl, tuiMark, type TuiBlock } from './tuiApi'
 
 export type ZoomPayload = { url: string; alt: string; caption: string }
 
@@ -38,7 +35,14 @@ function ThinkingRow({ block, initial }: { block: TuiBlock; initial: boolean }) 
   const running = block.status === 'running'
   const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
   const label = reasoned ? 'Thought' : 'Model answered'
-  const streamingLabel = initial ? 'Working' : 'Model is choosing the next action'
+  // Working means the call has not produced reasoning yet. As soon as the
+  // reasoning stream starts, the same row says Thinking; it becomes Thought
+  // when the call settles. The first row also uses this wording.
+  const streamingLabel = reasoned
+    ? 'Thinking'
+    : initial
+      ? 'Working'
+      : 'Model is choosing the next action'
   const body = block.body.trim()
   // Thought stays label-only (no star); the active choice has no icon.
   const statusIcon = !running && !reasoned ? <BotIcon aria-hidden /> : null
@@ -79,83 +83,6 @@ function CompactionRow({ block }: { block: TuiBlock }) {
           icon={<ArchiveIcon aria-hidden />}
         />
       }
-    />
-  )
-}
-
-/** Terminal run: whole history collapsed into one summary disclosure. */
-export function WorkedRow({ blocks, totalSeconds }: { blocks: TuiBlock[]; totalSeconds: number | null }) {
-  const label = totalSeconds == null ? 'Worked' : `Worked for ${formatRunDuration(totalSeconds)}`
-  const details: ChatThinkingDetail[] = blocks.map((block, index) => {
-    const id = `worked-${index}`
-    switch (block.kind) {
-      case 'thinking': {
-        const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
-        const nestedLabel = reasoned ? 'Thought' : 'Model answered'
-        const body = block.body.trim()
-        // Thought is label-only (no star); Model answered owns BotIcon.
-        if (!body)
-          return reasoned
-            ? { id, label: nestedLabel, summary: block.subtitle || undefined, marker: 'none' as const }
-            : { id, label: nestedLabel, summary: block.subtitle || undefined, icon: <BotIcon aria-hidden /> }
-        return reasoned
-          ? {
-              id,
-              label: nestedLabel,
-              summary: block.subtitle || undefined,
-              marker: 'none' as const,
-              details: [{ id: `${id}-body`, text: body }],
-            }
-          : {
-              id,
-              label: nestedLabel,
-              summary: block.subtitle || undefined,
-              icon: <BotIcon aria-hidden />,
-              details: [{ id: `${id}-body`, text: body }],
-            }
-      }
-      case 'compaction': {
-        const body = block.body.trim()
-        if (!body)
-          return { id, label: 'Context checkpoint', summary: block.subtitle || undefined, icon: <ArchiveIcon aria-hidden /> }
-        return {
-          id,
-          label: 'Context checkpoint',
-          summary: block.subtitle || undefined,
-          icon: <ArchiveIcon aria-hidden />,
-          details: [{ id: `${id}-body`, text: body }],
-        }
-      }
-      case 'tool': {
-        const body = block.body.trim()
-        // Tool calls read as work items: wrench marker, never the default sparkle.
-        if (!body && !block.subtitle) return { id, label: block.title, icon: <WrenchIcon aria-hidden /> }
-        return {
-          id,
-          label: block.title,
-          summary: block.subtitle || undefined,
-          icon: <WrenchIcon aria-hidden />,
-          details: body ? [{ id: `${id}-body`, text: body }] : undefined,
-        }
-      }
-      case 'assistant':
-        // The model's own words stay verbatim as muted detail text.
-        return { id, text: block.title }
-      case 'finish': {
-        const claim = block.body.trim()
-        if (!claim) return { id, label: block.title, icon: <CheckCircleIcon aria-hidden /> }
-        return { id, label: block.title, icon: <CheckCircleIcon aria-hidden />, details: [{ id: `${id}-body`, text: claim }] }
-      }
-      case 'notice':
-      case 'meta':
-      default:
-        return { id, text: block.title }
-    }
-  })
-  return (
-    <ChatMessage
-      role="assistant"
-      thinking={<ChatThinking label={label} details={details} icon={null} marker="none" />}
     />
   )
 }
@@ -230,13 +157,16 @@ function ToolRow({ block }: { block: TuiBlock }) {
 function FrameFigure({
   block,
   onZoom,
+  onSettled,
 }: {
   block: TuiBlock
   onZoom: (payload: ZoomPayload) => void
+  onSettled?: () => void
 }) {
   const [failed, setFailed] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const imgRef = useRef<HTMLImageElement | null>(null)
+  const reported = useRef(false)
   const image = String((block.data as { image?: unknown } | null)?.image ?? '')
   const url = tuiArtifactUrl(image)
   const alt = `${block.title}`
@@ -244,6 +174,13 @@ function FrameFigure({
     // Cached frames may complete before React attaches onLoad.
     if (url && imgRef.current?.complete && imgRef.current.naturalWidth > 0) setLoaded(true)
   }, [url])
+  useEffect(() => {
+    if (reported.current) return
+    if (loaded || failed || !url) {
+      reported.current = true
+      onSettled?.()
+    }
+  }, [loaded, failed, url, onSettled])
   if (!url || failed) {
     return (
       <InlineAlert
@@ -287,11 +224,13 @@ export function TuiBlockRow({
   initialThinking = false,
   onZoom,
   onRetryError,
+  onFrameSettled,
 }: {
   block: TuiBlock
   initialThinking?: boolean
   onZoom: (payload: ZoomPayload) => void
   onRetryError?: (block: TuiBlock) => void
+  onFrameSettled?: () => void
 }) {
   switch (block.kind) {
     case 'user':
@@ -313,7 +252,7 @@ export function TuiBlockRow({
     case 'image':
       return (
         <ChatReveal>
-          <FrameFigure block={block} onZoom={onZoom} />
+          <FrameFigure block={block} onZoom={onZoom} onSettled={onFrameSettled} />
         </ChatReveal>
       )
     case 'finish': {

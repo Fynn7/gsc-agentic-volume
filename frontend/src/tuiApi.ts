@@ -20,6 +20,8 @@ export type TuiBlockKind =
   | 'meta'
 
 export type TuiBlock = {
+  /** Stable row identity from the bridge; survives live polls. */
+  id?: string
   kind: TuiBlockKind
   title: string
   subtitle: string
@@ -188,7 +190,7 @@ export function tuiRunImages(runId: string) {
 }
 
 export function tuiStartRun(body: { taskKind: string; task: string; settings: TuiSettings }) {
-  return postJson<{ started: boolean; configPath: string }>('/api/tui/runs', body)
+  return postJson<{ started: boolean; configPath: string; task?: string }>('/api/tui/runs', body)
 }
 
 export function tuiStopRun(runId: string) {

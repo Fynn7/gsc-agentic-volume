@@ -286,7 +286,7 @@ for _tui_path in (str(ROOT / 'scripts'), str(TUI_DIR)):
 try:
     import transcript as tui_transcript
     import trace_events as tui_trace
-    import stream as tui_stream
+    import live_transcript as tui_live_transcript
     import runs as tui_runs
     import chat_log as tui_chat_log
     import export_images as tui_export_images
@@ -315,6 +315,20 @@ def _tui_jsonable(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def _tui_problem_text(problem):
+    """One actionable line for a refused start: name, measured detail, fix."""
+    if isinstance(problem, str):
+        return problem.strip() or 'unknown problem'
+    if not isinstance(problem, dict):
+        return str(problem)
+    parts = [
+        str(problem.get('name') or '').strip(),
+        str(problem.get('detail') or '').strip(),
+        str(problem.get('fix') or '').strip(),
+    ]
+    return ' — '.join(part for part in parts if part) or 'unknown problem'
+
+
 def _tui_run_status(run_dir):
     try:
         data = json.loads((Path(run_dir) / 'run.json').read_text(encoding='utf-8'))
@@ -338,8 +352,18 @@ def _tui_is_live(entry):
         return str(entry.get('status') or '').lower() == 'running'
 
 
+_tui_transcript_sessions = {}
+_tui_transcript_lock = threading.Lock()
+
+
 def _tui_transcript_payload(run_id):
-    """Full conversation of one run: task block + folded evidence blocks."""
+    """Full conversation of one run: task block + folded evidence blocks.
+
+    One ``LiveTranscript`` per run is kept in this process. Each poll folds
+    only the evidence written since the previous poll, so a row that is
+    already on screen can never move, disappear or be reported twice when
+    the harness and the model stream are re-read.
+    """
     _tui_require()
     entry = tui_runs.find_run(run_id, _fresh=True)
     if entry is None:
@@ -352,55 +376,38 @@ def _tui_transcript_payload(run_id):
         budget = int(config.get('renderBudget', 4))
     except (TypeError, ValueError):
         budget = 4
-    transcript = tui_transcript.Transcript()
-    transcript.add(tui_transcript.USER, title=task, ts=tui_runs.run_started_at(run_dir))
-    tail = tui_trace.EventTail(run_dir, tui_trace.resolve_session_dir(run_dir))
-    try:
-        fresh = tail.poll()
-    except Exception:
-        fresh = []
-    try:
-        streamed = tui_stream.StreamTail(run_dir).poll()
-    except Exception:
-        streamed = []
-    # The stream is the model's own order of work (thinking, then the call),
-    # folded together with the service/harness evidence in execution order:
-    # a model call was sent, the model thought, the tool ran, the reply
-    # came back. Sorting by run-clock time restores that order, so the
-    # transport rows interleave with the steps they carried.
-    for event in tui_trace.sort_events(streamed + fresh):
-        transcript.ingest(event)
+    started_at = tui_runs.run_started_at(run_dir)
+    with _tui_transcript_lock:
+        live = _tui_transcript_sessions.get(run_id)
+        if live is None or live.run_dir != run_dir:
+            live = tui_live_transcript.LiveTranscript(
+                run_dir,
+                task,
+                started_at,
+                tui_trace.resolve_session_dir(run_dir),
+            )
+            _tui_transcript_sessions[run_id] = live
+            # Keep the process bounded; live runs are recreated from disk.
+            while len(_tui_transcript_sessions) > 12:
+                oldest = min(
+                    _tui_transcript_sessions,
+                    key=lambda key: _tui_transcript_sessions[key].last_used,
+                )
+                if oldest == run_id:
+                    break
+                _tui_transcript_sessions.pop(oldest, None)
+    live.poll()
+    live.set_task(task)
     state = _tui_run_status(run_dir)
     stopping = (run_dir.parent / 'tui-control' / ('%s.stop' % entry.get('runId'))).is_file()
-    if state not in ('running',) or stopping:
-        end = tui_transcript.run_end_ts(transcript.blocks)
-        for kind in (tui_transcript.THINKING, tui_transcript.COMPACTION):
-            block = transcript.find(kind)
-            if block is not None and block.get('status') == 'running':
-                block['status'] = 'done'
-                if kind == tui_transcript.THINKING:
-                    try:
-                        block['subtitle'] = tui_transcript._thinking_elapsed(block, now=end)
-                    except Exception:
-                        pass
-                if isinstance(block.get('data'), dict):
-                    block['data']['open'] = False
-        if stopping:
-            transcript.add(tui_transcript.NOTICE,
-                           title='Run stopping - the launcher was asked to stop; evidence already written stays.')
-        elif state in ('stopped', 'interrupted'):
-            transcript.add(tui_transcript.NOTICE,
-                           title='Run stopped - the harness and its children were terminated, the evidence stays on disk.')
-        elif state == 'failed':
-            transcript.add(tui_transcript.NOTICE,
-                           title='Run failed - see failure.json in the run folder.')
-    blocks = transcript.blocks
+    live.finalize(state, stopping)
+    blocks = live.blocks
     used = sum(1 for b in blocks if b.get('kind') == tui_transcript.TOOL)
     return _tui_jsonable({
         'runId': entry.get('runId'), 'directory': entry.get('directory'),
         'status': state, 'task': task, 'model': model,
         'budget': budget, 'used': used,
-        'startedAt': tui_runs.run_started_at(run_dir),
+        'startedAt': started_at,
         'sessionId': entry.get('sessionId'),
         'volumePath': config.get('volumePath', ''),
         'blocks': blocks,
@@ -765,7 +772,7 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         gate = []
                     problems = list(problems or []) + [
-                        (p if isinstance(p, str) else str(p.get('name') or p.get('detail') or p)) for p in (gate or [])]
+                        _tui_problem_text(p) for p in (gate or [])]
                     if problems:
                         return self.send(400, {'error': '; '.join(problems[:8])})
                     config_path = tui_flows.write_config(dict(effective), task_kind, tui_config)
@@ -776,7 +783,11 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
                     threading.Thread(target=_launch, args=(str(config_path),), daemon=True).start()
-                    return self.send(202, {'started': True, 'configPath': str(config_path)})
+                    return self.send(202, {
+                        'started': True,
+                        'configPath': str(config_path),
+                        'task': str((effective or {}).get('task') or prompt),
+                    })
                 except Exception as error:
                     return self.send(400 if TUI_AVAILABLE else 501, {'error': str(error)})
             if route == '/api/tui/runs/stop':

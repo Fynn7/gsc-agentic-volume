@@ -22,6 +22,7 @@ import {
   ChatMessage,
   ChatScrollToBottom,
   ChatSessionsDrawer,
+  ChatThinking,
   ChatThread,
   ClippedNavShell,
   CodeBlock,
@@ -60,11 +61,12 @@ import {
   Tooltip,
   TrashIcon,
   snackbar,
+  useChatSequencer,
   type SelectionMenuContext,
 } from '@fynns/ui'
 import { fetchVolumeImport, importVolumeFile, listVolumeImports, pickVolumeFile, type VolumeImport } from './api'
 import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
-import { ErrorRow, TuiBlockRow, WorkedRow, type ZoomPayload } from './TuiThread'
+import { ErrorRow, TuiBlockRow, type ZoomPayload } from './TuiThread'
 import {
   BatchDetailDialog,
   BatchDialog,
@@ -77,7 +79,6 @@ import {
 import { matchSlashCommands, parseSlashCommand, type SlashAction } from './slash'
 import {
   errorText,
-  transcriptDuration,
   tuiArchiveAll,
   tuiArchiveRun,
   tuiBatchDetail,
@@ -103,6 +104,7 @@ import {
   tuiVerifyState,
   tuiVolumes,
   type TuiBatchRecord,
+  type TuiBlock,
   type TuiGlossaryEntry,
   type TuiRun,
   type TuiSettings,
@@ -216,6 +218,21 @@ function sameVolumePath(a: string, b: string): boolean {
   return norm(a) === norm(b)
 }
 
+/** Core chat entrance duration; the live status follows the first row. */
+function chatEntryDelayMs(): number {
+  try {
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return 0
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue('--fynns-chat-entry-duration')
+      .trim()
+    const value = Number.parseFloat(raw)
+    if (!Number.isFinite(value) || value <= 0) return 360
+    return raw.endsWith('ms') ? value : raw.endsWith('s') ? value * 1000 : value
+  } catch {
+    return 360
+  }
+}
+
 function App() {
   const [navOpen, setNavOpen] = useState(true)
   const [navMode, setNavMode] = useState<'batches' | 'chats'>('chats')
@@ -237,6 +254,15 @@ function App() {
   const [transcript, setTranscript] = useState<TuiTranscript | null>(null)
   const [pending, setPending] = useState<Pending>(null)
   const startStampRef = useRef(0)
+  const cancelStartRef = useRef(false)
+  // Live reveal: the user's turn is painted at submit, before the launcher
+  // mints a run, so the thread never falls back to the idle "Start a run"
+  // state while the backend is already working.
+  const [pendingTask, setPendingTask] = useState<{ text: string; startedAt: number } | null>(null)
+  const [settledRows, setSettledRows] = useState<Set<string>>(() => new Set())
+  const [viewEpoch, setViewEpoch] = useState(0)
+  const [startedHere, setStartedHere] = useState(false)
+  const [stageVisible, setStageVisible] = useState(false)
 
   const [slashSel, setSlashSel] = useState(0)
 
@@ -541,6 +567,7 @@ function App() {
         if (cancelled || activeRef.current !== activeRunId) return
         pollFailed.current = false
         setTranscript(data)
+        if (data.blocks.some((block) => block.kind === 'user')) setPendingTask(null)
         liveRef.current = data.status === 'running'
         if (pending === 'starting') setPending(null)
         if (pending === 'stopping' && data.status !== 'running') setPending(null)
@@ -575,9 +602,16 @@ function App() {
 
   /* -- run lifecycle ------------------------------------------------------ */
 
-  const openRun = useCallback((runId: string) => {
+  const openRun = useCallback((runId: string, options?: { started?: boolean; reload?: boolean }) => {
+    const reload = options?.reload === true
+    if (!options?.started && !reload) {
+      setViewEpoch((epoch) => epoch + 1)
+      setStartedHere(false)
+    }
     setActiveRunId(runId)
-    setTranscript(null)
+    if (!reload) setTranscript(null)
+    if (!options?.started) setPendingTask(null)
+    setSettledRows(new Set())
     setVerify({ running: false, result: null })
     setPending(null)
     liveRef.current = true
@@ -589,6 +623,10 @@ function App() {
     setTranscript(null)
     setVerify({ running: false, result: null })
     setPending(null)
+    setPendingTask(null)
+    setSettledRows(new Set())
+    setViewEpoch((epoch) => epoch + 1)
+    setStartedHere(false)
     setDraft('')
     // A finished batch banner belongs to the previous view; a running batch
     // stays visible until it ends (the TUI can never silently lose it).
@@ -723,8 +761,25 @@ function App() {
       }
       setPending('starting')
       startStampRef.current = Date.now() / 1000
+      cancelStartRef.current = false
+      // Paint the user's turn immediately: the launcher may spend seconds in
+      // preflight and the initial frame before the run record exists. Presets
+      // get their real prompt text from the start response.
+      setViewEpoch((epoch) => epoch + 1)
+      setStartedHere(true)
+      setPendingTask({
+        text: taskKind === 'custom' ? goal : `/${taskKind}`,
+        startedAt: Date.now(),
+      })
       try {
-        await tuiStartRun({ taskKind, task: goal, settings: { ...settings, volumePath: source.trim() } })
+        const started = await tuiStartRun({ taskKind, task: goal, settings: { ...settings, volumePath: source.trim() } })
+        if (started.task) {
+          setPendingTask((prev) =>
+            prev && (prev.text === '' || prev.text.startsWith('/'))
+              ? { ...prev, text: started.task as string }
+              : prev,
+          )
+        }
         pushHistory(taskKind === 'custom' ? goal : `/${taskKind}`)
         setDraft('')
         // The launcher mints the run id: adopt the newest run on next poll.
@@ -737,18 +792,49 @@ function App() {
           const found = (latest ?? []).find((run) => (run.startedAt ?? 0) >= stamp - 1)
           if (found) {
             adopted = found.runId
-            openRun(found.runId)
+            openRun(found.runId, { started: true })
+            if (cancelStartRef.current) {
+              cancelStartRef.current = false
+              setPending('stopping')
+              void tuiStopRun(found.runId).catch((error: unknown) => {
+                setPending(null)
+                snackbar(`Stop was not accepted: ${errorText(error)}`, {
+                  severity: 'error',
+                  duration: 'long',
+                  dismissible: true,
+                })
+              })
+            }
             break
           }
         }
         if (adopted === null) {
           // Fallback: open the newest run when it differs from the previously open one.
           const latest = await refreshRuns()
-          if (latest && latest.length > 0 && latest[0].runId !== prevActive) openRun(latest[0].runId)
+          if (latest && latest.length > 0 && latest[0].runId !== prevActive) {
+            openRun(latest[0].runId, { started: true })
+            if (cancelStartRef.current) {
+              cancelStartRef.current = false
+              setPending('stopping')
+              void tuiStopRun(latest[0].runId).catch(() => setPending(null))
+            }
+          }
+        }
+        if (adopted === null && cancelStartRef.current) {
+          cancelStartRef.current = false
+          setPending(null)
+          snackbar('The run did not start, so there is nothing to stop.', {
+            severity: 'warning',
+            duration: 'long',
+            dismissible: true,
+          })
         }
       } catch (error: unknown) {
         const message = errorText(error)
+        cancelStartRef.current = false
         setPending(null)
+        setPendingTask(null)
+        setStartedHere(false)
         snackbar(`Could not start the task: ${message}`, {
           severity: 'error',
           duration: 'long',
@@ -800,6 +886,19 @@ function App() {
   )
 
   const handleStop = useCallback(() => {
+    // A start in flight has no run id yet: remember the request and stop the
+    // run as soon as the launcher records it (the launcher also checks the
+    // stop marker before it starts the agent).
+    if (pending === 'starting' && !activeRunId) {
+      cancelStartRef.current = true
+      setPending('stopping')
+      snackbar('Stop requested — the run will stop as soon as the launcher records it.', {
+        severity: 'info',
+        duration: 'long',
+        dismissible: true,
+      })
+      return
+    }
     // TUI parity: stopping while a batch runs cancels the queue as well as the
     // current member (remaining members become skipped, batch interrupted).
     if (batchRunning && batchProgress && !batchCancelling) {
@@ -1363,7 +1462,7 @@ function App() {
       await tuiRenameRun(renameTarget.runId, name)
       setRenameTarget(null)
       await refreshRuns()
-      if (activeRunId === renameTarget.runId) openRun(renameTarget.runId)
+      if (activeRunId === renameTarget.runId) openRun(renameTarget.runId, { reload: true })
       snackbar(`Renamed to “${name}”.`, { severity: 'info', duration: 'long', dismissible: true })
     } catch (error: unknown) {
       snackbar(`Rename failed: ${errorText(error)}`, {
@@ -1570,7 +1669,13 @@ function App() {
   const live = pending !== null || (transcript != null && transcript.status === 'running')
   const stopAvailable = pending === null && !!activeRunId && transcript?.status === 'running'
 
-  const rows: ReactNode[] = []
+  const markSettled = useCallback((key: string) => {
+    setSettledRows((prev) => (prev.has(key) ? prev : new Set(prev).add(key)))
+  }, [])
+
+  type RunRow = { key: string; block: TuiBlock | null; node: ReactNode }
+  const rowItems: RunRow[] = []
+  let openAnswer = false
   // Failed start with no minted run: plain chat rows like gsc-live-preview
   // (user turn + assistant red error text with retry), no InlineAlert.
   if (transcript?.runId === 'local-start-failed') {
@@ -1585,57 +1690,190 @@ function App() {
     const failedRed = /ollama|11434|inference/i.test(errText)
       ? 'Ollama is not running — start it, then retry.'
       : errText
-    rows.push(
-      <ChatMessage key="failed-user" role="user">
-        {taskText}
-      </ChatMessage>,
-    )
-    rows.push(<ErrorRow key="failed-assistant" message={failedRed} onRetry={() => void startCustomRun(retryTask, retryKind)} />)
+    rowItems.push({
+      key: 'user',
+      block: null,
+      node: (
+        <ChatMessage key="user" role="user">
+          {taskText}
+        </ChatMessage>
+      ),
+    })
+    rowItems.push({
+      key: 'failed-assistant',
+      block: null,
+      node: (
+        <ErrorRow
+          key="failed-assistant"
+          message={failedRed}
+          onRetry={() => void startCustomRun(retryTask, retryKind)}
+        />
+      ),
+    })
   }
-  // Terminal run: thinking is over, so the evidence collapses into one summary
-  // disclosure ("Worked for …"). The user prompt and the run's final answer
-  // stay as rows: the answer is the point of the run and reads as primary
-  // text. Intermediate model words fold into the disclosure as quiet reasoning
-  // text (core treaty: thinking holds only muted small text, answers live
-  // outside). Figures, alerts, and run notices cannot nest inside thinking,
-  // so they stay rows too.
-  const terminal = transcript != null && transcript.status !== 'running' && pending === null
-  const collapsibleKinds = new Set(['thinking', 'compaction', 'tool', 'assistant', 'finish'])
-  const visibleBlocks = transcript?.blocks.filter((block) => block.kind !== 'meta') ?? []
-  // The run's final answer: last assistant block in transcript order.
-  const finalAnswerIndex = visibleBlocks.map((block) => block.kind).lastIndexOf('assistant')
+  const serverUser = transcript?.blocks.find((block) => block.kind === 'user')
+  if (pendingTask?.text && !serverUser) {
+    // The launcher has not minted the run record yet: paint the user's turn
+    // now so submit never falls back to the idle empty state.
+    const optimistic: TuiBlock = {
+      kind: 'user',
+      title: pendingTask.text,
+      subtitle: '',
+      body: '',
+      status: null,
+      ts: pendingTask.startedAt / 1000,
+      data: {},
+    }
+    rowItems.push({
+      key: 'user',
+      block: optimistic,
+      node: (
+        <TuiBlockRow
+          key="user"
+          block={optimistic}
+          initialThinking={false}
+          onZoom={openZoom}
+          onFrameSettled={() => markSettled('user')}
+        />
+      ),
+    })
+  }
   if (transcript && transcript.runId !== 'local-start-failed') {
+    const visibleBlocks = transcript.blocks.filter((block) => block.kind !== 'meta')
     const initialThinkingIndex = visibleBlocks.findIndex((block) => block.kind === 'thinking')
-    const workedBlocks = terminal
-      ? visibleBlocks.filter(
-          (block, index) => collapsibleKinds.has(block.kind) && index !== finalAnswerIndex,
-        )
-      : []
-    let workedInserted = workedBlocks.length === 0
     visibleBlocks.forEach((block, index) => {
-      if (terminal && collapsibleKinds.has(block.kind) && index !== finalAnswerIndex) {
-        if (!workedInserted) {
-          workedInserted = true
-          rows.push(
-            <WorkedRow key="worked" blocks={workedBlocks} totalSeconds={transcriptDuration(transcript.blocks)} />,
-          )
-        }
+      // A streamed answer is still open until the call finishes. It can still
+      // merge into the thinking row when a tool call follows, so it must not
+      // be painted as an answer row before it is closed. A terminal run has
+      // no later merge: show the recorded text as closed instead of hiding it.
+      const open = (block.data as { open?: unknown } | null)?.open === true
+      if (block.kind === 'assistant' && open && transcript.status === 'running') {
+        openAnswer = true
         return
       }
-      const row = (
-        <TuiBlockRow
-          key={`${block.kind}-${index}`}
-          block={block}
-          initialThinking={index === initialThinkingIndex}
-          onZoom={openZoom}
-          onRetryError={() => void startCustomRun(transcript.task || '', 'custom')}
-        />
-      )
-      if (row) rows.push(row)
+      const renderBlock =
+        block.kind === 'assistant' && open
+          ? { ...block, data: { ...block.data, open: false } }
+          : block
+      const key = renderBlock.kind === 'user' ? 'user' : renderBlock.id || `${renderBlock.kind}-${index}`
+      if (key === 'user' && rowItems.some((row) => row.key === 'user')) return
+      rowItems.push({
+        key,
+        block: renderBlock,
+        node: (
+          <TuiBlockRow
+            key={key}
+            block={renderBlock}
+            initialThinking={index === initialThinkingIndex}
+            onZoom={openZoom}
+            onRetryError={() => void startCustomRun(transcript.task || '', 'custom')}
+            onFrameSettled={() => markSettled(key)}
+          />
+        ),
+      })
     })
   }
 
+  const rowIsSettled = useCallback(
+    (row: RunRow) => {
+      const block = row.block
+      if (!block) return true
+      if (block.kind === 'image') return settledRows.has(row.key)
+      if (block.kind === 'assistant') return (block.data as { open?: unknown } | null)?.open !== true
+      return block.status !== 'running'
+    },
+    [settledRows],
+  )
+  const { visibleItems, waiting } = useChatSequencer<RunRow>({
+    items: rowItems,
+    getKey: (row) => row.key,
+    seed: startedHere ? 'first' : 'all',
+    resetKey: `${viewEpoch}:${transcript ? (startedHere ? 'live' : 'history') : 'empty'}`,
+    isSettled: rowIsSettled,
+  })
+  const lastVisibleRow = visibleItems[visibleItems.length - 1] ?? null
+  const lastVisibleBlock = lastVisibleRow?.block ?? null
+  // A streaming/loading recorded row is the only thing allowed to animate:
+  // never attach a second sweeping status below it.
+  const visibleSettled = visibleItems.every(rowIsSettled)
+  // One real tail status while the run is live. The recorded rows stay above
+  // it; it is the only persistent animation and changes wording in place.
+  let liveStage: string | null = null
+  if (pending === 'stopping') {
+    liveStage = 'Stopping the run'
+  } else if (pending === 'starting' && !transcript) {
+    liveStage = 'Starting the run'
+  } else if (activeRunId && !transcript) {
+    liveStage = 'Reading the run record'
+  } else if (transcript?.status === 'running') {
+    if (openAnswer) {
+      liveStage = 'Writing the answer'
+    } else if (!lastVisibleBlock || lastVisibleBlock.kind === 'user') {
+      liveStage = 'Taking the initial frame'
+    } else if (lastVisibleBlock.kind === 'notices') {
+      liveStage = 'Starting the agent'
+    } else if (lastVisibleBlock.kind === 'warn') {
+      liveStage = 'Waiting for the model'
+    } else if (lastVisibleBlock.kind === 'thinking' || lastVisibleBlock.kind === 'compaction') {
+      liveStage = lastVisibleBlock.status === 'running' ? null : 'Waiting for the model'
+    } else if (lastVisibleBlock.kind === 'tool') {
+      liveStage = lastVisibleBlock.status === 'running' ? null : 'Waiting for the next step'
+    } else if (lastVisibleBlock.kind === 'image') {
+      liveStage =
+        lastVisibleRow && settledRows.has(lastVisibleRow.key) ? 'Waiting for the model' : null
+    } else if (lastVisibleBlock.kind === 'assistant') {
+      liveStage = 'Waiting for the model'
+    } else if (lastVisibleBlock.kind === 'finish') {
+      liveStage = 'Writing the summary'
+    } else if (lastVisibleBlock.kind === 'error') {
+      liveStage = 'Waiting for the run to end'
+    } else {
+      liveStage = 'Waiting for the next step'
+    }
+  } else if (waiting > 0) {
+    liveStage = 'Finishing the transcript'
+  }
+  if (!visibleSettled) liveStage = null
+
+  // The tail status is the second component of a started run: let the user's
+  // own turn (and the previous recorded row) finish entering before attaching
+  // the live status below it. While it stays mounted, only its wording changes.
+  // A queued recorded row goes first; a mounted status stays put and lets the
+  // row insert above it, while a hidden status waits for the queue to empty so
+  // two components never enter in one beat.
+  const hasStage = liveStage !== null
+  const stageCanShow = waiting === 0
+  useEffect(() => {
+    setStageVisible(false)
+  }, [viewEpoch])
+  useEffect(() => {
+    if (!hasStage) {
+      setStageVisible(false)
+      return
+    }
+    if (!stageCanShow || stageVisible) return
+    const timer = window.setTimeout(() => setStageVisible(true), chatEntryDelayMs())
+    return () => window.clearTimeout(timer)
+  }, [hasStage, stageCanShow, stageVisible, viewEpoch])
+
   const tail: ReactNode[] = []
+  if (liveStage && stageVisible) {
+    tail.push(
+      <ChatMessage
+        key="live-stage"
+        role="assistant"
+        thinking={
+          <ChatThinking
+            variant="status"
+            streaming
+            streamingLabel={liveStage}
+            label={liveStage}
+            details={[]}
+          />
+        }
+      />,
+    )
+  }
 
   const slashOpen = draft.trimStart().startsWith('/')
   const slashMatches = slashOpen ? matchSlashCommands(draft.trim()) : []
@@ -1753,7 +1991,7 @@ function App() {
                 )
               }
             >
-              {rows}
+              {visibleItems.map((row) => row.node)}
               {tail}
             </ChatThread>
             <ChatScrollToBottom />

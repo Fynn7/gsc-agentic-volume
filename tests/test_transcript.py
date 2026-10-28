@@ -219,6 +219,28 @@ class TranscriptBlocks(unittest.TestCase):
         self.assertEqual(len(answers), 1)
         self.assertEqual(answers[0]["title"], "It is a frog.")
 
+    def test_a_replayed_harness_message_does_not_add_a_second_row(self):
+        """The harness repeats earlier agent messages on later turns."""
+        self.transcript.ingest({"kind": "assistant", "text": "The camera is rotated."})
+        self.transcript.ingest({"kind": "tool_call", "name": "inspect_scene",
+                                "source": "service", "arguments": {}})
+        self.transcript.ingest({"kind": "tool_result", "name": "inspect_scene",
+                                "source": "service", "seconds": 0.2})
+        self.transcript.ingest({"kind": "assistant", "text": "The camera is rotated."})
+        answers = [block for block in self.transcript.blocks
+                   if block["kind"] == tui_transcript.ASSISTANT]
+        self.assertEqual(len(answers), 1)
+        self.assertEqual(answers[0]["title"], "The camera is rotated.")
+
+    def test_a_replayed_harness_update_does_not_add_a_second_row(self):
+        self.transcript.ingest({"kind": "assistant", "text": "Scene inspected."})
+        self.transcript.ingest({"kind": "tool_call", "name": "inspect_scene",
+                                "source": "service", "arguments": {}})
+        self.transcript.ingest({"kind": "assistant_update", "text": "Scene inspected."})
+        answers = [block for block in self.transcript.blocks
+                   if block["kind"] == tui_transcript.ASSISTANT]
+        self.assertEqual(len(answers), 1)
+
     def test_the_streamed_answer_wins_over_the_harness_text(self):
         """The stream arrives first: the harness closes the same block."""
         self.transcript.ingest({"kind": "text_delta", "delta": "It is a "})

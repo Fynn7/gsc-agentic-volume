@@ -329,6 +329,7 @@ class Transcript:
         self._tools: dict[str, dict] = {}   # tool name -> open tool block
         self._answer_text = ""    # the answer as the model stream delivers it
         self._notices: list[str] = []   # the harness warnings, one row for all
+        self._next_id = 0         # stable row identity for live UIs
 
     # -- block helpers ---------------------------------------------------
     def clear(self) -> None:
@@ -338,11 +339,14 @@ class Transcript:
         self._tools = {}
         self._answer_text = ""
         self._notices = []
+        self._next_id = 0
 
     def add(self, kind: str, title: str = "", subtitle: str = "", body: str = "",
             status: str | None = None, ts: float | None = None,
             data: dict | None = None) -> dict:
+        self._next_id += 1
         block = {
+            "id": "b%d" % self._next_id,
             "kind": kind,
             "title": title,
             "subtitle": subtitle,
@@ -379,6 +383,23 @@ class Transcript:
         """The newest answer block (the one the model is writing)."""
         for block in reversed(self.blocks):
             if block["kind"] == ASSISTANT:
+                return block
+        return None
+
+    def _same_assistant(self, text: str) -> dict | None:
+        """An answer block that already carries exactly this text.
+
+        The harness re-emits every agent message it has seen at the start of a
+        later turn. Those repeats are history, not new words: painting them
+        again would duplicate an existing row and put a later call's stamp
+        above the answer that really came first.
+        """
+        normalized = " ".join(text.split())
+        if not normalized:
+            return None
+        for block in reversed(self.blocks):
+            if (block["kind"] == ASSISTANT
+                    and " ".join(str(block.get("title") or "").split()) == normalized):
                 return block
         return None
 
@@ -645,6 +666,17 @@ class Transcript:
         if self._is_compaction(event, text):
             return self._close_compaction(event, text)
         last = self._last_assistant()
+        existing = self._same_assistant(text) if text else None
+        if existing is not None and existing is not last:
+            # The stream opened a repeat of an answer the harness already
+            # recorded: merge it back instead of adding a second row.
+            if last is not None and (last.get("data") or {}).get("open"):
+                title = str(last.get("title") or "").strip()
+                if not title or str(existing.get("title") or "").startswith(title):
+                    self.blocks.remove(last)
+            existing.setdefault("data", {})["open"] = False
+            self._answer_text = ""
+            return [existing]
         if last is not None:
             if (last.get("data") or {}).get("open"):
                 if text:
@@ -672,15 +704,20 @@ class Transcript:
             return []
         if self._is_compaction(event, text):
             return self._ingest_compaction_full(event, text)
+        existing = self._same_assistant(text)
         last = self._last_assistant()
+        if existing is not None:
+            # The harness repeats earlier agent messages at the start of later
+            # turns. Those words are already on screen; closing the same row is
+            # the whole event, never a new answer block.
+            existing.setdefault("data", {})["open"] = False
+            self._answer_text = ""
+            return [existing]
         if last is not None:
             if (last.get("data") or {}).get("open"):
                 last["title"] = text
                 last["data"]["open"] = False
                 return [last]
-            if str(last.get("title") or "").strip() == text:
-                # The stream already wrote this answer.
-                return []
         block = self.add(ASSISTANT, title=text, ts=event.get("ts"))
         return [block]
 
@@ -695,6 +732,10 @@ class Transcript:
         if last is not None and (last.get("data") or {}).get("open"):
             last["title"] = text
             return [last]
+        existing = self._same_assistant(text)
+        if existing is not None:
+            existing.setdefault("data", {})["open"] = False
+            return [existing]
         block = self.add(ASSISTANT, title=text, ts=event.get("ts"))
         block["data"]["open"] = True
         return [block]

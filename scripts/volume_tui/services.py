@@ -558,7 +558,7 @@ def list_models(endpoint: str, timeout: float = 5.0) -> list[str]:
 
 
 def model_problems(settings: dict) -> list[dict]:
-    """Missing-model / context-mismatch problems. Never downloads anything."""
+    """Missing-model / context-too-small problems. Never downloads anything."""
     endpoint = settings["h200Endpoint"] if settings.get("mode") == "H200" else settings.get("endpoint", "")
     model = settings.get("model", "")
     if not endpoint:
@@ -590,10 +590,20 @@ def model_problems(settings: dict) -> list[dict]:
             want = config_mod.example_config().get("contextSize")
     problems = []
     for entry in seen.get("models", []):
-        if entry.get("name") == model and entry.get("context_length") not in (None, want):
-            problems.append({"name": "Model context", "ok": False,
-                             "detail": "loaded %s context %s != required %s" % (model, entry.get("context_length"), want),
-                             "fix": "Restart Ollama with OLLAMA_CONTEXT_LENGTH=%s; the TUI never kills a live service." % want})
+        if entry.get("name") != model:
+            continue
+        loaded = entry.get("context_length")
+        if isinstance(loaded, bool) or not isinstance(loaded, (int, float)):
+            continue
+        # Codex only sends up to `contextSize`, so a larger loaded window
+        # cannot truncate the prompt. Requiring equality here blocked every
+        # new run while Ollama kept a previously loaded model (typically at
+        # the model's own default, e.g. 262144) alive after a stopped run.
+        if loaded >= want:
+            continue
+        problems.append({"name": "Model context", "ok": False,
+                         "detail": "loaded %s context %s < required %s" % (model, loaded, want),
+                         "fix": "Restart Ollama with OLLAMA_CONTEXT_LENGTH=%s; the TUI never kills a live service." % want})
     return problems
 
 

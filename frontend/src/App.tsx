@@ -1687,9 +1687,6 @@ function App() {
     const retryTask = typeof retryData.retryTask === 'string' ? retryData.retryTask : transcript.task
     const retryKind =
       retryData.retryKind === 'task-a' || retryData.retryKind === 'task-b' ? retryData.retryKind : 'custom'
-    const failedRed = /ollama|11434|inference/i.test(errText)
-      ? 'Ollama is not running — start it, then retry.'
-      : errText
     rowItems.push({
       key: 'user',
       block: null,
@@ -1705,7 +1702,7 @@ function App() {
       node: (
         <ErrorRow
           key="failed-assistant"
-          message={failedRed}
+          message={errText}
           onRetry={() => void startCustomRun(retryTask, retryKind)}
         />
       ),

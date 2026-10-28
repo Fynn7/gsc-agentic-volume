@@ -45,8 +45,9 @@ def temporary_context_offer(settings: dict, problems: list[dict]) -> dict | None
     """Return the lone Model-context blocker when a temporary instance can cover it.
 
     Pure predicate: Local mode, exactly one problem, and it is the context
-    mismatch — the user's Ollama is reachable but loaded with a different
-    context length. Anything else still needs a manual fix.
+    mismatch — the user's Ollama is reachable but loaded with a smaller
+    context length than the run requires. Anything else still needs a manual
+    fix.
     """
     if settings.get("mode") != "Local" or len(problems) != 1:
         return None

@@ -33,12 +33,17 @@ class ModelContextGate(unittest.TestCase):
     def test_the_configured_context_is_the_requirement(self):
         self.assertEqual(self._problems(loaded=32768, required=32768), [])
 
-    def test_a_loaded_context_that_differs_is_a_problem(self):
-        problems = self._problems(loaded=262144, required=16384)
+    def test_a_loaded_context_that_differs_downward_is_a_problem(self):
+        problems = self._problems(loaded=8192, required=16384)
         self.assertEqual(len(problems), 1)
         self.assertEqual(problems[0]["name"], "Model context")
-        self.assertIn("262144", problems[0]["detail"])
+        self.assertIn("8192", problems[0]["detail"])
         self.assertIn("16384", problems[0]["detail"])
+
+    def test_a_larger_loaded_context_is_not_a_problem(self):
+        # Ollama keeps the model loaded at its own default after a stopped
+        # run; a larger window cannot truncate what Codex sends.
+        self.assertEqual(self._problems(loaded=262144, required=16384), [])
 
 
 if __name__ == "__main__":

@@ -893,7 +893,7 @@ class TemporaryContextInstance(unittest.TestCase):
     def test_offer_predicate_only_for_lone_local_context_mismatch(self):
         import flows as tui_flows
         local = {"mode": "Local"}
-        mismatch = [{"name": "Model context", "ok": False, "detail": "loaded x context 262144 != required 16384"}]
+        mismatch = [{"name": "Model context", "ok": False, "detail": "loaded x context 8192 < required 16384"}]
         self.assertIsNotNone(tui_flows.temporary_context_offer(local, mismatch))
         self.assertIsNone(tui_flows.temporary_context_offer({"mode": "H200"}, mismatch))
         self.assertIsNone(tui_flows.temporary_context_offer(local, mismatch + [

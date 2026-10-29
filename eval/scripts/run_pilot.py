@@ -39,16 +39,48 @@ def child_python():
 
 
 def preflight(args):
-    service = pc.http_json(args.backend, '/api/service', timeout=5)
+    try:
+        service = pc.http_json(args.backend, '/api/service', timeout=5)
+    except Exception as error:
+        raise RuntimeError(
+            'Renderer backend unreachable at %s/api/service: %s. '
+            'Start it with: npm --prefix frontend run dev:backend' % (args.backend, error))
     if service.get('service') != 'gav-native-renderer':
         raise RuntimeError('Renderer service at %s is not gav-native-renderer: %r' % (args.backend, service))
-    show = pc.http_json(args.ollama, '/api/show', {'model': args.model}, timeout=30)
+    try:
+        show = pc.http_json(args.ollama, '/api/show', {'model': args.model}, timeout=30)
+    except Exception as error:
+        raise RuntimeError(
+            'Ollama/model lookup failed at %s/api/show (model=%s): %s. '
+            'Check that Ollama is running and the model is installed.' % (args.ollama, args.model, error))
     capabilities = show.get('capabilities') or []
     if 'vision' not in capabilities:
         raise RuntimeError('Model %r does not report vision capability: %r' % (args.model, capabilities))
     if show.get('remote_host') or show.get('remote_model') or ':cloud' in args.model:
         raise RuntimeError('Model %r is not a local installed model' % args.model)
     return service, show
+
+
+def check(args):
+    """Probe both services without launching anything; report each one separately."""
+    results = []
+    try:
+        service = pc.http_json(args.backend, '/api/service', timeout=5)
+        results.append({'name': 'renderer', 'url': args.backend + '/api/service', 'ok': True,
+                        'response': service})
+    except Exception as error:
+        results.append({'name': 'renderer', 'url': args.backend + '/api/service', 'ok': False,
+                        'error': str(error), 'hint': 'npm --prefix frontend run dev:backend'})
+    try:
+        show = pc.http_json(args.ollama, '/api/show', {'model': args.model}, timeout=30)
+        results.append({'name': 'ollama', 'url': args.ollama + '/api/show', 'ok': True,
+                        'model': args.model, 'capabilities': show.get('capabilities')})
+    except Exception as error:
+        results.append({'name': 'ollama', 'url': args.ollama + '/api/show', 'ok': False,
+                        'model': args.model, 'error': str(error)})
+    print(json.dumps({'event': 'check', 'ok': all(item['ok'] for item in results),
+                      'services': results}, indent=2, ensure_ascii=False))
+    return 0 if all(item['ok'] for item in results) else 2
 
 
 def build_config(args, task_dir):
@@ -443,9 +475,12 @@ def main(argv=None):
                         help='seconds to wait after the cooperative stop file before killing the tree')
     parser.add_argument('--runs-root', default=str(DEFAULT_RUNS))
     parser.add_argument('--infra-rerun', action='store_true', help='mark this run as an infra retry')
+    parser.add_argument('--check', action='store_true', help='probe renderer and Ollama, then exit')
     parser.add_argument('--dry-run', action='store_true', help='print paths and command only')
     args = parser.parse_args(argv)
     try:
+        if args.check:
+            return check(args)
         return run(args)
     except KeyboardInterrupt:
         print(json.dumps({'event': 'interrupted'}, ensure_ascii=False))

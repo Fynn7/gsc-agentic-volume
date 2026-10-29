@@ -76,6 +76,7 @@
 | `claim` 解析单测 | DONE / PARTIAL（含 `**` 粗体）/ CANNOT / 缺失→NONE 均正确 |
 | 35B 烟雾 | 失败于 Ollama 传输中断（内存），不是 wrapper 崩溃 |
 | 9B 烟雾 | 见 §3 |
+| 后端掉线复现 | `run_pilot.py --check` 报 renderer `WinError 10061`、Ollama `ok`；`npm --prefix frontend run dev:backend` 后两项 `ok: true` |
 
 ## 3 9B 烟雾的结论（不是评测数据）
 

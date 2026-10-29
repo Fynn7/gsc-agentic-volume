@@ -29,6 +29,10 @@ Invoke-WebRequest http://127.0.0.1:11434/api/tags   | Select-Object -Expand Cont
 # 下面的 python 用仓库自带的 venv，保证有 PIL/numpy；脚本本身只依赖标准库
 $py = "runtime\tui-venv\Scripts\python.exe"
 
+# 0) 两个服务分别探活（不启动 run）
+& $py eval/scripts/run_pilot.py --task T4 --check
+# 若 renderer 不在：npm --prefix frontend run dev:backend
+
 # 1) 只打印命令，不跑模型
 & $py eval/scripts/run_pilot.py --task T4 --condition local35b_v0 --index 1 --dry-run
 

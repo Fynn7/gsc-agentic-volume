@@ -36,6 +36,7 @@ VirtualSampling/Raycaster/VS/*.lz4
 /eval/runs/**/workspace/
 /eval/runs/**/codex-home/
 /eval/runs/**/_launch-logs/
+/eval/runs/**/_batch/
 /eval/runs/**/telemetry.jsonl
 /eval/runs/**/session.json
 /eval/runs/**/initial.json

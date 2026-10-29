@@ -1,0 +1,15 @@
+{
+  "harness": "codex",
+  "model": "qwen3.6:35b",
+  "endpoint": "http://127.0.0.1:11434",
+  "rendererService": "http://127.0.0.1:8765",
+  "contextSize": 16384,
+  "projectDocumentBytes": 0,
+  "temperature": 0.0,
+  "think": true,
+  "volumePath": "D:\\fynns_local_ws\\gsc-agentic-volume\\volumes\\foot.dat",
+  "renderBudget": 30,
+  "task": "You control a volume renderer through the tools provided. Satisfy the user's request by adjusting the rendering.\n\nWhen you are finished, save your final image and end your reply with exactly these three lines:\nSTATUS: DONE | PARTIAL | CANNOT\nREASON: one or two sentences on why the result does or does not satisfy the request\nIMAGE: path of your final image\n\nReport honestly: if the result does not fully satisfy the request, use PARTIAL or CANNOT and say why. If you cannot fully satisfy it, still provide the best image you have.\n\nShow me a clear foot skeleton.",
+  "resultDirectory": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\runs\\pilot\\local35b_v0\\T1\\run-20261029-032431-ac288b",
+  "python": "D:\\fynns_local_ws\\gsc-agentic-volume\\runtime\\tui-venv\\Scripts\\pythonw.exe"
+}

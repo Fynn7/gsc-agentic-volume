@@ -1,0 +1,20 @@
+{
+  "runId": "run-20261029-034906-73c584",
+  "mode": "new-experiment",
+  "status": "finished",
+  "pid": 14280,
+  "taskKey": "24fdce59a55a1dfa",
+  "directory": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\runs\\pilot\\local35b_v0\\T4\\run-20261029-034906-73c584",
+  "resultBase": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\runs\\pilot\\local35b_v0\\T4",
+  "resultBaseAdjusted": false,
+  "configuredResultDirectory": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\runs\\pilot\\local35b_v0\\T4",
+  "configSource": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\runs\\pilot\\local35b_v0\\T4\\_launch-configs\\run-20261029-034906-i03.json",
+  "configSha256": "bac62a3cdac61277f0e4d7e94df1d19b095dadebf85ac5774a55b0dc804ecc8a",
+  "originalResultDirectory": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\runs\\pilot\\local35b_v0\\T4",
+  "startedAt": 1793242146.3863332,
+  "resume": "not implemented: every invocation is a new experiment, never a resumed one",
+  "sessionId": "c2ad38e3-01db-4ed3-9d77-5544378a4aa3",
+  "ended": 1793242213.8760884,
+  "exitCode": 0,
+  "timedOut": false
+}

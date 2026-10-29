@@ -1,0 +1,7 @@
+{
+  "status": "CANNOT",
+  "reason": "The Native Raycaster renderer MCP server is unreachable (connection refused on all attempts), so no scene inspection, rendering, or frame saving was possible.",
+  "image": "none",
+  "basis": "explicit",
+  "raw_final_message": "STATUS: CANNOT\nREASON: The Native Raycaster renderer MCP server is unreachable (connection refused on all attempts), so no scene inspection, rendering, or frame saving was possible.\nIMAGE: none"
+}

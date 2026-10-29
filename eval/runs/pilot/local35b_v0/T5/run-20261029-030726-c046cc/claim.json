@@ -1,0 +1,7 @@
+{
+  "status": "CANNOT",
+  "reason": "The volume contains skeletal structures of a distal extremity (hand or foot), not cardiac anatomy — no heart is present in this dataset.",
+  "image": "/artifact/e837f0ac-73f5-4a49-9053-8a456be2f428/frame-8/image.png",
+  "basis": "explicit",
+  "raw_final_message": "STATUS: CANNOT\nREASON: The volume contains skeletal structures of a distal extremity (hand or foot), not cardiac anatomy — no heart is present in this dataset.\nIMAGE: /artifact/e837f0ac-73f5-4a49-9053-8a456be2f428/frame-8/image.png"
+}

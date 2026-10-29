@@ -1,0 +1,7 @@
+{
+  "status": "PARTIAL",
+  "reason": "The foot skeleton (metatarsals and tarsals) is visible but some lower leg bone interference remains at the top of the image; anatomical orientation is unknown so exact bone identification is approximate.",
+  "image": "/artifact/5dce9e79-8ea8-48a1-80c7-031382e83bb3/frame-30/image.png",
+  "basis": "explicit",
+  "raw_final_message": "STATUS: PARTIAL\nREASON: The foot skeleton (metatarsals and tarsals) is visible but some lower leg bone interference remains at the top of the image; anatomical orientation is unknown so exact bone identification is approximate.\nIMAGE: /artifact/5dce9e79-8ea8-48a1-80c7-031382e83bb3/frame-30/image.png"
+}

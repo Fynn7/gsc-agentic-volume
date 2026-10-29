@@ -68,6 +68,9 @@ def table_for(runs, manual):
              '|' + '|'.join(['---'] * len(HEADER)) + '|']
     for meta in runs:
         run_id = str(meta.get('runId'))
+        claim = pc.read_json(meta['_directory'] / 'claim.json', {}) or {}
+        status = claim.get('status') or meta.get('status') or 'NONE'
+        reason = claim.get('reason') or ''
         final = meta.get('finalImage')
         final_path = (meta['_directory'] / final) if final else None
         final_display = pc.relative(final_path) if final_path and final_path.is_file() else '—'
@@ -76,7 +79,7 @@ def table_for(runs, manual):
         minutes = ('%.1f' % (float(seconds) / 60.0)) if isinstance(seconds, (int, float)) else '—'
         cells = [('`%s`' % run_id), esc(meta.get('task')), esc(meta.get('condition')),
                  str(meta.get('toolCalls', '—')), minutes, str(meta.get('toolErrors', '—')),
-                 esc(meta.get('status', 'NONE')), esc(meta.get('reason') or '', 60),
+                 esc(status), esc(reason, 60),
                  ('`%s`' % final_display) if final_display != '—' else '—',
                  esc(meta.get('exitReason')), score, attribution]
         lines.append('| ' + ' | '.join(cells) + ' |')
@@ -164,23 +167,34 @@ def write_csv(runs, path, manual):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
-        writer.writerow(['run_id', 'task', 'condition', 'index', 'status', 'claim_basis', 'tool_calls',
-                         'seconds', 'tool_errors', 'exit_reason', 'tool_errors_detail',
+        writer.writerow(['run_id', 'task', 'condition', 'index', 'status', 'claim_basis', 'reason',
+                         'tool_calls', 'seconds', 'tool_errors', 'exit_reason', 'tool_errors_detail',
                          'final_image', 'score', 'attribution'])
         for meta in runs:
             run_id = str(meta.get('runId'))
+            claim = pc.read_json(meta['_directory'] / 'claim.json', {}) or {}
             score, attribution = manual.get(run_id, ('', ''))
             final = meta.get('finalImage')
             final_path = (meta['_directory'] / final) if final else None
             writer.writerow([run_id, meta.get('task'), meta.get('condition'), meta.get('index'),
-                             meta.get('status'), meta.get('claimBasis'), meta.get('toolCalls'),
+                             claim.get('status') or meta.get('status'), meta.get('claimBasis'),
+                             claim.get('reason') or '', meta.get('toolCalls'),
                              meta.get('seconds'), meta.get('toolErrors'), meta.get('exitReason'),
                              meta.get('perTool'), pc.relative(final_path) if final_path and final_path.is_file() else '',
                              score, attribution])
 
 
+def excluded_notes(runs):
+    lines = []
+    for meta in runs:
+        lines.append('- `%s`：已排除 — %s' % (meta.get('runId'), meta.get('exclusionReason') or 'infra contamination'))
+    return '\n'.join(lines)
+
+
 def run(args):
-    runs = find_runs(args.runs_root)
+    all_runs = find_runs(args.runs_root)
+    excluded = [meta for meta in all_runs if meta.get('excluded')]
+    runs = [meta for meta in all_runs if not meta.get('excluded')]
     doc_path = Path(args.doc)
     manual = existing_manual(doc_path)
     try:
@@ -188,13 +202,16 @@ def run(args):
     except OSError:
         text = '# Pilot v0\n\n'
     text = replace_block(text, RUNS_BEGIN, RUNS_END, table_for(runs, manual))
-    text = replace_block(text, ISSUES_BEGIN, ISSUES_END, issues_for(runs))
+    issues = issues_for(runs)
+    if excluded:
+        issues += '\n' + excluded_notes(excluded)
+    text = replace_block(text, ISSUES_BEGIN, ISSUES_END, issues)
     doc_path.write_text(text, encoding='utf-8')
     write_csv(runs, Path(args.csv), manual)
     kind = montage(runs, Path(args.montage))
-    print(json.dumps({'event': 'collected', 'runs': len(runs), 'doc': str(doc_path),
-                      'csv': args.csv, 'montage': args.montage, 'montage_kind': kind},
-                     ensure_ascii=False))
+    print(json.dumps({'event': 'collected', 'runs': len(runs), 'excluded': len(excluded),
+                      'doc': str(doc_path), 'csv': args.csv, 'montage': args.montage,
+                      'montage_kind': kind}, ensure_ascii=False))
     return 0
 
 

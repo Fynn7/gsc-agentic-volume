@@ -1,0 +1,7 @@
+{
+  "status": "DONE",
+  "reason": "The lateral view clearly shows the foot skeleton including metatarsals, tarsal bones, talus, calcaneus, and ankle joint with good bone contrast.",
+  "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\runtime\\63d9648a-4185-40f5-964f-0ab2dfab45d4\\final\\frame-4\\image.png",
+  "basis": "explicit",
+  "raw_final_message": "STATUS: DONE\nREASON: The lateral view clearly shows the foot skeleton including metatarsals, tarsal bones, talus, calcaneus, and ankle joint with good bone contrast.\nIMAGE: D:\\fynns_local_ws\\gsc-agentic-volume\\runtime\\63d9648a-4185-40f5-964f-0ab2dfab45d4\\final\\frame-4\\image.png"
+}

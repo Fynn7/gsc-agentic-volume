@@ -23,7 +23,7 @@ def existing_meta(runs_root, condition, task, index):
     task_dir = Path(runs_root) / condition / task
     for path in sorted(task_dir.glob('run-*/meta.json')):
         meta = pc.read_json(path, {}) or {}
-        if meta.get('index') == index and not meta.get('infraCandidate'):
+        if meta.get('index') == index and not meta.get('infraCandidate') and not meta.get('excluded'):
             return meta
     return None
 

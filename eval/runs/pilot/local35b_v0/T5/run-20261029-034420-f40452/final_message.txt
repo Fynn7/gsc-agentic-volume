@@ -1,0 +1,3 @@
+STATUS: CANNOT
+REASON: The volume contains foot anatomy (metatarsals and phalanges), not heart tissue. All slices across every axis consistently show only foot bone structures with no cardiac anatomy present.
+IMAGE: /artifact/02004609-bf4b-43de-8939-5d48b3ffa65f/frame-2/image.png

@@ -41,5 +41,7 @@ VirtualSampling/Raycaster/VS/*.lz4
 /eval/runs/**/session.json
 /eval/runs/**/initial.json
 /eval/runs/**/model.json
+/eval/runs/**/harness.jsonl
+/eval/runs/**/harness-stderr.log
 
 repomix-output.xml

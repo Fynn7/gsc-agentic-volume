@@ -1,0 +1,3 @@
+STATUS: CANNOT
+REASON: The 256³ volume contains hand/wrist skeletal anatomy (finger bones, carpals) — no cardiac tissue exists anywhere in the dataset.
+IMAGE: /artifact/c9784fa5-888a-4f78-af83-3753a98a2fdc/frame-5/image.png

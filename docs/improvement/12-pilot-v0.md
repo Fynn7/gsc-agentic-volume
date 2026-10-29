@@ -67,7 +67,15 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 <!-- RUNS:BEGIN -->
 | run_id | 任务 | 条件 | 工具调用数 | 墙钟(min) | 错误数 | STATUS | REASON（缩略） | 最终图 | 退出原因 | 评分 | 归因 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | 尚无 run | — | — | — | — |
+| `run-20261029-030550-5e035b` | T1 | local35b_v0 | 5 | 1.6 | 0 | DONE | Clear foot skeleton rendered showing all major bone group... | `eval/runs/pilot/local35b_v0/T1/run-20261029-030550-5e035b/final.png` | completed |  |  |
+| `run-20261029-032431-ac288b` | T1 | local35b_v0 | 6 | 2.0 | 0 | DONE | The lateral view clearly shows the foot skeleton includin... | `eval/runs/pilot/local35b_v0/T1/run-20261029-032431-ac288b/final.png` | completed |  |  |
+| `run-20261029-035014-611271` | T1 | local35b_v0 | 42 | 23.1 | 3 | PARTIAL | The foot skeleton (metatarsals and tarsals) is visible bu... | `eval/runs/pilot/local35b_v0/T1/run-20261029-035014-611271/final.png` | completed |  |  |
+| `run-20261029-030355-3dde78` | T4 | local35b_v0 | 4 | 1.8 | 0 | DONE | The blood vessels are clearly visible with enhanced contr... | `eval/runs/pilot/local35b_v0/T4/run-20261029-030355-3dde78/final.png` | completed |  |  |
+| `run-20261029-032335-ed2082` | T4 | local35b_v0 | 3 | 0.9 | 0 | DONE | Widened the transfer function width to 0.25, revealing bo... | `eval/runs/pilot/local35b_v0/T4/run-20261029-032335-ed2082/final.png` | completed |  |  |
+| `run-20261029-034906-73c584` | T4 | local35b_v0 | 4 | 1.1 | 0 | DONE | The oblique view at rotation [0, 45, -20] provides a clea... | `eval/runs/pilot/local35b_v0/T4/run-20261029-034906-73c584/final.png` | completed |  |  |
+| `run-20261029-030726-c046cc` | T5 | local35b_v0 | 32 | 16.1 | 0 | CANNOT | The volume contains skeletal structures of a distal extre... | `eval/runs/pilot/local35b_v0/T5/run-20261029-030726-c046cc/final.png` | completed |  |  |
+| `run-20261029-034420-f40452` | T5 | local35b_v0 | 11 | 4.7 | 0 | CANNOT | The volume contains foot anatomy (metatarsals and phalang... | `eval/runs/pilot/local35b_v0/T5/run-20261029-034420-f40452/final.png` | completed |  |  |
+| `run-20261029-041324-f8ffcf` | T5 | local35b_v0 | 16 | 6.8 | 0 | CANNOT | The 256³ volume contains hand/wrist skeletal anatomy (fin... | `eval/runs/pilot/local35b_v0/T5/run-20261029-041324-f8ffcf/final.png` | completed |  |  |
 <!-- RUNS:END -->
 
 评分列建议值：`Pass / Partial / Fail`（可解任务）或 `R0 / R1 / R2`（不可解任务的报告）。归因列建议值：`infra_bug / tool_gap / interface_ambiguity / model:<perception|planning|spatial|persistence|format>`。
@@ -75,9 +83,33 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 ## 3 已知问题
 
 <!-- ISSUES:BEGIN -->
-- 暂无可自动识别的问题；人工补充写在本节下方。
+- `run-20261029-035014-611271`：工具错误 3 次；明细见 `trace.jsonl` 的 error 字段。
+- `run-20261029-032635-aa445a`：已排除 — Renderer backend 8765 was killed at 03:29:09 local by the agent background shell's 30-minute deadline, 2.5 min into this run. The last served tool call was 03:28:20; the model then received connection refused and claimed CANNOT. Infra contamination, not model behavior. Rerun T5 index 2.
 <!-- ISSUES:END -->
 
 ### 3.1 人工补充
 
-（infra 崩溃、格式失败、异常现象，原样记录在这里。）
+**2026-10-29 03:29 后端中断（已定性为 infra，不是模型失败）**
+
+- 03:03–03:30 的批量跑到第 2 轮结束，共完成 6 个 run（T4×2、T1×2、T5×2）。
+- 03:29:09，渲染后端 8765 被 agent 的后台 shell 30 分钟 deadline 杀掉；当时 T5 index 2（`run-20261029-032635-aa445a`）已服务 5 次 render（最后成功工具调用 03:28:20），之后模型收到 connection refused，最终声明 `CANNOT`，原因写的是 MCP server unreachable。
+- 该 run 的 `meta.json` 已标 `excluded: true`，原因写在 `exclusionReason`；它不计入 T5 的模型数据。**恢复后重跑 T5 index 2**。
+- 03:26 之后的 T4/T1/T5 index 3 没有开始（预检在 8765 上失败），因此没有产生 run 目录。
+- 结论：以后后端必须由独立终端常驻，不能挂在 agent 的后台 shell 上；`run_batch.py` 的连续 3 次 infra 中止行为是正确的。
+
+**2026-10-29 03:44–04:13 续跑完成（9 个有效 run + 1 个 excluded）**
+
+| run | 调用数 | 墙钟 | 声明 | 备注 |
+|---|---:|---:|---|---|
+| T5-2 `run-20261029-034420-f40452` | 11 | 4.7 min | CANNOT | 替换 03:26 的污染 run；理由正确（foot anatomy，无心脏）；交出脚趾特写尽力图 |
+| T4-3 `run-20261029-034906-73c584` | 4 | 1.1 min | DONE | 血管树清晰 |
+| T1-3 `run-20261029-035014-611271` | 42 | 23.1 min | PARTIAL | 3 次工具错误；超出 40 次软上限；裁剪切掉了部分骨，图不完整 |
+| T5-3 `run-20261029-041324-f8ffcf` | 16 | 6.8 min | CANNOT | 结论“没有心脏”正确，但把数据说成 hand/wrist（实际是 foot）；R2/R1 由你定 |
+
+**T1-3 的 3 次错误是 `interface_ambiguity`，不是模型乱来**：模型三次给 `translation` 传了 `[0,0,-30]`、`[0,0,-10]`、`[0,0,-5]`，服务端按 `-2..2` 的范围拒绝，返回 `Invalid bounded numeric vector`。工具描述里没有写 translation 的范围/单位/归一化（`11-tool-audit.md` §0.3、§4），这是审计里已经标出的高危项；这 3 次失败应归 `interface_ambiguity`，修法是把范围写进工具描述。
+
+**T1-3 的 42 次调用**：超过 brief 的“40 次工具调用”软上限，但本仓 harness 没有调用次数上限（`CONFIG.md §3`），所以它跑完了，墙钟 23.1 min 仍在 30 min 内。这属于 `model:persistence`/探索策略，不是 infra；保留为数据点。
+
+**T5-3 的肢体误判**：`REASON` 说 “hand/wrist skeletal anatomy (finger bones, carpals)”，而数据是脚。它抓住了“没有心脏”这个正确结论，但身体部位识别错误。按 5.2 的 R 级定义，R2 要求原因与“报告证据要点”一致（数据是脚、不含胸部结构）；这条至少要在评分时标注为“结论对、证据部分错”。
+
+

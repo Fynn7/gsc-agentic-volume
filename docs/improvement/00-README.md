@@ -30,6 +30,9 @@
 | `06-evaluation-protocol.md` | 成功的程序化定义、真值格式、评分流程、统计方法 |
 | `07-worker-implementation-plan.md` | 给 coding agent 的可直接执行计划：分阶段任务、文件级改动、接口契约、验收命令 |
 | `10-solvable-demo-tasks.md` | 可解旗舰演示任务菜单（判据+三个候选+验证状态）：脚/颅骨/动脉瘤 |
+| `11-tool-audit.md` | 本仓 4 个 MCP 工具对 BorgVR 14 个工具的逐项审计、可靠性原语与参数语义缺口（2026-10-29） |
+| `12-pilot-v0.md` | Pilot v0 数据记录：T7 旧 run 复用 + P5 批量表 + 已知问题（2026-10-29） |
+| `12-status-tonight.md` | 2026-10-29 晚间状态报告：做了什么、没做什么、下一步跑什么 |
 | `08-repository-recheck.md` | 对本地运行证据的复核记录：已核实事实、对原稿的更正、仍待验证项与建议的下一步 |
 | `borgvr-fusssohle-protokoll.txt` | 教授 BorgVR 足底会话逐字协议（德文原文，10 的参照范式） |
 | `chapel-best-effort.gsc` | 可复现的教堂最好结果脚本（高斯 0.24/0.03 + 体素裁剪） |

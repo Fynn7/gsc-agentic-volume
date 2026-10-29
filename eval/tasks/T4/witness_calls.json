@@ -1,0 +1,147 @@
+{
+  "task": "T4",
+  "volume": "volumes/aneurism_256x256x256_uint8.dat",
+  "backend": "http://127.0.0.1:8765",
+  "started": 1793234604.4396834,
+  "calls": [
+    {
+      "name": "inspect_scene",
+      "arguments": {},
+      "seconds": 0.019,
+      "result": {
+        "id": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+        "state": "running",
+        "goal": "Witness for T4: Show me a clear view of the blood vessels.",
+        "remainingObservations": 30,
+        "imageSha256": "1387a40f66b67d6d5692f9af30eba564d8c6ce223199cd18123cb837be98a794",
+        "imageKind": "native-raycast",
+        "taskSuccess": "unverified",
+        "scene": {
+          "revision": 0,
+          "tf": {
+            "type": "smoothstep",
+            "start": 0.1,
+            "width": 0.12
+          },
+          "camera": {
+            "rotationXYZ": [
+              0,
+              0,
+              0
+            ],
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "orthographic": true
+          },
+          "crop": [
+            0,
+            256,
+            0,
+            256,
+            0,
+            256
+          ]
+        },
+        "volume": {
+          "dimensions": [
+            256,
+            256,
+            256
+          ],
+          "orientation": "unknown",
+          "axisOrder": "x-fastest; NumPy z,y,x",
+          "rendererMapping": "uint8 unchanged; uint16 full-volume min/max integer scaling (ported renderer_uint8)",
+          "spacingDefaulted": false
+        }
+      },
+      "imageVerified": true,
+      "imageBytes": 90064,
+      "imageSha256": "1387a40f66b67d6d5692f9af30eba564d8c6ce223199cd18123cb837be98a794"
+    },
+    {
+      "name": "finish_task",
+      "arguments": {
+        "frameRevision": 0,
+        "summary": "Witness solution produced without a model: open the aneurism volume, wait for the initial native raycast, inspect the returned PNG, and save frame 0."
+      },
+      "seconds": 0.036,
+      "result": {
+        "id": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+        "state": "finished",
+        "imageSha256": "1387a40f66b67d6d5692f9af30eba564d8c6ce223199cd18123cb837be98a794",
+        "selectedRevision": 0,
+        "finalDirectory": "D:\\fynns_local_ws\\gsc-agentic-volume\\runtime\\2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50\\final",
+        "taskSuccess": "unverified"
+      }
+    }
+  ],
+  "contract": "backend /api/tools/open + /api/tools/call (same tool contract as scripts/renderer_mcp.py)",
+  "model": null,
+  "sessionId": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+  "service": {
+    "service": "gav-native-renderer",
+    "toolContractVersion": 1
+  },
+  "initial": {
+    "id": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+    "state": "running",
+    "goal": "Witness for T4: Show me a clear view of the blood vessels.",
+    "remainingObservations": 30,
+    "imageSha256": "1387a40f66b67d6d5692f9af30eba564d8c6ce223199cd18123cb837be98a794",
+    "imageKind": "native-raycast",
+    "taskSuccess": "unverified",
+    "scene": {
+      "revision": 0,
+      "tf": {
+        "type": "smoothstep",
+        "start": 0.1,
+        "width": 0.12
+      },
+      "camera": {
+        "rotationXYZ": [
+          0,
+          0,
+          0
+        ],
+        "translation": [
+          0,
+          0,
+          0
+        ],
+        "orthographic": true
+      },
+      "crop": [
+        0,
+        256,
+        0,
+        256,
+        0,
+        256
+      ]
+    },
+    "volume": {
+      "dimensions": [
+        256,
+        256,
+        256
+      ],
+      "orientation": "unknown",
+      "axisOrder": "x-fastest; NumPy z,y,x",
+      "rendererMapping": "uint8 unchanged; uint16 full-volume min/max integer scaling (ported renderer_uint8)",
+      "spacingDefaulted": false
+    },
+    "imageVerified": true
+  },
+  "finalDirectory": "runtime/2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50/final",
+  "copied": {
+    "witness.png": "eval/tasks/T4/witness.png",
+    "witness.gsc": "eval/tasks/T4/witness.gsc",
+    "witness_scene.json": "eval/tasks/T4/witness_scene.json",
+    "witness_native_state.json": "eval/tasks/T4/witness_native_state.json"
+  },
+  "ended": 1793234607.7500148,
+  "seconds": 3.3
+}

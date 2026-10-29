@@ -31,4 +31,14 @@ VirtualSampling/Raycaster/VS/*.lz4
 /.playwright-mcp/
 /gav-*.png
 
+# Eval run payloads: keep the auditable metadata/final image, ignore bulky transports.
+/eval/runs/**/http/
+/eval/runs/**/workspace/
+/eval/runs/**/codex-home/
+/eval/runs/**/_launch-logs/
+/eval/runs/**/telemetry.jsonl
+/eval/runs/**/session.json
+/eval/runs/**/initial.json
+/eval/runs/**/model.json
+
 repomix-output.xml

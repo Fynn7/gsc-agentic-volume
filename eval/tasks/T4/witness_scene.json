@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "revision": 0,
+  "volumeHash": "2826a66db406f19bdd9e38cfe42a80b861fbce34a947c24ce511f07f1c160b83",
+  "rendererSha256": "897ee57f42a92c5f94ef2099e0a4eb6716dcb2f17fd53c5fcaa53fb1d605a97e",
+  "tf": {
+    "type": "smoothstep",
+    "start": 0.1,
+    "width": 0.12
+  },
+  "camera": {
+    "rotationXYZ": [
+      0,
+      0,
+      0
+    ],
+    "translation": [
+      0,
+      0,
+      0
+    ],
+    "orthographic": true
+  },
+  "crop": [
+    0,
+    256,
+    0,
+    256,
+    0,
+    256
+  ],
+  "output": [
+    512,
+    512
+  ],
+  "samplingRate": 1,
+  "alphaThreshold": 0.99,
+  "method": 0,
+  "level": 0,
+  "subdiv": 1,
+  "background": [
+    0,
+    0,
+    0,
+    1
+  ],
+  "mask": null
+}

@@ -1,0 +1,121 @@
+{
+  "task": "T1",
+  "sessionId": "2bda2b96-e685-48f0-8dd9-7e5f5597cfe7",
+  "volume": "volumes/foot.dat",
+  "entries": [
+    {
+      "tfStart": 0.08,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.080.png",
+      "imageSha256": "532085ac1579f896404dede7c7072b518959be64fac319a30de39386ee80dc3d",
+      "revision": 1,
+      "seconds": 2.63
+    },
+    {
+      "tfStart": 0.12,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.120.png",
+      "imageSha256": "767f0dd0b644c586578f2c92755a2dbf7ddd08038c37b8003dd8d9ade0276eae",
+      "revision": 2,
+      "seconds": 2.66
+    },
+    {
+      "tfStart": 0.16,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.160.png",
+      "imageSha256": "1e9629837a0ca6e6188fd8d480f696d1d05fb2fd936f38f969d1cde0a99c4758",
+      "revision": 3,
+      "seconds": 2.69
+    },
+    {
+      "tfStart": 0.2,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.200.png",
+      "imageSha256": "76d2c6df5679cd86d9bae21f5e3feff0110b2b3f49febd360798d8dea538317e",
+      "revision": 4,
+      "seconds": 2.66
+    },
+    {
+      "tfStart": 0.24,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.240.png",
+      "imageSha256": "18139e2bde423e829713f4f262f9f3ca6f0dce110e4f74dcc5ce690410e203f0",
+      "revision": 5,
+      "seconds": 2.73
+    },
+    {
+      "tfStart": 0.28,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.280.png",
+      "imageSha256": "015131ae7cf72013fdce086ad224f89481add03ca395e210751b3686c6e9d15e",
+      "revision": 6,
+      "seconds": 2.64
+    },
+    {
+      "tfStart": 0.32,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.320.png",
+      "imageSha256": "d8e74ca8e1a5fd3638ac45bf8e0a84649caa59122635756c67d03f14aec66836",
+      "revision": 7,
+      "seconds": 2.66
+    },
+    {
+      "tfStart": 0.36,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.360.png",
+      "imageSha256": "73f478d18c5bdc239c6b563e9f1d9b4f5db45c0c341e790a5cd869b0134e3a75",
+      "revision": 8,
+      "seconds": 2.67
+    },
+    {
+      "tfStart": 0.4,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.400.png",
+      "imageSha256": "f997195b7c89b3a00b4f0763249bc4ae5fabcd971e92a57fe0900abf2bd39be8",
+      "revision": 9,
+      "seconds": 2.69
+    },
+    {
+      "tfStart": 0.44,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.440.png",
+      "imageSha256": "b259ff8874626980ff123f1ce5b2a607316fcfeb10e8e19b409e0ca4f1db15b6",
+      "revision": 10,
+      "seconds": 2.65
+    },
+    {
+      "tfStart": 0.48,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.480.png",
+      "imageSha256": "2eced9c4c158d65aac5cee3250a175b510af37790ce9c83e4bc309f9592e436a",
+      "revision": 11,
+      "seconds": 2.79
+    },
+    {
+      "tfStart": 0.52,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.520.png",
+      "imageSha256": "63bbc1f00d20633ab151dcc0635cfd0ffef286ac788efa36189bfb213481ffb6",
+      "revision": 12,
+      "seconds": 2.68
+    },
+    {
+      "tfStart": 0.56,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.560.png",
+      "imageSha256": "6c190be094345b664e0b2d10fb7ec7b8982284684abeef2a81bdce823e6f4acf",
+      "revision": 13,
+      "seconds": 2.77
+    },
+    {
+      "tfStart": 0.6,
+      "tfWidth": 0.08,
+      "image": "D:\\fynns_local_ws\\gsc-agentic-volume\\eval\\tasks\\T1\\sweep\\tf_0.600.png",
+      "imageSha256": "656ad0898a74dce5126b62a895cc621f38b55f4703192c967beca52691e9d549",
+      "revision": 14,
+      "seconds": 2.63
+    }
+  ],
+  "contactSheet": "eval/tasks/T1/sweep_contact_sheet.png",
+  "note": "renderer-only sweep; not a model run"
+}

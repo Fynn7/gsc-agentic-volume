@@ -66,8 +66,7 @@ import {
 } from '@fynns/ui'
 import { fetchVolumeImport, importVolumeFile, listVolumeImports, pickVolumeFile, type VolumeImport } from './api'
 import { LiveStage, STAGE_EXPORT_EVENT } from './preview/LiveStage'
-import { ErrorRow, TuiBlockRow, TurnGroupRow, type ZoomPayload } from './TuiThread'
-import { buildTurnRows, type TurnGroup } from './turns'
+import { ErrorRow, TuiBlockRow, type ZoomPayload } from './TuiThread'
 import {
   BatchDetailDialog,
   BatchDialog,
@@ -219,21 +218,6 @@ function sameVolumePath(a: string, b: string): boolean {
   return norm(a) === norm(b)
 }
 
-/** Core chat entrance duration; the live status follows the first row. */
-function chatEntryDelayMs(): number {
-  try {
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return 0
-    const raw = getComputedStyle(document.documentElement)
-      .getPropertyValue('--fynns-chat-entry-duration')
-      .trim()
-    const value = Number.parseFloat(raw)
-    if (!Number.isFinite(value) || value <= 0) return 360
-    return raw.endsWith('ms') ? value : raw.endsWith('s') ? value * 1000 : value
-  } catch {
-    return 360
-  }
-}
-
 function App() {
   const [navOpen, setNavOpen] = useState(true)
   const [navMode, setNavMode] = useState<'batches' | 'chats'>('chats')
@@ -260,9 +244,9 @@ function App() {
   // mints a run, so the thread never falls back to the idle "Start a run"
   // state while the backend is already working.
   const [pendingTask, setPendingTask] = useState<{ text: string; startedAt: number } | null>(null)
+  const [settledRows, setSettledRows] = useState<Set<string>>(() => new Set())
   const [viewEpoch, setViewEpoch] = useState(0)
   const [startedHere, setStartedHere] = useState(false)
-  const [stageVisible, setStageVisible] = useState(false)
 
   const [slashSel, setSlashSel] = useState(0)
 
@@ -612,6 +596,7 @@ function App() {
     setActiveRunId(runId)
     if (!reload) setTranscript(null)
     if (!options?.started) setPendingTask(null)
+    setSettledRows(new Set())
     setVerify({ running: false, result: null })
     setPending(null)
     liveRef.current = true
@@ -624,6 +609,7 @@ function App() {
     setVerify({ running: false, result: null })
     setPending(null)
     setPendingTask(null)
+    setSettledRows(new Set())
     setViewEpoch((epoch) => epoch + 1)
     setStartedHere(false)
     setDraft('')
@@ -1861,29 +1847,11 @@ function App() {
   }
   if (!visibleSettled) liveStage = null
 
-  // The tail status is the second component of a started run: let the user's
-  // own turn (and the previous recorded row) finish entering before attaching
-  // the live status below it. While it stays mounted, only its wording changes.
-  // A queued recorded row goes first; a mounted status stays put and lets the
-  // row insert above it, while a hidden status waits for the queue to empty so
-  // two components never enter in one beat.
-  const hasStage = liveStage !== null
-  const stageCanShow = waiting === 0
-  useEffect(() => {
-    setStageVisible(false)
-  }, [viewEpoch])
-  useEffect(() => {
-    if (!hasStage) {
-      setStageVisible(false)
-      return
-    }
-    if (!stageCanShow || stageVisible) return
-    const timer = window.setTimeout(() => setStageVisible(true), chatEntryDelayMs())
-    return () => window.clearTimeout(timer)
-  }, [hasStage, stageCanShow, stageVisible, viewEpoch])
-
+  // The tail status is a real live row, not an event. Chat rows paint in place
+  // (no entrance beat), so the status can stay mounted while a recorded row is
+  // queued above it; only its wording changes.
   const tail: ReactNode[] = []
-  if (liveStage && stageVisible) {
+  if (liveStage) {
     tail.push(
       <ChatMessage
         key="live-stage"

@@ -36,129 +36,7 @@
   height: auto;
 }
 
-/*
- * Turn activity group: one quiet “Working / Worked for …” disclosure per
- * model turn. The group body flattens reasoning, commentary and tool rows;
- * frames are evidence thumbnails, not full-width content.
- */
-.gav-turn-group .fynns-chat-thinking-body {
-  white-space: normal;
-}
-
-.gav-turn-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--fynns-space-sm);
-  min-width: 0;
-  white-space: normal;
-}
-
-.gav-turn-item {
-  min-width: 0;
-}
-
-.gav-turn-item--thinking,
-.gav-turn-item--commentary,
-.gav-turn-item--tool {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.gav-turn-line {
-  display: flex;
-  align-items: baseline;
-  gap: 0.375rem;
-  min-width: 0;
-  color: var(--fynns-color-text-muted);
-  font-size: var(--fynns-font-size-caption);
-  line-height: var(--fynns-line-height-body);
-}
-
-.gav-turn-mark {
-  flex: 0 0 auto;
-  width: 0.75rem;
-  text-align: center;
-}
-
-.gav-turn-line-label {
-  font-weight: var(--fynns-font-weight-medium);
-}
-
-.gav-turn-reasoning-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.25rem;
-  min-width: 0;
-}
-
-.gav-turn-reasoning {
-  margin: 0;
-  color: var(--fynns-color-text-muted);
-  font-size: var(--fynns-font-size-sm);
-  line-height: var(--fynns-line-height-body);
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.gav-turn-reasoning--clamped {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-}
-
-.gav-turn-more {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--fynns-color-text-muted);
-  font: inherit;
-  font-size: var(--fynns-font-size-caption);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
-}
-
-.gav-turn-more:hover {
-  color: var(--fynns-color-text);
-}
-
-.gav-turn-more:focus-visible {
-  outline: var(--fynns-focus-ring-width) solid var(--fynns-color-focus);
-  outline-offset: var(--fynns-focus-ring-offset-control);
-}
-
-.gav-turn-item--commentary {
-  color: var(--fynns-color-text);
-  font-size: var(--fynns-font-size-sm);
-  line-height: var(--fynns-line-height-body);
-}
-
-.gav-turn-item--commentary .fynns-chat-markdown {
-  font-size: inherit;
-  line-height: inherit;
-}
-
-.gav-turn-item--commentary .fynns-chat-markdown :is(p, ul, ol, blockquote, pre) {
-  margin-block: 0;
-}
-
-.gav-turn-item--commentary .fynns-chat-markdown > * + * {
-  margin-block-start: var(--fynns-space-sm);
-}
-
-.gav-turn-item--tool .fynns-chat-thinking {
-  margin: 0;
-}
-
-/* Frames and slices: 8rem square evidence thumbnails in one grid. */
-.gav-turn-gallery {
-  grid-template-columns: repeat(auto-fill, 8rem);
-  justify-content: start;
-}
-
+/* One frame as a small evidence thumbnail instead of full-width media. */
 .gav-media-thumb {
   width: 8rem;
   max-width: 100%;
@@ -185,16 +63,6 @@
   overflow: hidden;
   color: var(--fynns-color-text-muted);
   font-size: var(--fynns-font-size-caption);
-}
-
-.gav-media-thumb-fallback {
-  display: grid;
-  place-items: center;
-  aspect-ratio: 1;
-  border: 1px dashed var(--fynns-color-border-strong);
-  border-radius: var(--fynns-radius-sm);
-  color: var(--fynns-color-text-muted);
-  font-size: var(--fynns-font-size-lg);
 }
 
 /* GSC Live Preview workbench: Chat 40% / Stage 60% in a core SplitPane. */

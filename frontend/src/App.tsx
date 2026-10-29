@@ -1671,7 +1671,11 @@ function App() {
   const live = pending !== null || (transcript != null && transcript.status === 'running')
   const stopAvailable = pending === null && !!activeRunId && transcript?.status === 'running'
 
-  type RunRow = { key: string; block: TuiBlock | null; group: TurnGroup | null; node: ReactNode }
+  const markSettled = useCallback((key: string) => {
+    setSettledRows((prev) => (prev.has(key) ? prev : new Set(prev).add(key)))
+  }, [])
+
+  type RunRow = { key: string; block: TuiBlock | null; node: ReactNode }
   const rowItems: RunRow[] = []
   let openAnswer = false
   // Failed start with no minted run: plain chat rows like gsc-live-preview
@@ -1688,7 +1692,6 @@ function App() {
     rowItems.push({
       key: 'user',
       block: null,
-      group: null,
       node: (
         <ChatMessage key="user" role="user">
           {taskText}
@@ -1698,7 +1701,6 @@ function App() {
     rowItems.push({
       key: 'failed-assistant',
       block: null,
-      group: null,
       node: (
         <ErrorRow
           key="failed-assistant"
@@ -1724,74 +1726,63 @@ function App() {
     rowItems.push({
       key: 'user',
       block: optimistic,
-      group: null,
       node: (
         <TuiBlockRow
           key="user"
           block={optimistic}
           initialThinking={false}
           onZoom={openZoom}
+          onFrameSettled={() => markSettled('user')}
         />
       ),
     })
   }
   if (transcript && transcript.runId !== 'local-start-failed') {
-    // A terminal run has no later merge: show an open assistant block as
-    // closed instead of hiding it. Live blocks keep their open flag so a
-    // streamed answer can still fold into the next tool call.
-    const visibleBlocks = transcript.blocks
-      .filter((block) => block.kind !== 'meta')
-      .map((block) => {
-        const open = (block.data as { open?: unknown } | null)?.open === true
-        return block.kind === 'assistant' && open && transcript.status !== 'running'
-          ? { ...block, data: { ...block.data, open: false } }
-          : block
-      })
+    const visibleBlocks = transcript.blocks.filter((block) => block.kind !== 'meta')
     const initialThinkingIndex = visibleBlocks.findIndex((block) => block.kind === 'thinking')
-    for (const row of buildTurnRows(visibleBlocks, transcript.status)) {
-      if (row.kind === 'group') {
-        rowItems.push({
-          key: row.key,
-          block: null,
-          group: row.group,
-          node: <TurnGroupRow key={row.key} group={row.group} onZoom={openZoom} />,
-        })
-        continue
-      }
-      const block = row.block
-      const open = (block.data as { open?: unknown } | null)?.open === true
+    visibleBlocks.forEach((block, index) => {
       // A streamed answer is still open until the call finishes. It can still
-      // merge into the next tool call, so it must not be painted as an answer
-      // row before it is closed.
+      // merge into the thinking row when a tool call follows, so it must not
+      // be painted as an answer row before it is closed. A terminal run has
+      // no later merge: show the recorded text as closed instead of hiding it.
+      const open = (block.data as { open?: unknown } | null)?.open === true
       if (block.kind === 'assistant' && open && transcript.status === 'running') {
         openAnswer = true
-        continue
+        return
       }
-      if (row.key === 'user' && rowItems.some((item) => item.key === 'user')) continue
+      const renderBlock =
+        block.kind === 'assistant' && open
+          ? { ...block, data: { ...block.data, open: false } }
+          : block
+      const key = renderBlock.kind === 'user' ? 'user' : renderBlock.id || `${renderBlock.kind}-${index}`
+      if (key === 'user' && rowItems.some((row) => row.key === 'user')) return
       rowItems.push({
-        key: row.key,
-        block,
-        group: null,
+        key,
+        block: renderBlock,
         node: (
           <TuiBlockRow
-            key={row.key}
-            block={block}
-            initialThinking={block.kind === 'thinking' && row.index === initialThinkingIndex}
+            key={key}
+            block={renderBlock}
+            initialThinking={index === initialThinkingIndex}
             onZoom={openZoom}
             onRetryError={() => void startCustomRun(transcript.task || '', 'custom')}
+            onFrameSettled={() => markSettled(key)}
           />
         ),
       })
-    }
+    })
   }
 
-  const rowIsSettled = useCallback((row: RunRow) => {
-    if (row.group) return !row.group.running
-    const block = row.block
-    if (!block) return true
-    if (block.kind === 'assistant') return (block.data as { open?: unknown } | null)?.open !== true
-    return block.status !== 'running'
-  }, [])
+  const rowIsSettled = useCallback(
+    (row: RunRow) => {
+      const block = row.block
+      if (!block) return true
+      if (block.kind === 'image') return settledRows.has(row.key)
+      if (block.kind === 'assistant') return (block.data as { open?: unknown } | null)?.open !== true
+      return block.status !== 'running'
+    },
+    [settledRows],
+  )
   const { visibleItems, waiting } = useChatSequencer<RunRow>({
     items: rowItems,
     getKey: (row) => row.key,
@@ -1801,7 +1792,6 @@ function App() {
   })
   const lastVisibleRow = visibleItems[visibleItems.length - 1] ?? null
   const lastVisibleBlock = lastVisibleRow?.block ?? null
-  const lastVisibleGroup = lastVisibleRow?.group ?? null
   // A streaming/loading recorded row is the only thing allowed to animate:
   // never attach a second sweeping status below it.
   const visibleSettled = visibleItems.every(rowIsSettled)
@@ -1817,10 +1807,6 @@ function App() {
   } else if (transcript?.status === 'running') {
     if (openAnswer) {
       liveStage = 'Writing the answer'
-    } else if (lastVisibleGroup) {
-      // The turn group's own header is the live status while it works; once
-      // its work is done, the next thing is the model's answer.
-      liveStage = lastVisibleGroup.running ? null : 'Waiting for the model'
     } else if (!lastVisibleBlock || lastVisibleBlock.kind === 'user') {
       liveStage = 'Taking the initial frame'
     } else if (lastVisibleBlock.kind === 'notices') {
@@ -1832,7 +1818,8 @@ function App() {
     } else if (lastVisibleBlock.kind === 'tool') {
       liveStage = lastVisibleBlock.status === 'running' ? null : 'Waiting for the next step'
     } else if (lastVisibleBlock.kind === 'image') {
-      liveStage = 'Waiting for the model'
+      liveStage =
+        lastVisibleRow && settledRows.has(lastVisibleRow.key) ? 'Waiting for the model' : null
     } else if (lastVisibleBlock.kind === 'assistant') {
       liveStage = 'Waiting for the model'
     } else if (lastVisibleBlock.kind === 'finish') {

@@ -4,18 +4,16 @@
  * Block semantics come from scripts/volume_tui/transcript.py + event_text.py
  * (server-built): task is the user's (▌), » lines are the model's own words,
  * ● ▣ ⚠ ✓ ✗ are measured facts. Component mapping follows core contracts:
- * - a model turn with work -> one TurnGroupRow: “Working” while live,
- *   “Worked for …” once settled; reasoning, commentary and tool rows are
- *   flattened inside, and frames/slices are 8rem thumbnails in one grid
- * - a turn without work -> ChatMessage.thinking + ChatThinking, as before
- * - the turn’s final answer stays outside the group (one assistant row)
- * - errors/warnings -> one plain red line or independent ChatThinking rows
+ * - model turns -> ChatMessage.thinking + ChatThinking (disclosure while the
+ *   chain exists, status strip otherwise; streaming while running)
+ * - tool calls -> one ChatThinking row (active = *-ing, done = past)
+ * - frames/answers/errors/warnings -> ChatMessage rows (errors are one plain
+ *   red line with hover retry) or independent ChatThinking rows
  * - transport (meta) -> retained in evidence, never rendered in the conversation
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   BusyRegion,
-  ChatMarkdown,
   ChatMessage,
   ChatReveal,
   ChatThinking,
@@ -28,8 +26,7 @@ import {
   RefreshIcon,
   Tooltip,
 } from '@fynns/ui'
-import { formatRunDuration, tuiArtifactUrl, tuiMark, type TuiBlock } from './tuiApi'
-import type { TurnGroup } from './turns'
+import { tuiArtifactUrl, tuiMark, type TuiBlock } from './tuiApi'
 
 export type ZoomPayload = { url: string; alt: string; caption: string }
 
@@ -138,8 +135,8 @@ export function ErrorRow({ message, onRetry }: { message: string; onRetry?: () =
 }
 
 /** One renderer tool call with the numbers it changed and what came back. */
-function ToolRow({ block, animate = true }: { block: TuiBlock; animate?: boolean }) {
-  const running = animate && block.status === 'running'
+function ToolRow({ block }: { block: TuiBlock }) {
+  const running = block.status === 'running'
   const facts = block.subtitle.trim()
   const body = block.body.trim()
   const description = [facts, body].filter(Boolean).join('\n\n') || undefined
@@ -157,37 +154,40 @@ function ToolRow({ block, animate = true }: { block: TuiBlock; animate?: boolean
   )
 }
 
-/** One evidence frame as an 8rem thumbnail; the caption keeps server wording. */
-function FrameThumb({
+/** One renderer frame as a small thumbnail; click opens the full-size dialog. */
+function FrameFigure({
   block,
   onZoom,
+  onSettled,
 }: {
   block: TuiBlock
   onZoom: (payload: ZoomPayload) => void
+  onSettled?: () => void
 }) {
   const [failed, setFailed] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const imgRef = useRef<HTMLImageElement | null>(null)
+  const reported = useRef(false)
   const image = String((block.data as { image?: unknown } | null)?.image ?? '')
   const url = tuiArtifactUrl(image)
-  const alt = block.title
+  const alt = `${block.title}`
   useEffect(() => {
     // Cached frames may complete before React attaches onLoad.
     if (url && imgRef.current?.complete && imgRef.current.naturalWidth > 0) setLoaded(true)
   }, [url])
+  useEffect(() => {
+    if (reported.current) return
+    if (loaded || failed || !url) {
+      reported.current = true
+      onSettled?.()
+    }
+  }, [loaded, failed, url, onSettled])
   if (!url || failed) {
     return (
-      <figure className="fynns-media-figure gav-media-thumb">
-        <div
-          className="gav-media-thumb-fallback"
-          title={`The frame could not be loaded from the local artifact route. The recorded row and its hash remain valid: ${alt}`}
-        >
-          <span aria-hidden>{tuiMark(block.kind)}</span>
-        </div>
-        <figcaption className="gav-media-thumb-caption" title={alt}>
-          {alt}
-        </figcaption>
-      </figure>
+      <InlineAlert
+        severity="warning"
+        message={`The frame could not be loaded from the local artifact route. The recorded row and its hash remain valid: ${block.title}`}
+      />
     )
   }
   return (
@@ -213,141 +213,10 @@ function FrameThumb({
           />
         </button>
       </BusyRegion>
-      <figcaption className="gav-media-thumb-caption" title={alt}>
-        {alt}
+      <figcaption className="gav-media-thumb-caption" title={block.title}>
+        {tuiMark(block.kind)} {block.title}
       </figcaption>
     </figure>
-  )
-}
-
-function ReasoningText({ text }: { text: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const [clampable, setClampable] = useState(false)
-  const ref = useRef<HTMLParagraphElement | null>(null)
-  useLayoutEffect(() => {
-    const node = ref.current
-    if (!node) return
-    const measure = () => {
-      // A closed disclosure has no measurable height; wait until it opens.
-      if (node.clientHeight <= 0) return
-      if (expanded) return
-      setClampable(node.scrollHeight > node.clientHeight + 1)
-    }
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [text, expanded])
-  return (
-    <div className="gav-turn-reasoning-wrap">
-      <p ref={ref} className={`gav-turn-reasoning${expanded ? '' : ' gav-turn-reasoning--clamped'}`}>
-        {text}
-      </p>
-      {clampable ? (
-        <button
-          type="button"
-          className="gav-turn-more"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? 'Show less' : 'Show more'}
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-/** Reasoning inside a turn group: one quiet line, then clamped muted text. */
-function FlatThinking({ block }: { block: TuiBlock }) {
-  const reasoned = (block.data as { reasoning?: unknown } | null)?.reasoning === true
-  const body = block.body.trim()
-  return (
-    <div className="gav-turn-item gav-turn-item--thinking">
-      <div className="gav-turn-line">
-        <span className="gav-turn-mark" aria-hidden>
-          {reasoned ? '✳' : '·'}
-        </span>
-        <span className="gav-turn-line-label">{reasoned ? 'Thought' : 'Model answered'}</span>
-      </div>
-      {body ? <ReasoningText text={body} /> : null}
-    </div>
-  )
-}
-
-/** One non-image block inside a flattened turn group. */
-function TurnBlock({ block }: { block: TuiBlock }) {
-  switch (block.kind) {
-    case 'thinking':
-      return <FlatThinking block={block} />
-    case 'assistant': {
-      // An answer that is still streaming may merge into a tool call, so it
-      // appears once the harness closes it (same rule as the old answer row).
-      const open = (block.data as { open?: unknown } | null)?.open === true
-      if (open) return null
-      return (
-        <div className="gav-turn-item gav-turn-item--commentary">
-          <ChatMarkdown source={block.title} />
-        </div>
-      )
-    }
-    case 'tool':
-      return (
-        <div className="gav-turn-item gav-turn-item--tool">
-          {/* The group header owns the live shimmer; keep the tool title
-              tense-accurate but static so two rows never sweep at once. */}
-          <ToolRow block={block} animate={false} />
-        </div>
-      )
-    default:
-      return null
-  }
-}
-
-/**
- * One model turn: “Working” while live, “Worked for …” once settled, open by
- * default. Reasoning, commentary, tool rows and the frame thumbnails all live
- * inside this one disclosure; only the final answer stays outside.
- */
-export function TurnGroupRow({
-  group,
-  onZoom,
-}: {
-  group: TurnGroup
-  onZoom: (payload: ZoomPayload) => void
-}) {
-  const [open, setOpen] = useState(true)
-  return (
-    <ChatMessage
-      role="assistant"
-      thinking={
-        <ChatThinking
-          className="gav-turn-group"
-          streaming={group.running}
-          streamingLabel="Working"
-          label="Worked"
-          durationMs={group.running ? undefined : group.durationMs ?? undefined}
-          durationLabel={(seconds) => `Worked for ${formatRunDuration(seconds)}`}
-          open={open}
-          onOpenChange={setOpen}
-          icon={null}
-          marker="none"
-          data-turn-group={group.key}
-        >
-          <div className="gav-turn-body">
-            {group.bodyBlocks.map((block, index) => (
-              <TurnBlock key={block.id || `${block.kind}-${index}`} block={block} />
-            ))}
-            {group.images.length > 0 ? (
-              <div className="fynns-media-gallery gav-turn-gallery">
-                {group.images.map((block, index) => (
-                  <FrameThumb key={block.id || `image-${index}`} block={block} onZoom={onZoom} />
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </ChatThinking>
-      }
-    />
   )
 }
 
@@ -357,11 +226,13 @@ export function TuiBlockRow({
   initialThinking = false,
   onZoom,
   onRetryError,
+  onFrameSettled,
 }: {
   block: TuiBlock
   initialThinking?: boolean
   onZoom: (payload: ZoomPayload) => void
   onRetryError?: (block: TuiBlock) => void
+  onFrameSettled?: () => void
 }) {
   switch (block.kind) {
     case 'user':
@@ -381,11 +252,9 @@ export function TuiBlockRow({
         </ChatReveal>
       )
     case 'image':
-      // Normally every image is rendered by its turn group. This fallback
-      // keeps a malformed/older transcript from dropping the evidence.
       return (
         <ChatReveal>
-          <FrameThumb block={block} onZoom={onZoom} />
+          <FrameFigure block={block} onZoom={onZoom} onSettled={onFrameSettled} />
         </ChatReveal>
       )
     case 'finish': {

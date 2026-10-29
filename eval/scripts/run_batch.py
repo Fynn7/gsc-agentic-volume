@@ -76,13 +76,13 @@ def run(args):
                 results.append(meta)
                 continue
         code, summary = invoke(args, task, index, False)
-        infra = code == 3 or (summary or {}).get('infraCandidate')
+        infra = code in (2, 3) or (summary or {}).get('infraCandidate')
         if infra:
             print(json.dumps({'event': 'infra_retry', 'task': task, 'index': index,
                               'exitCode': code}, ensure_ascii=False))
             time.sleep(5)
             code, summary = invoke(args, task, index, True)
-            infra = code == 3 or (summary or {}).get('infraCandidate')
+            infra = code in (2, 3) or (summary or {}).get('infraCandidate')
         if infra:
             consecutive_infra += 1
         else:

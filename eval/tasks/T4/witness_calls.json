@@ -2,14 +2,14 @@
   "task": "T4",
   "volume": "volumes/aneurism_256x256x256_uint8.dat",
   "backend": "http://127.0.0.1:8765",
-  "started": 1793234604.4396834,
+  "started": 1793235561.711237,
   "calls": [
     {
       "name": "inspect_scene",
       "arguments": {},
-      "seconds": 0.019,
+      "seconds": 0.018,
       "result": {
-        "id": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+        "id": "e540143b-4785-4986-9aa0-002ef264dfea",
         "state": "running",
         "goal": "Witness for T4: Show me a clear view of the blood vessels.",
         "remainingObservations": 30,
@@ -67,26 +67,26 @@
         "frameRevision": 0,
         "summary": "Witness solution produced without a model: open the aneurism volume, wait for the initial native raycast, inspect the returned PNG, and save frame 0."
       },
-      "seconds": 0.036,
+      "seconds": 0.01,
       "result": {
-        "id": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+        "id": "e540143b-4785-4986-9aa0-002ef264dfea",
         "state": "finished",
         "imageSha256": "1387a40f66b67d6d5692f9af30eba564d8c6ce223199cd18123cb837be98a794",
         "selectedRevision": 0,
-        "finalDirectory": "D:\\fynns_local_ws\\gsc-agentic-volume\\runtime\\2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50\\final",
+        "finalDirectory": "D:\\fynns_local_ws\\gsc-agentic-volume\\runtime\\e540143b-4785-4986-9aa0-002ef264dfea\\final",
         "taskSuccess": "unverified"
       }
     }
   ],
   "contract": "backend /api/tools/open + /api/tools/call (same tool contract as scripts/renderer_mcp.py)",
   "model": null,
-  "sessionId": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+  "sessionId": "e540143b-4785-4986-9aa0-002ef264dfea",
   "service": {
     "service": "gav-native-renderer",
     "toolContractVersion": 1
   },
   "initial": {
-    "id": "2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50",
+    "id": "e540143b-4785-4986-9aa0-002ef264dfea",
     "state": "running",
     "goal": "Witness for T4: Show me a clear view of the blood vessels.",
     "remainingObservations": 30,
@@ -135,13 +135,14 @@
     },
     "imageVerified": true
   },
-  "finalDirectory": "runtime/2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50/final",
+  "finalDirectory": "runtime/e540143b-4785-4986-9aa0-002ef264dfea/final",
   "copied": {
     "witness.png": "eval/tasks/T4/witness.png",
     "witness.gsc": "eval/tasks/T4/witness.gsc",
     "witness_scene.json": "eval/tasks/T4/witness_scene.json",
     "witness_native_state.json": "eval/tasks/T4/witness_native_state.json"
   },
-  "ended": 1793234607.7500148,
-  "seconds": 3.3
+  "ended": 1793235564.8634806,
+  "seconds": 3.2,
+  "imageVerified": true
 }

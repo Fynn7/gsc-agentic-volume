@@ -69,7 +69,7 @@
 |---|---|
 | `python -m compileall -q eval/scripts` | OK |
 | 所有脚本 `--help` / `--dry-run` | OK（T4 dry-run 打印完整命令与 task_text） |
-| `run_witness.py --task T4` | 成功；`imageVerified: true`；witness.png 90,064 B；见证会话 `2fdd35e2-…` |
+| `run_witness.py --task T4` | 成功；`imageVerified: true`；witness.png 90,064 B；见证会话 `e540143b-…` |
 | `sweep_tf.py --task T1` | 14/14 帧成功；联系表生成；见证会话 `2bda2b96-…` |
 | `collect_pilot.py`（无 run） | 成功；表格占位、CSV、拼图占位 |
 | `collect_pilot.py`（fixture） | 成功；1 行表格、CSV、拼图；手填评分/归因在重跑后保留 |

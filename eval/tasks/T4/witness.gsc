@@ -1,8 +1,8 @@
 setinteraction false
 resize 512 512
-setdir D:/fynns_local_ws/gsc-agentic-volume/runtime/2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50/frame-0
+setdir D:/fynns_local_ws/gsc-agentic-volume/runtime/e540143b-4785-4986-9aa0-002ef264dfea/frame-0
 logfile markers.txt
-loadvolume D:/fynns_local_ws/gsc-agentic-volume/runtime/2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50/volume/render.dat
+loadvolume D:/fynns_local_ws/gsc-agentic-volume/runtime/e540143b-4785-4986-9aa0-002ef264dfea/volume/render.dat
 log ASSET_LOADED
 resetrotation
 settranslation 0 0 0
@@ -18,7 +18,7 @@ addrotationy 0
 addrotationz 0
 settfparams false 0.1 0.12
 setclipbounds 0 256 0 256 0 256
-dumpstate D:/fynns_local_ws/gsc-agentic-volume/runtime/2fdd35e2-3cb1-4c6c-8be0-1089e69a0b50/frame-0/native-state.json
+dumpstate D:/fynns_local_ws/gsc-agentic-volume/runtime/e540143b-4785-4986-9aa0-002ef264dfea/frame-0/native-state.json
 screenshot image.png
 log COMPLETE
 quit

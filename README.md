@@ -20,7 +20,7 @@
 | `scripts/run_local_agent.py` | 无 TUI 的批量运行（`experiments/local-vlm.example.json` 为配置模板） |
 | `scripts/volume_tui/` | TUI 本体与 wording/转录/证据逻辑 |
 | `VirtualSampling/` | 原生 Raycaster（C++，`Raycaster.exe` 需本地构建） |
-| `docs/` | 文档索引与流程图（`docs/README.md`）；改进文档集在 `docs/improvement/00-README.md` |
+| `docs/` | 唯一权威文档 `docs/PROJECT.md`（状态、执行路径、评测、工具审计、历史决策）；索引见 `docs/README.md` |
 
 运行产物在 `runtime/`（run 目录、session、证据、`tui-settings.json`），只读复核即可。
 

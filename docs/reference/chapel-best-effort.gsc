@@ -2,7 +2,7 @@
 # 实测结论：高斯 0.24/0.03 + 体素单位裁剪中间 50% + ortho，
 # 教堂核心最清晰但球壳去不掉。0.25/0.75 之类的归一化裁剪是错的
 # （setclipbounds 取体素单位那样写只剩 0.5 体素宽）。
-# 直接 Run 可复现。详见 02-dataset-facts.md §7。
+# 直接 Run 可复现。详见 docs/PROJECT.md §6.2。
 setvolume 8
 setmethod 0
 setrate 1

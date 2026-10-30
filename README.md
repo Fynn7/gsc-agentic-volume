@@ -1,6 +1,6 @@
 # gsc-agentic-volume
 
-本地体数据 agent：Codex CLI 做 harness，本地 Ollama 模型（如 `qwen3.6:35b`）做推理，经 `scripts/renderer_mcp.py` 暴露的 MCP 工具调用 `src/` 渲染服务，用 `VirtualSampling/Raycaster` 原生渲染体数据。当前数据为 TU Wien Christmas Present（246×246×221 一档）。
+本地体数据 agent：Codex CLI 做 harness，本地 Ollama 模型（如 `qwen3.6:35b`）做推理，经 `scripts/renderer_mcp.py` 暴露的 MCP 工具调用 `src/` 渲染服务，用 `VirtualSampling/Raycaster` 原生渲染体数据。可运行体包括 `foot`、`skull`、`aneurism`、`bonsai`、`c60`、`head512`、`xmas` 与 TU Wien Christmas Present（246×246×221）等；评测任务用 foot / skull / aneurism / Christmas Present。
 
 ## 快速开始
 
@@ -14,7 +14,7 @@
 
 | 路径 | 说明 |
 |---|---|
-| `Start-VolumeTUI.ps1` | 唯一入口：校验文件、引导 `runtime/tui-venv`、探活后启动 TUI |
+| `Start-VolumeTUI.ps1` | TUI 入口：校验文件、引导 `runtime/tui-venv`、探活后启动 TUI |
 | `src/` | 渲染服务（`app.py`、`external_tools.py`、`renderer.py`、`volume.py`） |
 | `scripts/renderer_mcp.py` | MCP 代理：把服务的 4 个工具暴露给 Codex |
 | `scripts/run_local_agent.py` | 无 TUI 的批量运行（`experiments/local-vlm.example.json` 为配置模板） |

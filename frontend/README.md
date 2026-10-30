@@ -1,6 +1,6 @@
 # Agentic Volume Visualization — frontend
 
-React 19 + TypeScript + Vite UI for the local harness in the parent repo. It consumes the fynns design system from the sibling checkout `../fynns_ui_design_core` (`@fynn7/ui-design-core`, `file:` link, Vite alias `@fynns/ui`). The Python harness serves `dist/`; see `../docs/GUI_MIGRATION.md`.
+React 19 + TypeScript + Vite UI for the local harness in the parent repo. It consumes the fynns design system from the sibling checkout `../fynns_ui_design_core` (`@fynn7/ui-design-core`, `file:` link, Vite alias `@fynns/ui`). The Python harness serves `dist/`; runtime and repository map are in `../docs/PROJECT.md` §5.1 and §7.3.
 
 ## Commands
 

@@ -67,8 +67,8 @@
 **阻塞**：无。
 
 **环境快照【实测】**
-- 仓库 `gsc-agentic-volume`，分支 `dev-exp-frontend`，未 push。Windows + PowerShell；Python 用 `runtime\tui-venv\Scripts\python.exe`（或 `$env:GAV_PYTHON`）。
-- 服务：渲染后端 `http://127.0.0.1:8765`（工具契约 v1，`gav-native-renderer`）；Ollama `http://127.0.0.1:11434`（`qwen3.6:35b` Q4_K_M、36B、vision/tools/thinking；`qwen3.5:9b` 也可用）；5173 空闲，5174 是无关的 Vite。
+- 仓库 `gsc-agentic-volume`，主工作分支 `dev-frontend`（已 push；原 `dev-exp-frontend` 已并入并删除）。Windows + PowerShell；Python 用 `runtime\tui-venv\Scripts\python.exe`（或 `$env:GAV_PYTHON`）。
+- 服务：渲染后端 `http://127.0.0.1:8765`（工具契约 v1，`gav-native-renderer`）；Ollama `http://127.0.0.1:11434`（`qwen3.6:35b` Q4_K_M、36B、vision/tools/thinking；`qwen3.5:9b` 也可用）；前端 dev server 默认 `5177`（`npm --prefix frontend run dev`，`GAV_VITE_PORT` 可覆盖）。
 - 硬件：i5-12400F / 32 GB RAM / RTX 4060 8 GB（驱动 560.94）。35B 权重 23.9 GB、加载后约 27 GB，8 GB 显存放不下，Ollama 部分 offload 到 CPU。
 - 测试基线：324 项，5 项失败，全在 `test_volume_tui_app` 的 composer / runs dialog 用例，与 eval 和文档改动无关。
 - 实验室机器：2× NVIDIA RTX PRO 5000 48 GB（驱动 596.59、CUDA 13.2）+ ASPEED BMC 亮机卡，无外网和 SSH。GUI 帧率数字都是在 SwiftShader 软件栈下测的，最终性能验证应在实验室 headed Chrome 里重跑。
@@ -828,6 +828,7 @@ $py = "runtime\tui-venv\Scripts\python.exe"
 - 2026-10-29：把 `docs/improvement/` 的 00–13、两份 handoff、两张旧流程图、渲染用的 workflow 资料合并为本文；旧编号到新章节的对应表见附录 C。
 - 2026-10-29：pilot v0 完成；采纳有限干预阶梯与失败模式冻结判据（§3、§5.5）。
 - 2026-10-30：docs 清理落地：`docs/improvement/`、两份 handoff、`agent-prompt-to-completion.*` 删除，内容并入本文；`collect_pilot.py` 默认输出改为 `eval/results/pilot_v0.md`；`eval/`、`scripts/`、根 `README.md` 中的旧文档引用已改指本文；确认无 `eval/golden/` 引用。
+- 2026-10-30：同步仓库其他文档：根 `README.md`（数据范围、GUI 入口、目录表）、`frontend/README.md`（移除失效的 `GUI_MIGRATION` 指针）、`eval/README.md` 与 `eval/CONFIG.md`（统一为 pilot v0 历史口径）、`eval/results/pilot_v0.md`（去掉“今晚/明天”）、`scripts/volume_tui/README.md`（补测试覆盖），并把 §1 环境快照改为主工作分支与 5177。
 
 ---
 

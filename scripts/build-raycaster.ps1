@@ -1,6 +1,6 @@
 # Build VirtualSampling/Raycaster with the same toolchain as upstream (v145 / VS 2026).
 # Requires: Visual Studio Build Tools 2026 with "Desktop development with C++" / VCTools workload.
-# See VirtualSampling/docs/installation.md and thesis README.
+# See VirtualSampling/docs/installation.md and docs/PROJECT.md §7.3.
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path $PSScriptRoot -Parent

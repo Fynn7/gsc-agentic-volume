@@ -1,5 +1,7 @@
 # eval — pilot 基础设施
 
+pilot v0（2026-10-29）已完成；当前状态、下一步与结论见 `docs/PROJECT.md` §1、§6.3。本文件只说明脚本用法。
+
 固定项见 `eval/CONFIG.md`；工具边界见 `docs/PROJECT.md` §5.3；pilot 记录见 `eval/results/pilot_v0.md`。
 
 ## 目录

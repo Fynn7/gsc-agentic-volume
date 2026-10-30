@@ -1,6 +1,6 @@
 # Pilot v0：pilot 数据记录（2026-10-29）
 
-> 目的：给明天的教授邮件与组会一份可核对的 pilot 记录。**本文件不评分**；评分与归因两列留给用户。
+> 目的：给教授邮件与组会一份可核对的 pilot v0 记录。**本文件不评分**；评分与归因两列留给用户。
 > 规则：模型层面的失败不重跑；infra 崩溃只重跑一次并标 `infra_rerun`。所有 run 的原始日志都在 `eval/runs/pilot/`。
 > 本文件由 `eval/scripts/collect_pilot.py` 维护（`RUNS` / `ISSUES` 标记块之间是脚本生成的）；整理后的摘要与结论在 `docs/PROJECT.md` §6.3。
 
@@ -14,7 +14,7 @@
 Show me the chaple in the ball-like present inside the box - make the box invisible and the ball invisible, only make the chapel visible
 ```
 
-两次 run 都没有 `STATUS / REASON / IMAGE` 格式（该格式是今晚才引入的），所以声明类别按最终 `agent_message` 的语义推断，并标注「按语义推断」。
+两次 run 都没有 `STATUS / REASON / IMAGE` 格式（该格式是 pilot v0 才引入的），所以声明类别按最终 `agent_message` 的语义推断，并标注「按语义推断」。
 
 ### 1.1 run a：`run-20261024-200023-a026f1`
 
@@ -34,7 +34,7 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 | 最终参数（agent 自述） | `tfStart=0.9`、`tfWidth=0.05`、`rotationXYZ=[90,30,0]`；满 crop |
 | 最终消息原文（节选） | “Here's the result — **revision 21** shows the chapel isolated inside the ball-like present within the box… **Limitation**: The chapel doesn't appear as a coherent architectural structure in this raycast view — only its densest fragments are visible.” |
 
-**为什么判 DONE（按语义）**：首句是“这是结果 / revision 21 显示了被分离出来的教堂”，并把“看不成建筑”解释为渲染方法的限制，而不是任务没完成；没有“做不到 / 部分完成”的声明。若按今晚 `STATUS` 语义，这段更接近“声称完成 + 附限制”，因此记 DONE 而不是 PARTIAL。**这是语义推断，不是评分。**
+**为什么判 DONE（按语义）**：首句是“这是结果 / revision 21 显示了被分离出来的教堂”，并把“看不成建筑”解释为渲染方法的限制，而不是任务没完成；没有“做不到 / 部分完成”的声明。若按 pilot v0 的 `STATUS` 语义，这段更接近“声称完成 + 附限制”，因此记 DONE 而不是 PARTIAL。**这是语义推断，不是评分。**
 
 ### 1.2 run b：`run-20261024-193758-90e262`
 
@@ -61,7 +61,7 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 - 两张最终图在视觉上都只有黑色背景上的若干亮斑/小块，没有可辨认的教堂结构；这与 `docs/PROJECT.md` §6.2 的“球壳与教堂强度重叠、AABB 必穿球壳”一致。
 - run b 的 `tfStart=0.69` 与它自述的“球密度 0.4–0.6、教堂 >0.65”和 PROJECT.md §6.2 的实测密度带不一致（PROJECT.md §6.2：球壳 0.60–0.78，教堂候选 ≤0.28）。这是 agent 自述与数据事实的冲突，记录在此，归因留给用户。
 - run a 用尽 30 次观测预算后仍尝试 `inspect_slice` 与 `render_scene`，各报一次预算耗尽错误；这是“预算语义”而不是模型崩溃。
-- 旧 run 的工具接口与今晚审计的 4 个工具一致（`inspect_scene` / `render_scene` / `inspect_slice` / `finish_task`）。
+- 旧 run 的工具接口与 2026-10-29 审计的 4 个工具一致（`inspect_scene` / `render_scene` / `inspect_slice` / `finish_task`）。
 
 ## 2 Pilot 运行记录（P5）
 

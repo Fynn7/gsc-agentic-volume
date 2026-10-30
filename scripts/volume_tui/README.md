@@ -325,15 +325,19 @@ services); `tests/test_transcript.py` covers the coding-agent transcript
 (pure functions, no run needed); `tests/test_event_text.py` covers the wording
 of every row (the same pure functions); `tests/test_stream.py` covers the
 recorded model stream (SSE parsing and the live tail);
-`tests/test_run_lifecycle.py` covers the launcher, the stop before the agent
-starts and the evidence; `tests/test_chat_log.py` covers the chat record as a
-log (the plain text, the marks, the export); `tests/test_volume_tui_app.py`
-covers the screen (the conversation, the thinking chain, the composer, the
-dialogs, the busy feedback). No test starts a model, renderer, or network
-service. Run them with the TUI venv Python (has NumPy/Pillow/Textual). With a
-bare Python lacking NumPy, `test_capabilities`/`test_external_tools` fail at
-import (pre-existing, untouched: they exercise `src/` which requires NumPy);
-the Textual smoke and NumPy slice tests skip cleanly instead of erroring.
+`tests/test_live_transcript.py` covers the GUI live-transcript bridge (one run
+folded once, rows never move or duplicate); `tests/test_run_lifecycle.py`
+covers the launcher, the stop before the agent starts and the evidence;
+`tests/test_chat_log.py` covers the chat record as a log (the plain text, the
+marks, the export); `tests/test_services_context.py` covers the service gate's
+context requirement; `tests/test_volume_import.py` covers preview import
+regressions; `tests/test_volume_tui_app.py` covers the screen (the conversation,
+the thinking chain, the composer, the dialogs, the busy feedback). No test
+starts a model, renderer, or network service. Run them with the TUI venv Python
+(has NumPy/Pillow/Textual). With a bare Python lacking NumPy,
+`test_capabilities`/`test_external_tools` fail at import (pre-existing,
+untouched: they exercise `src/` which requires NumPy); the Textual smoke and
+NumPy slice tests skip cleanly instead of erroring.
 Real acceptance is one live Task A run: send a task, watch the conversation,
 open the thinking chain, copy the chat log, stop, verify, switch runs.
 

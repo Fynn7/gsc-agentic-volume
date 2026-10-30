@@ -1,7 +1,7 @@
-# eval/CONFIG — 固定项（2026-10-29）
+# eval/CONFIG — pilot v0 固定项（2026-10-29）
 
 > 任何一项变化都要在论文里写明，并整体重跑受影响的 run。
-> 本文件是今晚 pilot 的唯一配置来源；`eval/scripts/*.py` 只读取这里的约定，不另设默认值之外的开关。
+> 本文件记录 pilot v0 的固定配置，不是后续正式评测的配置；项目现状、下一步与采样约定见 `docs/PROJECT.md` §1、§4.5。`eval/scripts/*.py` 只读取这里的约定，不另设默认值之外的开关。
 
 ## 1. 模型与端点
 
@@ -42,7 +42,7 @@
 
 ## 5. 条件与目录
 
-| 条件名 | 模型 | 工具层 | 今晚 |
+| 条件名 | 模型 | 工具层 | pilot v0 |
 |---|---|---|---|
 | `local35b_v0` | qwen3.6:35b | 当前 T-base（4 个工具） | 跑 |
 | `cloud_v0` | 强云端模型 | 当前 T-base | **未接通，跳过**；见 §6 |
@@ -60,12 +60,12 @@ eval/runs/pilot/<condition>/<task>/_launch-configs/*.json   # run_pilot 生成�
 
 ## 6. 云端条件为什么没接
 
-当前 launcher 只实现本地 Ollama 路线：`validate_config` 要求 `harness=codex` 且模型名不得含 `:cloud`（`scripts/run_lifecycle.py:246-251`），`execute()` 用 `OllamaDriver.inventory()` 校验本地已安装且带 vision 的模型（`scripts/run_local_agent.py:258-259`），并主动清掉 `OPENAI_API_KEY` 等环境变量（`scripts/run_local_agent.py:280-282`）。接云端需要改 harness/provider 配置，属于“改工具/脚手架”，当次 pilot 不做；brief 里的云端 4 次 run 因此未执行。现状与放宽 G8 的约束见 `docs/PROJECT.md` §5.7。
+当前 launcher 只实现本地 Ollama 路线：`validate_config` 要求 `harness=codex` 且模型名不得含 `:cloud`（`scripts/run_lifecycle.py:246-251`），`execute()` 用 `OllamaDriver.inventory()` 校验本地已安装且带 vision 的模型（`scripts/run_local_agent.py:258-259`），并主动清掉 `OPENAI_API_KEY` 等环境变量（`scripts/run_local_agent.py:280-282`）。接云端需要改 harness/provider 配置，属于“改工具/脚手架”，当次 pilot 不做；当次 brief 里的云端 4 次 run 因此未执行。现状与放宽 G8 的约束见 `docs/PROJECT.md` §5.7。
 
-## 7. 已知环境事实（2026-10-29 00:xx 本地）
+## 7. pilot v0 当时的环境事实（2026-10-29）
 
-- 渲染服务 8765、Ollama 11434 均在监听；5174 由 `fynns_ui_design_core` 的 Vite dev server 占用，5173 空闲。
-- 当前机器：i5-12400F / 32 GB RAM / RTX 4060 8 GB（`nvidia-smi` 560.94）。`qwen3.6:35b` 权重约 23.9 GB，放不进 8 GB 显存，Ollama 会部分 offload 到 CPU。
+- 渲染服务 8765、Ollama 11434 均在监听。
+- pilot v0 机器：i5-12400F / 32 GB RAM / RTX 4060 8 GB（`nvidia-smi` 560.94）。`qwen3.6:35b` 权重约 23.9 GB，放不进 8 GB 显存，Ollama 会部分 offload 到 CPU。
 - 历史参照：两次教堂 run（2026-10-24）分别 21.9 min / 40 次工具调用、12.4 min / 22 次工具调用。按此外推，T1/T4/T5 单次 5–25 min；9 次批量约 1–4 h，过夜可行。**注意**：本机 8 GB 显存 + 32 GB 内存装不下 35B（见下），批量应在实验室 2×RTX PRO 5000 或同等机器上跑。
 - `think=true` 的选择理由：两个已归档教堂 run 都用 `think=true`；`experiments/local-vlm.example.json` 只是模板，未产生过评测数据。为与已有轨迹保持同一系统，pilot 采用 `think=true`。这一项在正式评测前可以再确认一次，但一旦开跑就固定。
 
@@ -89,7 +89,7 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 
 理由：当次 brief 的 P3.1 明确“T7 若与之前教堂测试 run 用的措辞不同，以之前的为准”，且复用旧 run 时 prompt 必须一致（`docs/PROJECT.md` §4.3 同样固定此原文）。
 
-## 9. 今晚不做什么
+## 9. pilot v0 的范围限制（已完成）
 
 - 不改 `src/` 渲染引擎与服务行为；不改 `scripts/renderer_mcp.py`、`scripts/run_local_agent.py` 的工具面。
 - 不新增工具（`set_lighting`、`reset_state`、分析工具、`isolate_nodes` 均不做）。

@@ -21,7 +21,7 @@
 | `scripts/volume_tui/` | TUI 本体与 wording/转录/证据逻辑 |
 | `VirtualSampling/` | 原生 Raycaster（C++，`Raycaster.exe` 需本地构建） |
 | `scripts/materialize_dataset.py` | 把内置预览体（`Datasets/*.dat`+lz4）落成可运行体到 `volumes/`；Stage 的 Dataset 只有存在该文件时才能同时驱动 run |
-| `docs/` | 文档索引与流程图（`docs/README.md`）；改进文档集在 `docs/improvement/00-README.md` |
+| `docs/` | 唯一权威文档 `docs/PROJECT.md`（状态、执行路径、评测、工具审计、历史决策）；索引见 `docs/README.md` |
 
 Stage 的 **Dataset** 是预览与运行体的同一个选择：带 `— run + preview` 的条目会同时改下一次运行的 `volumePath`，`— preview only` 的条目只改画面、运行体不变，界面文案会写明当前运行体是哪个文件。
 

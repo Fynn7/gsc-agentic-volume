@@ -51,11 +51,9 @@ Evidence is read-only except new runs, `verification.json`,
   every 0.1s (the spinner, the seconds) and the evidence is read in a worker
   thread every 0.5s, so a slow backend never freezes the animation.
 - The **flow diagram** of the whole pipeline (TUI, launcher, renderer service,
-  agent, evidence) is in `docs/agent-prompt-to-completion.html`, with its
-  source (`docs/agent-prompt-to-completion.workflow.json`) next to it.
-  The agent-failure analysis and improvement plan (tool changes, evaluation
-  protocol, worker plan) live in `docs/improvement/00-README.md`, with the
-  local-evidence recheck in `docs/improvement/08-repository-recheck.md`.
+  agent, evidence) and the single-run runtime path are in `docs/PROJECT.md`
+  §3.1 and §5.1. The agent-failure analysis, tool audit, evaluation protocol
+  and historical decisions live in the same file (`docs/PROJECT.md`).
 - **Whose words are these?** `▌` is your task, `»` is everything the model
   itself wrote (its answer, its reason for a call, its claim at the end),
   and `● ▣ ⚠ ✓` are facts the screen measured or recorded. The screen never

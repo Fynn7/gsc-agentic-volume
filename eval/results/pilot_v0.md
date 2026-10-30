@@ -1,7 +1,8 @@
-# 12 Pilot v0：pilot 数据记录（2026-10-29）
+# Pilot v0：pilot 数据记录（2026-10-29）
 
 > 目的：给明天的教授邮件与组会一份可核对的 pilot 记录。**本文件不评分**；评分与归因两列留给用户。
 > 规则：模型层面的失败不重跑；infra 崩溃只重跑一次并标 `infra_rerun`。所有 run 的原始日志都在 `eval/runs/pilot/`。
+> 本文件由 `eval/scripts/collect_pilot.py` 维护（`RUNS` / `ISSUES` 标记块之间是脚本生成的）；整理后的摘要与结论在 `docs/PROJECT.md` §6.3。
 
 ## 1 T7（复用旧 run，不重跑）
 
@@ -22,7 +23,7 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 | launcher 目录 | `runtime/archive/run-20261024-200023-a026f1` |
 | session 目录 | `runtime/archive/987b993b-5192-4060-8f52-536c1d416105` |
 | 最终图 | `runtime/archive/987b993b-5192-4060-8f52-536c1d416105/final/image.png`（12,503 B） |
-| 存档副本 | `docs/improvement/figures/t7-reuse-run-a-final.png` |
+| 存档副本 | `docs/figures/t7-reuse-run-a-final.png` |
 | 工具调用总数 | **40**：`inspect_scene` 7、`render_scene` 22、`inspect_slice` 10、`finish_task` 1 |
 | 墙钟 | 21.9 min（manifest `seconds=1313.5`） |
 | 推理 HTTP 请求 | 47 |
@@ -42,7 +43,7 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 | launcher 目录 | `runtime/archive/run-20261024-193758-90e262` |
 | session 目录 | `runtime/archive/af1092fe-62f6-43bb-98e9-76cabc9b83e0` |
 | 最终图 | `runtime/archive/af1092fe-62f6-43bb-98e9-76cabc9b83e0/final/image.png`（9,690 B） |
-| 存档副本 | `docs/improvement/figures/t7-reuse-run-b-final.png` |
+| 存档副本 | `docs/figures/t7-reuse-run-b-final.png` |
 | 工具调用总数 | **22**：`inspect_scene` 3、`render_scene` 18、`inspect_slice` 0、`finish_task` 1 |
 | 墙钟 | 12.4 min（manifest `seconds=743.1`） |
 | 推理 HTTP 请求 | 25 |
@@ -57,8 +58,8 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 
 ### 1.3 事实观察（不评分）
 
-- 两张最终图在视觉上都只有黑色背景上的若干亮斑/小块，没有可辨认的教堂结构；这与 `02-dataset-facts.md §7` 的“球壳与教堂强度重叠、AABB 必穿球壳”一致。
-- run b 的 `tfStart=0.69` 与它自述的“球密度 0.4–0.6、教堂 >0.65”和 02 §7 的实测密度带不一致（02 §7：球壳 0.60–0.78，教堂候选 ≤0.28）。这是 agent 自述与数据事实的冲突，记录在此，归因留给用户。
+- 两张最终图在视觉上都只有黑色背景上的若干亮斑/小块，没有可辨认的教堂结构；这与 `docs/PROJECT.md` §6.2 的“球壳与教堂强度重叠、AABB 必穿球壳”一致。
+- run b 的 `tfStart=0.69` 与它自述的“球密度 0.4–0.6、教堂 >0.65”和 PROJECT.md §6.2 的实测密度带不一致（PROJECT.md §6.2：球壳 0.60–0.78，教堂候选 ≤0.28）。这是 agent 自述与数据事实的冲突，记录在此，归因留给用户。
 - run a 用尽 30 次观测预算后仍尝试 `inspect_slice` 与 `render_scene`，各报一次预算耗尽错误；这是“预算语义”而不是模型崩溃。
 - 旧 run 的工具接口与今晚审计的 4 个工具一致（`inspect_scene` / `render_scene` / `inspect_slice` / `finish_task`）。
 
@@ -97,7 +98,7 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 - 03:26 之后的 T4/T1/T5 index 3 没有开始（预检在 8765 上失败），因此没有产生 run 目录。
 - 结论：以后后端必须由独立终端常驻，不能挂在 agent 的后台 shell 上；`run_batch.py` 的连续 3 次 infra 中止行为是正确的。
 
-**2026-10-29 03:44–04:13 续跑完成（9 个有效 run + 1 个 excluded）**
+**2026-10-29 03:44–04:20 续跑完成（9 个有效 run + 1 个 excluded）**
 
 | run | 调用数 | 墙钟 | 声明 | 备注 |
 |---|---:|---:|---|---|
@@ -106,10 +107,10 @@ Show me the chaple in the ball-like present inside the box - make the box invisi
 | T1-3 `run-20261029-035014-611271` | 42 | 23.1 min | PARTIAL | 3 次工具错误；超出 40 次软上限；裁剪切掉了部分骨，图不完整 |
 | T5-3 `run-20261029-041324-f8ffcf` | 16 | 6.8 min | CANNOT | 结论“没有心脏”正确，但把数据说成 hand/wrist（实际是 foot）；R2/R1 由你定 |
 
-**T1-3 的 3 次错误是 `interface_ambiguity`，不是模型乱来**：模型三次给 `translation` 传了 `[0,0,-30]`、`[0,0,-10]`、`[0,0,-5]`，服务端按 `-2..2` 的范围拒绝，返回 `Invalid bounded numeric vector`。工具描述里没有写 translation 的范围/单位/归一化（`11-tool-audit.md` §0.3、§4），这是审计里已经标出的高危项；这 3 次失败应归 `interface_ambiguity`，修法是把范围写进工具描述。
+**T1-3 的 3 次错误是 `interface_ambiguity`，不是模型乱来**：模型三次给 `translation` 传了 `[0,0,-30]`、`[0,0,-10]`、`[0,0,-5]`，服务端按 `-2..2` 的范围拒绝，返回 `Invalid bounded numeric vector`。工具描述里没有写 translation 的范围/单位/归一化（`docs/PROJECT.md` §5.3），这是审计里已经标出的高危项；这 3 次失败应归 `interface_ambiguity`，修法是把范围写进工具描述。
 
 **T1-3 的 42 次调用**：超过 brief 的“40 次工具调用”软上限，但本仓 harness 没有调用次数上限（`CONFIG.md §3`），所以它跑完了，墙钟 23.1 min 仍在 30 min 内。这属于 `model:persistence`/探索策略，不是 infra；保留为数据点。
 
-**T5-3 的肢体误判**：`REASON` 说 “hand/wrist skeletal anatomy (finger bones, carpals)”，而数据是脚。它抓住了“没有心脏”这个正确结论，但身体部位识别错误。按 5.2 的 R 级定义，R2 要求原因与“报告证据要点”一致（数据是脚、不含胸部结构）；这条至少要在评分时标注为“结论对、证据部分错”。
+**T5-3 的肢体误判**：`REASON` 说 “hand/wrist skeletal anatomy (finger bones, carpals)”，而数据是脚。它抓住了“没有心脏”这个正确结论，但身体部位识别错误。按 `docs/PROJECT.md` §4.4 的 R 级定义，R2 要求原因与“报告证据要点”一致（数据是脚、不含胸部结构）；这条至少要在评分时标注为“结论对、证据部分错”。
 
 

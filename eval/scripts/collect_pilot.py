@@ -218,7 +218,7 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Aggregate pilot runs into the doc, CSV and montage.')
     parser.add_argument('--runs-root', default=str(pc.EVAL / 'runs' / 'pilot'))
-    parser.add_argument('--doc', default=str(pc.ROOT / 'docs' / 'improvement' / '12-pilot-v0.md'))
+    parser.add_argument('--doc', default=str(pc.EVAL / 'results' / 'pilot_v0.md'))
     parser.add_argument('--csv', default=str(pc.EVAL / 'results' / 'pilot_v0_runs.csv'))
     parser.add_argument('--montage', default=str(pc.EVAL / 'results' / 'pilot_v0_montage.png'))
     args = parser.parse_args(argv)

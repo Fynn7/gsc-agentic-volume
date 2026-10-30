@@ -28,7 +28,7 @@
 | 限制 | 实际值 | 能否由 harness 强制 | 备注 |
 |---|---|---|---|
 | 观测预算 `renderBudget` | **30** | 是 | 只计 `render_scene` 与 `inspect_slice`（`src/external_tools.py:116-126,136`）；`inspect_scene`/`finish_task` 不计数。schema 与 launcher 都把上限锁在 30（`src/external_tools.py:63`、`scripts/run_lifecycle.py:276-278`） |
-| 工具调用总数 40 | **无法强制** | 否 | 本仓没有任何按调用次数中止的机制；`run_pilot.py` 只在事后统计。与 impl-plan §3.3 的“40 次”不一致，今晚按“只限墙钟并注明”执行 |
+| 工具调用总数 40 | **无法强制** | 否 | 本仓没有任何按调用次数中止的机制；`run_pilot.py` 只在事后统计。与 `docs/PROJECT.md` §4.5 的“40 次软上限”不一致，当次 pilot 按“只限墙钟并注明”执行 |
 | 单次墙钟 | **1800 s（30 min）** | 由 `eval/scripts/run_pilot.py` 外部强制 | launcher 明确没有 task timeout（`scripts/run_local_agent.py:334-335`；`scripts/run_lifecycle.py:270-275` 只校验不执行）。到时由 run_pilot 写 stop 文件，再不行 kill 进程树 |
 | 单帧渲染 | 60 s 硬超时 | 渲染器内部 | `src/renderer.py:188`；超时表现为工具错误，不是“继续等待” |
 
@@ -37,7 +37,7 @@
 ## 4. 干净起点与状态
 
 - 每个 run 由 launcher 新开一个 session（`scripts/run_local_agent.py:263`），初始 scene 固定为 `src/renderer.py:93`：`tfStart=0.1`、`tfWidth=0.12`、`rotationXYZ=[0,0,0]`、`translation=[0,0,0]`、crop=全体积、正交投影、512×512。
-- 本仓**没有** `reset_state` 工具；run 内无法重置或撤销单次改动（见 `docs/improvement/11-tool-audit.md`）。因此“干净起点”只能靠每个 run 新 session 实现，run 之间不复用 session。
+- 本仓**没有** `reset_state` 工具；run 内无法重置或撤销单次改动（见 `docs/PROJECT.md` §5.3）。因此“干净起点”只能靠每个 run 新 session 实现，run 之间不复用 session。
 - 截图分辨率固定 512×512（`src/renderer.py:122-123`）。
 
 ## 5. 条件与目录
@@ -60,7 +60,7 @@ eval/runs/pilot/<condition>/<task>/_launch-configs/*.json   # run_pilot 生成�
 
 ## 6. 云端条件为什么没接
 
-当前 launcher 只实现本地 Ollama 路线：`validate_config` 要求 `harness=codex` 且模型名不得含 `:cloud`（`scripts/run_lifecycle.py:246-251`），`execute()` 用 `OllamaDriver.inventory()` 校验本地已安装且带 vision 的模型（`scripts/run_local_agent.py:258-259`），并主动清掉 `OPENAI_API_KEY` 等环境变量（`scripts/run_local_agent.py:280-282`）。接云端需要改 harness/provider 配置，属于“改工具/脚手架”，今晚不做。tonight-brief P5 的云端 4 次 run 因此不执行，状态报告里如实记录。
+当前 launcher 只实现本地 Ollama 路线：`validate_config` 要求 `harness=codex` 且模型名不得含 `:cloud`（`scripts/run_lifecycle.py:246-251`），`execute()` 用 `OllamaDriver.inventory()` 校验本地已安装且带 vision 的模型（`scripts/run_local_agent.py:258-259`），并主动清掉 `OPENAI_API_KEY` 等环境变量（`scripts/run_local_agent.py:280-282`）。接云端需要改 harness/provider 配置，属于“改工具/脚手架”，当次 pilot 不做；brief 里的云端 4 次 run 因此未执行。现状与放宽 G8 的约束见 `docs/PROJECT.md` §5.7。
 
 ## 7. 已知环境事实（2026-10-29 00:xx 本地）
 
@@ -81,17 +81,17 @@ eval/runs/pilot/<condition>/<task>/_launch-configs/*.json   # run_pilot 生成�
 | T6 | `volumes/skull.dat` | 明显不可解（需核实） | held-out | `eval/tasks/T6/prompt.txt` |
 | T7 | `volumes/present246x246x221.dat` | 隐蔽不可解 | held-out | `eval/tasks/T7/prompt.txt` |
 
-T7 prompt 采用旧 run 的原文（含原拼写 `chaple`），**不是** tonight-brief 里改写后的版本：
+T7 prompt 采用旧 run 的原文（含原拼写 `chaple`），**不是** 当次 brief 里改写后的版本：
 
 ```text
 Show me the chaple in the ball-like present inside the box - make the box invisible and the ball invisible, only make the chapel visible
 ```
 
-理由：tonight-brief P3.1 明确“T7 若与之前教堂测试 run 用的措辞不同，以之前的为准”，且复用旧 run 时 prompt 必须一致。
+理由：当次 brief 的 P3.1 明确“T7 若与之前教堂测试 run 用的措辞不同，以之前的为准”，且复用旧 run 时 prompt 必须一致（`docs/PROJECT.md` §4.3 同样固定此原文）。
 
 ## 9. 今晚不做什么
 
 - 不改 `src/` 渲染引擎与服务行为；不改 `scripts/renderer_mcp.py`、`scripts/run_local_agent.py` 的工具面。
 - 不新增工具（`set_lighting`、`reset_state`、分析工具、`isolate_nodes` 均不做）。
 - 不写评委脚本、κ 计算；不做 T2/T3/T6 的模型 run。
-- 不改 `docs/improvement/02-dataset-facts.md §6` 的真值 JSON。
+- 不恢复已作废的真值 JSON 流程（见 `docs/PROJECT.md` §8 HD3、HD6）。

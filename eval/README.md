@@ -1,6 +1,6 @@
 # eval — pilot 基础设施
 
-固定项见 `eval/CONFIG.md`；工具边界见 `docs/improvement/11-tool-audit.md`；pilot 记录见 `docs/improvement/12-pilot-v0.md`。
+固定项见 `eval/CONFIG.md`；工具边界见 `docs/PROJECT.md` §5.3；pilot 记录见 `eval/results/pilot_v0.md`。
 
 ## 目录
 
@@ -16,7 +16,7 @@ eval/
   scripts/sweep_tf.py        # T1 阈值扫描 + 联系表（不调模型）
   scripts/collect_pilot.py   # 汇总表 + CSV + 拼图
   runs/pilot/<condition>/<task>/run-*/   # 原始证据（git 忽略 http/workspace/codex-home）
-  results/                   # pilot_v0_runs.csv / pilot_v0_montage.png
+  results/                   # pilot_v0.md（汇总表）/ pilot_v0_runs.csv / pilot_v0_montage.png
 ```
 
 ## 命令
@@ -59,5 +59,5 @@ $py = "runtime\tui-venv\Scripts\python.exe"
 - `run_pilot.py` 退出码：`0` 已产生 run 目录（模型好坏都算 0）、`2` 预检失败、`3` infra 失败（没有 run 目录）。
 - `meta.json` 的 `infraCandidate=true` 表示没有观察到任何工具调用；不要当模型失败。
 - `claim.json` 的 `basis=missing` 表示终局没有 STATUS 格式，按 `status: NONE` 记录，不重跑。
-- 评分的人看 `final.png` 与 `docs/improvement/12-pilot-v0.md`；不要看 `claim.json` 以免锚定（正式评测才要求盲评，pilot 不盲评）。
+- 评分的人看 `final.png` 与 `eval/results/pilot_v0.md`；不要看 `claim.json` 以免锚定（正式评测才要求盲评，pilot 不盲评）。
 - `eval/runs/**/http/`、`workspace/`、`codex-home/` 是本地大文件，已 git 忽略；`trace.jsonl`/`meta.json`/`claim.json`/`final.png`/`final_message.txt` 会被提交（除非体积异常）。
